@@ -1,6 +1,7 @@
 import SwiftUI
 
 enum Selection: Hashable {
+    case home
     case settings
     case draft(String)
     case run(String)
@@ -12,6 +13,7 @@ enum Selection: Hashable {
     /// 고정된 화면만 복원한다.
     var stored: String {
         switch self {
+        case .home: "home"
         case .settings: "settings"
         case .log: "log"
         case .draft(let id): "draft:\(id)"
@@ -23,6 +25,7 @@ enum Selection: Hashable {
 
     static func restore(_ raw: String?) -> Selection? {
         switch raw {
+        case "home": .home
         case "settings": .settings
         case "log": .log
         default: nil
@@ -33,7 +36,7 @@ enum Selection: Hashable {
 struct DashboardView: View {
     @Environment(BotStore.self) private var store
     @Environment(Prefs.self) private var prefs
-    @State private var selection: Selection? = .log
+    @State private var selection: Selection? = .home
     @State private var didLandOnDraft = false
     @State private var expanded: Set<String> = []
     @State private var didSeedExpansion = false
@@ -181,6 +184,8 @@ struct DashboardView: View {
 
     private var sidebar: some View {
         List(selection: $selection) {
+            Label("홈", systemImage: "house").tag(Selection.home)
+
             if !store.live.isEmpty {
                 Section("라이브 세션") {
                     ForEach(store.live) { s in
@@ -382,8 +387,10 @@ struct DashboardView: View {
         case .pending(let id):
             if let p = store.status?.pending.first(where: { $0.id == id }) { PendingDetailView(pr: p) }
             else { ContentUnavailableView("목록에서 사라졌습니다", systemImage: "tray") }
-        case .log, .none:
+        case .log:
             LogPaneView()
+        case .home, .none:
+            HomePaneView(selection: $selection)
         }
     }
 }

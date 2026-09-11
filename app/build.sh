@@ -13,6 +13,11 @@ swift build -c "$CONFIG"
 echo "▸ 번들 조립"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+
+# 아이콘. 그리는 코드는 icon/make-icon.swift 에 있다 (외부 도구 없이 CoreGraphics).
+if [ -f icon/ReviewBot.icns ]; then
+  cp icon/ReviewBot.icns "$APP/Contents/Resources/ReviewBot.icns"
+fi
 cp "$BIN" "$APP/Contents/MacOS/ReviewBot"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
@@ -24,6 +29,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleDisplayName</key>       <string>review-bot</string>
   <key>CFBundleIdentifier</key>        <string>com.review-bot.app</string>
   <key>CFBundleExecutable</key>        <string>ReviewBot</string>
+  <key>CFBundleIconFile</key>          <string>ReviewBot</string>
   <key>CFBundlePackageType</key>       <string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleVersion</key>           <string>1</string>
