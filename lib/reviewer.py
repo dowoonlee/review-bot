@@ -85,7 +85,22 @@ def _context_block(ctx):
     return "\n".join(out).strip()
 
 
-def build_prompt(agent_name, meta, files, ctx=None):
+def _roster_block(agent_name, roster):
+    """이 PR 을 함께 보는 리뷰어 명단.
+
+    "보안은 security-reviewer 에게" 같은 위임을 정의 파일에 적어 두면, 그 리뷰어가
+    없는 기계에서는 넘긴 지적이 아무에게도 가지 않고 사라진다. 누가 같이 도는지는
+    실행할 때만 알 수 있으므로 여기서 알려 준다 — 그래야 정의 파일이 환경에
+    매이지 않는다.
+    """
+    others = [n for n in (roster or []) if n != agent_name]
+    if not others:
+        return ("**당신 혼자입니다.** 다른 관점의 리뷰어는 이 PR 을 보지 않습니다.")
+    return ("당신(**%s**) 말고 이들이 각자의 관점으로 같은 PR 을 봅니다:\n%s"
+            % (agent_name, "\n".join("- %s" % n for n in others)))
+
+
+def build_prompt(agent_name, meta, files, ctx=None, roster=None):
     # 에이전트 정의에서 가져오는 것은 역할뿐이다. frontmatter 의 model 은 무시한다
     # — 봇이 쓰는 모델은 config 한 곳에서만 정한다. 본문에서도 헤드리스에서 못 할
     # 지시(reports 작성, lead 보고, 사용자 결정 대기)는 role() 이 걷어낸다.
@@ -110,7 +125,8 @@ def build_prompt(agent_name, meta, files, ctx=None):
         additions=meta.get("additions") or 0,
         deletions=meta.get("deletions") or 0,
         body=body, files_block=files_block,
-        context_block=_context_block(ctx))
+        context_block=_context_block(ctx),
+        roster_block=_roster_block(agent_name, roster))
     return prompt
 
 
@@ -125,7 +141,7 @@ def review(meta, files, agent_names, cwd, model=None, max_turns=60, timeout=900,
     여유가 없는 기계에서는 동시에 띄우다 OOM 으로 죽는다. 그때 순차로 내린다.
     """
     def one(name):
-        prompt = build_prompt(name, meta, files, ctx)
+        prompt = build_prompt(name, meta, files, ctx, agent_names)
         payload = _run(prompt, cwd, cfg_mod.model_for(model, name),
                        max_turns, timeout, name)
         for f in payload.get("findings") or []:
