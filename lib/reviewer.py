@@ -12,6 +12,7 @@ import os
 import re
 import signal
 import subprocess
+import threading
 
 from lib import agents as agents_mod
 from lib import config as cfg_mod
@@ -35,6 +36,41 @@ STATE_DIR = os.path.join(ROOT, "state")
 #   --strict-mcp-config  MCP 서버를 전부 빼 버린다 — Notion·Gmail 같은 반출 통로 차단
 ALLOWED_TOOLS = "Read,Grep,Glob"
 HARDENING = ["--restricted", "--strict-mcp-config"]
+
+
+# 지금 돌고 있는 claude 프로세스들.
+#
+# 자식은 `start_new_session=True` 로 자기 프로세스 그룹에 띄운다 — 시간 초과 때
+# claude 가 띄운 손자까지 그룹째 죽이려고 그렇게 한다. 그 대가로, 부모가 신호를
+# 받고 죽으면 자식은 따라 죽지 않고 고아로 남는다. 실제로 launchd 가 구 등록을
+# 정리하며 틱을 죽였을 때 리뷰어들이 끝까지 살아 돌았고, 그 잔여 세션 때문에
+# 같은 PR 이 두 번 리뷰된 것처럼 보였다.
+#
+# 그래서 띄운 것을 여기 적어 두고, 죽을 때 한꺼번에 정리한다. 병렬 실행에서는
+# 워커 스레드의 finally 를 믿을 수 없다 — 파이썬 신호는 메인 스레드에서만
+# 처리되므로, communicate() 로 대기 중인 워커는 깨어나지 못한다.
+_LIVE = set()
+_LIVE_LOCK = threading.Lock()
+
+
+def kill_children(sig=signal.SIGKILL):
+    """띄워 둔 claude 를 전부 정리한다 — (죽인 개수)."""
+    with _LIVE_LOCK:
+        procs = list(_LIVE)
+    n = 0
+    for proc in procs:
+        if proc.poll() is not None:
+            continue
+        try:
+            os.killpg(os.getpgid(proc.pid), sig)
+            n += 1
+        except OSError:
+            try:
+                proc.kill()
+                n += 1
+            except OSError:
+                pass
+    return n
 
 
 class ReviewError(Exception):
@@ -193,6 +229,8 @@ def _invoke(cmd, prompt, cwd, timeout):
                                 stderr=subprocess.PIPE, start_new_session=True)
     except OSError as e:
         raise ReviewError("claude 실행 실패: %s" % e)
+    with _LIVE_LOCK:
+        _LIVE.add(proc)
     try:
         out, err = proc.communicate(input=prompt, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -201,6 +239,9 @@ def _invoke(cmd, prompt, cwd, timeout):
     except BaseException:
         _kill_group(proc)                # 봇이 중단돼도 자식을 남기지 않는다
         raise
+    finally:
+        with _LIVE_LOCK:
+            _LIVE.discard(proc)
     return out or "", err or "", proc.returncode
 
 

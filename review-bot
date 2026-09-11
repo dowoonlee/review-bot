@@ -15,6 +15,7 @@ import json
 import os
 import plistlib
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -840,10 +841,33 @@ def cmd_cap(args, cfg):
     return 0
 
 
+def _log_day_break():
+    """날짜가 바뀌면 로그에 구분선을 남긴다.
+
+    bot.log 는 시각만 찍는다. 그래서 어제 16:29 줄과 오늘 16:20 줄이 나란히 놓이면
+    눈으로 구분할 수 없고, 실제로 어제 에러를 오늘 것으로 읽는 일이 있었다.
+    """
+    today = time.strftime("%Y-%m-%d")
+    marker = os.path.join(store.STATE_DIR, ".logday")
+    try:
+        with open(marker, encoding="utf-8") as f:
+            if f.read().strip() == today:
+                return
+    except OSError:
+        pass
+    print("───────────────── %s ─────────────────" % today, flush=True)
+    try:
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write(today)
+    except OSError:
+        pass
+
+
 def cmd_tick(args, cfg):
     # launchd 가 띄운 틱만 타이머 기준점이 된다 — 손으로 부른 틱은 launchd 의 시계와
     # 무관하다. stdout 이 bot.log 로 리다이렉트돼 있으면 launchd 가 띄운 것이다.
     if _same_file_as_stdout(store.LOG_TEXT):
+        _log_day_break()
         store.set_schedule_anchor("launchd-tick", _interval_sec())
     if store.is_paused():
         _log("일시정지 상태입니다 (state/PAUSED). `review-bot resume` 으로 해제하세요.")
@@ -1769,7 +1793,35 @@ def cmd_doctor(args, cfg):
     return 0 if ok else 1
 
 
+def _install_signal_handlers():
+    """SIGTERM·SIGHUP 을 받으면 자식을 정리하고 나간다.
+
+    기본 동작은 즉시 종료라 finally 가 돌지 않는다. 그러면 별도 프로세스 그룹에
+    띄운 claude 가 고아로 남아 끝까지 돈다 — launchd 가 틱을 정리할 때 실제로
+    그랬다. 여기서 먼저 자식을 죽이고, lock 도 놓고 나간다.
+    """
+    def bye(signum, _frame):
+        killed = reviewer.kill_children()
+        _log("신호 %d 를 받아 정리하고 종료합니다%s"
+             % (signum, " — 리뷰어 %d개 종료" % killed if killed else ""))
+        try:
+            store.release_lock()
+        except OSError:
+            pass
+        # 기본 처리로 되돌려 놓고 자신에게 다시 보낸다. 종료 코드가 신호를 그대로
+        # 반영해야 launchd 가 왜 죽었는지 안다.
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        try:
+            signal.signal(sig, bye)
+        except (ValueError, OSError):
+            pass                 # 메인 스레드가 아니면 걸 수 없다 — 그냥 넘어간다
+
+
 def main():
+    _install_signal_handlers()
     ap = argparse.ArgumentParser(prog="review-bot", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", help="설정 파일 경로")
