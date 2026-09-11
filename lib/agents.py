@@ -81,13 +81,25 @@ def role(name):
 
 
 def _strip_sections(body, drop=DROP_SECTIONS):
-    """h1 섹션 단위로 잘라낸다. 코드 블록 안의 `# ` 는 헤더로 보지 않는다."""
-    out, keep, fenced = [], True, False
+    """h1 섹션 단위로 잘라낸다. 코드 블록 안의 `# ` 는 헤더로 보지 않는다.
+
+    HTML 주석도 걷어낸다 — 정의 파일의 주석은 그 파일을 읽는 사람에게 하는 말이지
+    리뷰어에게 줄 지시가 아니다.
+    """
+    out, keep, fenced, in_comment = [], True, False, False
     for line in body.splitlines():
+        if in_comment:
+            in_comment = "-->" not in line
+            continue
+        stripped = line.strip()
         if line.lstrip().startswith("```"):
             fenced = not fenced
-        elif not fenced and line.startswith("# "):
-            keep = line[2:].strip() not in drop
+        elif not fenced:
+            if stripped.startswith("<!--"):
+                in_comment = "-->" not in stripped
+                continue
+            if line.startswith("# "):
+                keep = line[2:].strip() not in drop
         if keep:
             out.append(line)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
