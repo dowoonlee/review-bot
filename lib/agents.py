@@ -73,11 +73,26 @@ def parse(path):
 
 def role(name):
     """봇 프롬프트에 끼울 역할 정의 — 헤드리스에서 못 할 지시는 걷어낸 본문."""
-    _, body = load(name)
+    return role_from(os.path.join(AGENTS_DIR, name + ".md")) if os.path.exists(
+        os.path.join(AGENTS_DIR, name + ".md")) else _raise_missing(name)
+
+
+def role_from(path):
+    """아무 경로의 정의에서 **봇이 실제로 쓰는 부분**만 뽑는다.
+
+    두 정의가 같은지 볼 때도 이 결과를 비교해야 한다. 대화형 세션용 섹션이
+    다른 것은 봇 동작과 무관하고, 그걸 차이로 세면 정작 봐야 할 차이가 묻힌다.
+    """
+    _, body = parse(path)
     trimmed = _strip_sections(body)
     # 통째로 비면 우리가 모르는 형식이라는 뜻이다. 빈 역할로 리뷰를 돌리느니
     # 군더더기째 넘긴다.
     return trimmed or body
+
+
+def _raise_missing(name):
+    raise AgentError("에이전트 정의가 없습니다: %s"
+                     % os.path.join(AGENTS_DIR, name + ".md"))
 
 
 def _strip_sections(body, drop=DROP_SECTIONS):

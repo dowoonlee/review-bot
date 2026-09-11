@@ -1364,10 +1364,10 @@ def cmd_setup(args, cfg):
             src = os.path.join(BUNDLED_AGENTS, fn)
             dest = os.path.join(agents_mod.AGENTS_DIR, fn)
             if os.path.exists(dest) and not args.force:
-                same = _same_file(src, dest)
+                same = _same_role(src, dest)
                 steps.append("리뷰어 %s — 이미 있어 건너뜀%s" % (
                     fn[:-3], "" if same else
-                    " · **번들과 내용이 다릅니다** (`review-bot agent diff` 로 확인)"))
+                    " · **봇이 읽는 내용이 번들과 다릅니다** (`agent diff` 로 확인)"))
                 continue
             shutil.copyfile(src, dest)
             steps.append("리뷰어 %s → %s" % (fn[:-3], dest))
@@ -1510,7 +1510,7 @@ def cmd_agent(args, cfg):
             raise SystemExit("설치된 정의가 없습니다: %s" % src)
         os.makedirs(BUNDLED_AGENTS, exist_ok=True)
         dest = os.path.join(BUNDLED_AGENTS, name + ".md")
-        if os.path.exists(dest) and _same_file(src, dest):
+        if os.path.exists(dest) and _same_role(src, dest):
             print("이미 같습니다: %s" % dest)
             return 0
         shutil.copyfile(src, dest)
@@ -1531,11 +1531,20 @@ def cmd_agent(args, cfg):
                 print("%-24s 번들에 없음 (배포판은 이 리뷰어를 들고 가지 않습니다)" % name)
             elif not os.path.exists(src):
                 print("%-24s 설치본 없음 — `review-bot setup` 이 깝니다" % name)
-            elif _same_file(src, dest):
+            elif _same_role(src, dest):
                 print("%-24s 같음 ✓" % name)
             else:
-                print("%-24s **다름** — `review-bot agent export %s` 로 번들에 반영"
-                      % (name, name))
+                print("%s — 봇이 읽는 내용이 다릅니다" % name)
+                a, b = _role_map(src), _role_map(dest)
+                for sec in sorted(set(a) | set(b)):
+                    if sec not in b:
+                        print("    %-16s 설치본에만 있음" % sec)
+                    elif sec not in a:
+                        print("    %-16s 번들에만 있음" % sec)
+                    elif a[sec] != b[sec]:
+                        print("    %-16s 내용이 다름 (설치본 %d자 · 번들 %d자)"
+                              % (sec, len(a[sec]), len(b[sec])))
+                print("    설치본을 번들로 옮기려면: review-bot agent export %s" % name)
                 drift += 1
         if not names:
             print("번들에 리뷰어가 없습니다.")
@@ -1550,12 +1559,33 @@ def cmd_agent(args, cfg):
     return 1
 
 
-def _same_file(a, b):
+def _same_role(a, b):
+    """봇이 실제로 읽는 부분이 같은가.
+
+    파일 전체를 비교하면 대화형 세션용 섹션이 다르다는 이유로 늘 "다름" 이 뜬다.
+    그것은 의도된 차이라 경고가 되면 신호가 죽는다. 봇 동작이 갈리는 차이만 센다.
+    """
     try:
-        with open(a, "rb") as f1, open(b, "rb") as f2:
-            return f1.read() == f2.read()
-    except OSError:
+        return agents_mod.role_from(a) == agents_mod.role_from(b)
+    except (agents_mod.AgentError, OSError):
         return False
+
+
+def _role_map(path):
+    """봇이 읽는 부분을 {섹션 이름: 내용} 으로. 어디가 갈렸는지 짚어 주려면
+    파일 전체가 아니라 섹션 단위로 봐야 한다."""
+    out, cur = {}, None
+    try:
+        text = agents_mod.role_from(path)
+    except (agents_mod.AgentError, OSError):
+        return {}
+    for line in text.splitlines():
+        if line.startswith("# "):
+            cur = line[2:].strip()
+            out[cur] = []
+        elif cur:
+            out[cur].append(line)
+    return {k: "\n".join(v).strip() for k, v in out.items()}
 
 
 def _set_agent_model(raw, name, model, path):
