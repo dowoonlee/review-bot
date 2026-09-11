@@ -67,17 +67,33 @@ final class BotStore {
     // MARK: 로컬 파일
 
     /// 파일이 짧아졌으면(회전·재생성) 처음부터 다시 읽는다.
-    private func newBytes(_ url: URL, offset: inout UInt64) -> Data? {
+    /// 파일에 새로 붙은 부분.
+    ///
+    /// `restarted` 는 파일이 잘렸거나 비워졌거나 사라졌다는 뜻이다 — 갖고 있던
+    /// 것을 버리고 처음부터 다시 읽어야 한다. 이것을 알려 주지 않으면, 이력을
+    /// 지워 파일이 비어도 새로 붙은 바이트가 없다는 이유로 화면이 그대로 남는다.
+    private struct Appended { var data: Data; var restarted: Bool }
+
+    private func newBytes(_ url: URL, offset: inout UInt64) -> Appended? {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let size = (attrs[.size] as? NSNumber)?.uint64Value else { return nil }
-        if size < offset { offset = 0 }
-        guard size > offset else { return nil }
+              let size = (attrs[.size] as? NSNumber)?.uint64Value else {
+            // 파일이 사라졌다. 들고 있던 것이 있으면 비우라고 알린다.
+            guard offset > 0 else { return nil }
+            offset = 0
+            return Appended(data: Data(), restarted: true)
+        }
+        var restarted = false
+        if size < offset { offset = 0; restarted = true }
+        guard size > offset else {
+            return restarted ? Appended(data: Data(), restarted: true) : nil
+        }
         guard let fh = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? fh.close() }
         try? fh.seek(toOffset: offset)
         let data = (try? fh.readToEnd()) ?? Data()
+        let from = offset
         offset = size
-        return data.isEmpty ? nil : data
+        return Appended(data: data, restarted: restarted || from == 0)
     }
 
     func refreshLocal() {
@@ -168,10 +184,10 @@ final class BotStore {
     }
 
     private func readRuns() {
-        guard let data = newBytes(BotPaths.runsLog, offset: &runsOffset) else { return }
-        if runsOffset == UInt64(data.count) { runs.removeAll() }   // 처음부터 읽은 경우
+        guard let tail = newBytes(BotPaths.runsLog, offset: &runsOffset) else { return }
+        if tail.restarted { runs.removeAll() }
         let dec = JSONDecoder()
-        for line in data.split(separator: UInt8(ascii: "\n")) where !line.isEmpty {
+        for line in tail.data.split(separator: UInt8(ascii: "\n")) where !line.isEmpty {
             if let r = try? dec.decode(RunRecord.self, from: Data(line)) { runs.append(r) }
         }
         runs.sort { ($0.at ?? "") > ($1.at ?? "") }
@@ -196,8 +212,9 @@ final class BotStore {
 
     private func readLog() {
         scanLogDays()
-        guard let data = newBytes(BotPaths.dayLog(logDay), offset: &logOffset) else { return }
-        if logOffset == UInt64(data.count) { logLines.removeAll() }
+        guard let tail = newBytes(BotPaths.dayLog(logDay), offset: &logOffset) else { return }
+        if tail.restarted { logLines.removeAll() }
+        let data = tail.data
         let text = String(decoding: data, as: UTF8.self)
         for raw in text.split(separator: "\n", omittingEmptySubsequences: true) {
             let s = String(raw)
@@ -308,7 +325,10 @@ final class BotStore {
         var offset = sessionOffsets[url.path] ?? 0
         let fresh = newBytes(url, offset: &offset)
         sessionOffsets[url.path] = offset
-        guard let data = fresh else { return sessionCache[url.path] }
+        guard let tail = fresh else { return sessionCache[url.path] }
+        let data = tail.data
+        // 세션 파일이 새로 시작됐으면 쌓아 둔 턴 수는 의미가 없다.
+        if tail.restarted { sessionCache[url.path] = nil }
 
         var s = sessionCache[url.path] ?? LiveSession(
             id: url.path, agent: "?", pr: pr.replacingOccurrences(of: "__", with: "/"),
