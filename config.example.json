@@ -1,0 +1,53 @@
+{
+  "repos": {
+    "owner/repo": {
+      "localPath": "~/dev/repo",
+      "enabled": true
+    }
+  },
+  "review": {
+    "agents": [
+      "code-reviewer"
+    ],
+    "model": "sonnet",
+    "maxTurns": 0,
+    "timeoutSec": 3600,
+    "maxDiffLines": 1500,
+    "maxChangedFiles": 40,
+    "skipDrafts": true,
+    "rereviewOnNewCommits": true,
+    "includeExts": [],
+    "excludeGlobs": [
+      "package-lock.json",
+      "yarn.lock",
+      "dist/",
+      ".min.js"
+    ],
+    "verify": {
+      "enabled": true,
+      "model": "haiku",
+      "timeoutSec": 300,
+      "maxTurns": 15,
+      "workers": 4
+    }
+  },
+  "post": {
+    "dryRun": true,
+    "maxFindingsPerPR": 15,
+    "minSeverity": "nit",
+    "autonomous": true,
+    "allowedEvents": [
+      "COMMENT",
+      "APPROVE",
+      "REQUEST_CHANGES"
+    ],
+    "judgeModel": "opus"
+  },
+  "limits": {
+    "maxPerTick": 2
+  },
+  "notify": {
+    "enabled": true,
+    "sound": "Glass"
+  }
+}

@@ -1,0 +1,1782 @@
+#!/usr/bin/env python3
+"""review-bot — 나에게 온 리뷰 요청을 감시하다가 자동으로 리뷰를 달아 주는 봇.
+
+  tick     한 번 훑는다. launchd 가 이걸 주기적으로 부른다.
+  review   PR 하나를 지금 리뷰한다 (감시와 무관하게 수동으로).
+  status   지금 상태 — 대기 중인 리뷰 요청, 처리 이력, 일시정지 여부.
+  runs     최근 실행 이력.
+  gc       부산물 정리 — 워크트리·claude 세션·초안·이력·로그.
+  pause    자동 게시를 멈춘다.  resume  다시 켠다.
+  interval 틱 주기(분) 조회·변경.   cap  틱당 리뷰 상한(건) 조회·변경.
+  doctor   의존성·인증·설정 점검.
+"""
+import argparse
+import json
+import os
+import plistlib
+import shutil
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from lib import agents as agents_mod
+from lib import config as cfg_mod
+from lib import github as gh
+from lib import janitor
+from lib import notify
+from lib import reviewer
+from lib import store
+from lib import worktree
+
+SEV = cfg_mod.SEVERITY_ORDER
+MARKER = "<!-- review-bot -->"
+
+
+def _same_file_as_stdout(path):
+    """stdout 이 이미 그 파일인가 (launchd 가 리다이렉트한 경우)."""
+    try:
+        a = os.fstat(sys.stdout.fileno())
+        b = os.stat(path)
+        return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+    except (OSError, ValueError):
+        return False
+
+
+def _log(msg):
+    line = "%s %s" % (time.strftime("%H:%M:%S"), msg)
+    try:
+        print(line, flush=True)
+    except (BrokenPipeError, OSError):
+        # 읽던 쪽이 사라졌다고 리뷰가 죽어서는 안 된다. 앱이 종료되며 파이프가 끊겨
+        # 판정 단계에서 리뷰 한 건이 통째로 날아간 적이 있다 — 기록은 아래에 남긴다.
+        pass
+    # launchd 로 뜨면 stdout 이 곧 bot.log 라 그대로 두면 되지만, 터미널이나 앱에서
+    # 부르면 아무 데도 남지 않는다 — 앱의 "지금 틱" 으로 돈 리뷰가 로그에서 통째로
+    # 사라졌다. 같은 파일이 아닐 때만 덧붙인다.
+    if _same_file_as_stdout(store.LOG_TEXT):
+        return
+    try:
+        with open(store.LOG_TEXT, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def _skip_file(name, review_cfg):
+    for g in review_cfg.get("excludeGlobs") or []:
+        if g in name:
+            return True
+    exts = review_cfg.get("includeExts") or []
+    if exts and not any(name.endswith(e) for e in exts):
+        return True
+    return False
+
+
+def _snap_line(line, postable, tolerance=3):
+    """모델이 준 라인이 diff 밖이면 가까운 코멘트 가능 라인으로 당긴다.
+
+    한두 줄 어긋났다고 맞는 지적을 버리긴 아깝고, 멀리 떨어진 걸 억지로 붙이면
+    엉뚱한 코드에 코멘트가 달린다. 그래서 좁은 허용 범위만 둔다.
+    """
+    if not line or not postable:
+        return None
+    if line in postable:
+        return line
+    near = [p for p in postable if abs(p - line) <= tolerance]
+    return min(near, key=lambda p: (abs(p - line), p)) if near else None
+
+
+def _validate(findings, files_by_path, post_cfg):
+    """모델이 준 findings 를 (inline 가능, 요약으로 강등) 으로 가른다."""
+    min_sev = SEV.get(post_cfg.get("minSeverity") or "nit", 1)
+    inline, demoted, seen = [], [], set()
+
+    for f in findings:
+        if not isinstance(f, dict):
+            continue
+        title = (f.get("title") or "").strip()
+        body = (f.get("body") or "").strip()
+        if not title or not body:
+            continue
+        sev = (f.get("severity") or "suggestion").lower()
+        if sev not in SEV:
+            sev = "suggestion"
+        if SEV[sev] < min_sev:
+            continue
+        f = dict(f, severity=sev, title=title, body=body)
+
+        path = (f.get("path") or "").strip().lstrip("./")
+        entry = files_by_path.get(path)
+        if not entry:
+            f["_why"] = "변경 파일 목록에 없는 경로"
+            demoted.append(f)
+            continue
+
+        line = _snap_line(f.get("line"), entry["postable"])
+        if not line:
+            f["_why"] = "diff 밖의 라인"
+            demoted.append(f)
+            continue
+
+        key = (path, line, title[:60])
+        if key in seen:
+            continue
+        seen.add(key)
+        f["path"], f["line"] = path, line
+        inline.append(f)
+
+    order = {"blocking": 0, "suggestion": 1, "nit": 2, "altitude": 3}
+    inline.sort(key=lambda x: (order.get(x["severity"], 3), x["path"], x["line"]))
+    cap = post_cfg.get("maxFindingsPerPR") or 15
+    if len(inline) > cap:
+        demoted.extend(dict(x, _why="개수 상한 초과") for x in inline[cap:])
+        inline = inline[:cap]
+    return inline, demoted
+
+
+# 내부 severity → 리뷰 규칙의 우선순위 라벨. 모든 인라인 제목에 붙는다.
+SEV_LABEL = {"blocking": "P1", "suggestion": "P2", "nit": "P3", "altitude": "altitude"}
+# 봇은 코드를 읽기만 한다. 무엇을 안 했는지를 과장 없이 본문에 적는다.
+VERIFY_SCOPE = ("워크트리에서 head 커밋의 코드를 정독했습니다 (Read·Grep·Glob). "
+                "테스트 실행, 브라우저 검증, 라이브러리 실측은 하지 않았습니다.")
+
+
+def _label(f):
+    return SEV_LABEL.get(f.get("severity"), "P2")
+
+
+def _loc(f):
+    loc = f.get("path") or "-"
+    if f.get("line"):
+        loc += ":%s" % f["line"]
+    return loc
+
+
+def _comment_body(f):
+    body = f["body"]
+    if f.get("severity") == "altitude":
+        body = "_설계 대안 제시이며, 되돌리자는 제안이 아닙니다._\n\n" + body
+    return "%s\n**[%s]** %s\n\n%s" % (MARKER, _label(f), f["title"], body)
+
+
+EVENT_LABEL = {"APPROVE": "✅ Approve", "REQUEST_CHANGES": "🛑 Request changes",
+               "COMMENT": "💬 Comment"}
+
+
+def _summary_body(payload, inline, demoted, verdict=None, note=None):
+    """리뷰 규칙의 요약 본문 — 총 건수와 판정, 머지 전 처리 건, 나머지, 검증 범위."""
+    everything = inline + demoted
+    counts = {}
+    for f in everything:
+        counts[_label(f)] = counts.get(_label(f), 0) + 1
+    tally = " · ".join("%s %d" % (k, counts[k])
+                       for k in ("P1", "P2", "P3", "altitude") if counts.get(k))
+    verdict = verdict or {}
+    # 머리말은 두지 않는다 — 봇이 썼다는 사실은 꼬리말과 MARKER 로 충분하고,
+    # 판정은 GitHub 이 리뷰 이벤트로 이미 보여 준다. 본문은 내용부터 시작한다.
+    parts = [MARKER]
+    parts.append("**총 %d건 (%s)**" % (len(everything), tally or "지적 없음"))
+    if note:
+        # 같은 PR 에 리뷰가 또 올라오는 이유를 작성자가 첫 줄에서 알 수 있어야 한다.
+        parts += ["", "> ℹ️ %s" % note]
+    if verdict.get("reason"):
+        parts += ["", "> **판정** — %s" % verdict["reason"]]
+    if verdict.get("guard"):
+        # 판정이 안전장치에 걸려 내려갔으면 그 사실도 PR 작성자에게 보인다.
+        parts += ["> ⚠️ %s" % verdict["guard"]]
+
+    # 머지 전 처리가 필요한 건 — P1·P2 상위 3건. 작성자가 여기만 읽어도 순서가 선다.
+    must = [f for f in everything if f.get("severity") in ("blocking", "suggestion")][:3]
+    if must:
+        # P1 이 있으면 "필요", P2 뿐이면 "권장" — 판정(APPROVE)과 제목이 어긋나지 않게.
+        has_p1 = any(f.get("severity") == "blocking" for f in must)
+        parts += ["", "### 머지 전 처리가 %s 건" % ("필요한" if has_p1 else "권장되는"), ""]
+        for f in must:
+            where = "인라인 참고" if f in inline else f["body"].replace("\n", "\n  ")
+            parts.append("- **[%s]** `%s` — %s\n  %s" % (_label(f), _loc(f), f["title"], where))
+
+    if payload.get("summary"):
+        parts += ["", "### 리뷰어 요약", "", payload["summary"]]
+
+    rest = [f for f in demoted if f not in must]
+    if rest:
+        parts += ["", "### 나머지", ""]
+        for f in rest:
+            parts.append("- **[%s]** `%s` — %s\n  %s"
+                         % (_label(f), _loc(f), f["title"],
+                            f["body"].replace("\n", "\n  ")))
+    inline_rest = [f for f in inline if f not in must]
+    if inline_rest:
+        parts.append("- 그 외 %d건은 인라인 코멘트를 참고하세요." % len(inline_rest))
+
+    parts += ["", "### 검증 범위", "", VERIFY_SCOPE]
+    for e in payload.get("errors") or []:
+        parts.append("- ⚠️ %s — 이 관점은 리뷰에서 빠져 있습니다." % e.split(":")[0])
+
+    return "\n".join(parts)
+
+
+def _verify_posted(repo, number, result, account=None, login=None):
+    """마감 확인 — 유효 판정이 남았는지, 인라인 앵커가 diff 밖으로 떨어지지 않았는지."""
+    try:
+        result["reviewDecision"] = gh.review_decision(repo, number, account=account)
+    except gh.GhError:
+        result["reviewDecision"] = None
+    try:
+        lost = gh.lost_anchors(repo, number, login, MARKER, account=account)
+    except gh.GhError:
+        lost = None
+    result["lostAnchors"] = lost
+    _log("  마감 — reviewDecision=%s · 앵커 유실 %s"
+         % (result["reviewDecision"] or "NONE", "?" if lost is None else lost))
+
+
+def _apply_placements(candidates, inline, placements):
+    """판정이 정한 게시 형태를 적용한다. inline 은 좌표가 맞을 때만 가능하다."""
+    inline_ids = set(id(f) for f in inline)
+    fin, fbody, dropped = [], [], []
+    for i, f in enumerate(candidates):
+        want = placements.get(i) or ("inline" if id(f) in inline_ids else "body")
+        if want == "drop":
+            dropped.append(f)
+            continue
+        if want == "inline" and (f.get("_why") or f.get("severity") == "altitude"):
+            want = "body"                  # diff 밖이거나 설계 대안이면 본문으로
+        (fin if want == "inline" else fbody).append(f)
+    return fin, fbody, dropped
+
+
+def _guard_event(event, findings, payload, pcfg):
+    """판정이 넘을 수 없는 선. 넘으면 COMMENT 로 내리고 그 이유를 돌려준다.
+
+    판정은 자율이지만, 승인·변경요청은 봇 소유자의 이름으로 나가는 상태 변경이라
+    스스로 모순되는 판정만은 코드에서 막는다.
+    """
+    allowed = pcfg.get("allowedEvents") or ["COMMENT"]
+    has_blocking = any(f.get("severity") == "blocking" for f in findings)
+    if event not in gh.EVENTS:
+        return "COMMENT", "알 수 없는 판정 '%s' 이라 COMMENT 로 게시합니다." % event
+    if event not in allowed:
+        return "COMMENT", "설정상 %s 는 허용되지 않아 COMMENT 로 게시합니다." % event
+    if event == "APPROVE" and payload.get("errors"):
+        return "COMMENT", "리뷰어 일부가 실패해 절반만 본 리뷰라 승인하지 않습니다."
+    if event == "APPROVE" and has_blocking:
+        return "COMMENT", "blocking 지적이 남아 있어 승인과 모순되므로 COMMENT 로 게시합니다."
+    if event == "REQUEST_CHANGES" and not has_blocking:
+        return "COMMENT", "blocking 지적 없이 변경 요청을 낼 수 없어 COMMENT 로 게시합니다."
+    return event, ""
+
+
+def process_pr(pr, cfg, state, force=False):
+    """PR 하나를 리뷰하고 게시까지. 결과 dict 를 돌려준다."""
+    repo, number = pr["repo"], pr["number"]
+    rcfg, pcfg = cfg["review"], cfg["post"]
+    result = {"repo": repo, "number": number, "title": pr.get("title") or ""}
+
+    entry = cfg_mod.repo_entry(cfg, repo)
+    if not entry:
+        return dict(result, skipped="화이트리스트에 없는 저장소")
+
+    # 어느 이름으로 게시할지는 설정이 정하고, 그 이름이 맞는지는 토큰이 증명한다.
+    acct = entry.get("account") or cfg.get("account")
+    me = gh.whoami(acct) if acct else (gh.active_account() or "")
+    if acct and (me or "").lower() != acct.lower():
+        raise gh.GhError("계정 불일치 — 설정은 %s 인데 토큰의 주인은 %s 입니다. 게시하지 않습니다."
+                         % (acct, me or "?"))
+    genv = gh.env_for(acct)
+    result["account"] = me
+
+    meta = gh.pr_meta(repo, number, account=acct)
+    meta["_repo"], meta["_number"] = repo, number
+    sha = meta.get("headRefOid")
+    result["sha"] = sha
+
+    if meta.get("state") != "OPEN":
+        return dict(result, skipped="열려 있지 않음")
+    # 본인 PR 에는 인라인을 달지 않는다 — 지적은 수정 커밋으로 반영하는 것이 규칙이다.
+    if me and ((meta.get("author") or {}).get("login") or "").lower() == me.lower():
+        return dict(result, skipped="본인 PR")
+    if rcfg.get("skipDrafts", True) and meta.get("isDraft"):
+        return dict(result, skipped="draft")
+    if not force and store.already_done(state, repo, number, sha,
+                                        rcfg.get("rereviewOnNewCommits", True),
+                                        pcfg.get("dryRun", True)):
+        return dict(result, skipped="이미 리뷰함")
+
+    files = [f for f in gh.pr_files(repo, number, account=acct)
+             if not _skip_file(f.get("filename") or "", rcfg)]
+    if not files:
+        return dict(result, skipped="리뷰할 파일 없음")
+    if len(files) > (rcfg.get("maxChangedFiles") or 40):
+        return dict(result, skipped="파일 %d개 — 상한 초과" % len(files))
+    churn = sum((f.get("additions") or 0) + (f.get("deletions") or 0) for f in files)
+    if churn > (rcfg.get("maxDiffLines") or 1500):
+        return dict(result, skipped="변경 %d줄 — 상한 초과" % churn)
+
+    files_by_path = {f["filename"]: {"postable": gh.postable_lines(f.get("patch"))}
+                     for f in files}
+
+    _log("  리뷰 시작 — 파일 %d · %d줄" % (len(files), churn))
+    # 지금 무엇을 보고 있는지 남긴다 — 앱의 라이브 세션 화면이 이걸 읽는다.
+    try:
+        requester = gh.review_requester(repo, number, me, account=acct)
+    except gh.GhError:
+        requester = None
+    store.set_current({
+        "repo": repo, "number": number, "title": result.get("title") or meta.get("title") or "",
+        "author": (meta.get("author") or {}).get("login") or "",
+        "requestedBy": requester, "sha": sha, "account": me,
+        "files": len(files), "churn": churn, "agents": rcfg["agents"],
+        "startedAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "url": "https://github.com/%s/pull/%s" % (repo, number),
+    })
+    wt = base = ref = None
+    ok = False
+    try:
+        wt, wsha, base, ref = worktree.prepare(repo, number, entry.get("localPath"),
+                                               env=genv)
+        # 리뷰어는 Bash 가 없어 이력을 스스로 캐지 못한다. 워크트리에 남의 PR 코드가
+        # 펼쳐져 있는 이상 거기서 명령이 돌게 할 수는 없으므로, 신뢰되는 이쪽에서
+        # 읽어 프롬프트에 실어 준다. 실패해도 리뷰는 그대로 진행한다.
+        ctx = {"history": worktree.file_history(base, wsha, list(files_by_path)),
+               "comments": gh.file_review_comments(repo, list(files_by_path),
+                                                   account=acct)}
+        _log("  맥락: 커밋이력 %d파일 · 과거 코멘트 %d파일"
+             % (len(ctx["history"]), len(ctx["comments"])))
+        payload = reviewer.review(meta, files, rcfg["agents"], cwd=wt,
+                                  model=rcfg.get("model"),
+                                  max_turns=rcfg.get("maxTurns", 0),
+                                  timeout=rcfg.get("timeoutSec") or 3600,
+                                  parallel=rcfg.get("parallel", True), ctx=ctx)
+        # 반증 — 워크트리가 살아 있는 이 안에서만 가능하다. 판정 단계는 코드를
+        # 볼 수 없으므로 근거의 문체로만 판단한다. 여기서는 코드를 다시 읽는다.
+        vcfg = rcfg.get("verify") or {}
+        verify_rows = []
+        if vcfg.get("enabled", True) and payload.get("findings"):
+            try:
+                kept, rejected, vcost = reviewer.verify(
+                    payload["findings"], meta, cwd=wt,
+                    model=vcfg.get("model") or "haiku",
+                    timeout=vcfg.get("timeoutSec") or 300,
+                    max_turns=vcfg.get("maxTurns", 15),
+                    workers=vcfg.get("workers", 4))
+            except (reviewer.ReviewError, OSError) as e:
+                # 검증이 통째로 실패하면 검증 이전 상태로 돌아간다 — 리뷰를
+                # 버리지는 않는다.
+                _log("  반증 단계 실패 → 지적을 그대로 둡니다: %s" % str(e)[:120])
+            else:
+                payload["findings"] = kept
+                payload["_meta"]["cost_usd"] = round(
+                    (payload["_meta"].get("cost_usd") or 0) + vcost, 4)
+                result["verified"] = {"kept": len(kept), "rejected": len(rejected),
+                                      "cost_usd": vcost}
+                for i, f in enumerate(kept):
+                    f["_vid"] = i          # _validate 의 사본에도 딸려 간다
+                verify_rows = list(kept) + [dict(f, _fate="rejected")
+                                            for f in rejected]
+                _log("  반증 %d건 통과 · %d건 반증됨" % (len(kept), len(rejected)))
+                for f in rejected:
+                    v = f.get("_verify") or {}
+                    _log("    반증됨 [conf %s] %s — %s"
+                         % (v.get("confidence", "?"),
+                            (f.get("title") or "")[:50], (v.get("reason") or "")[:90]))
+        ok = True
+    finally:
+        if wt and base:
+            worktree.cleanup(base, wt, ref)
+        # 모든 리뷰어가 성공했을 때만 세션 기록을 버린다. 하나라도 실패했으면 그
+        # transcript 가 원인을 볼 유일한 단서라 남겨 두고, gc 가 보존 기간 뒤 치운다.
+        if (wt and ok and not payload.get("errors")
+                and (cfg.get("gc") or {}).get("dropSessionOnSuccess", True)):
+            janitor.drop_session(wt)
+        store.clear_current()
+
+    result["cost_usd"] = (payload.get("_meta") or {}).get("cost_usd")
+    if payload.get("errors"):
+        result["agent_errors"] = payload["errors"]
+        for e in payload["errors"]:
+            _log("  에이전트 실패: %s" % e[:150])
+    inline, demoted = _validate(payload.get("findings") or [], files_by_path, pcfg)
+
+    # 판정 — 리뷰어들의 결과를 놓고 event 와 지적별 게시 형태를 정한다.
+    candidates = inline + demoted          # 이 순서가 판정에 넘기는 id 다
+    verdict = {"event": "COMMENT", "reason": "", "guard": "", "placements": {}}
+    if pcfg.get("autonomous", True):
+        try:
+            verdict.update(reviewer.judge(
+                meta, payload, candidates,
+                pcfg.get("allowedEvents") or ["COMMENT"],
+                model=pcfg.get("judgeModel") or "sonnet"))
+            _log("  판정 %s — %s" % (verdict["event"], verdict["reason"][:80]))
+        except reviewer.ReviewError as e:
+            _log("  판정 실패 → COMMENT: %s" % str(e)[:120])
+            verdict["guard"] = "판정 단계가 실패해 COMMENT 로 게시합니다."
+    inline, demoted, dropped = _apply_placements(candidates, inline,
+                                                 verdict.get("placements") or {})
+    verdict["event"], guard = _guard_event(verdict["event"], inline + demoted,
+                                           payload, pcfg)
+    if guard:
+        _log("  안전장치: %s" % guard)
+        verdict["guard"] = guard
+
+    # 반증이 매긴 confidence 를 그 지적이 끝내 어떻게 됐는지와 함께 남긴다.
+    # 지금은 아무것도 거르지 않는다 — 점수의 컷이 필요한지, 필요하면 몇 점인지는
+    # 이 로그가 쌓인 뒤 분포로 답할 문제다.
+    if verify_rows:
+        fates = {}
+        for label, group in (("inline", inline), ("body", demoted), ("drop", dropped)):
+            for f in group:
+                if f.get("_vid") is not None:
+                    fates[f["_vid"]] = label
+        for f in verify_rows:
+            if not f.get("_fate"):
+                # 여기 없으면 좌표 검증이나 등급 문턱에서 빠진 것이다
+                f["_fate"] = fates.get(f.get("_vid"), "filtered")
+        store.log_verify(repo, number, sha, verify_rows)
+    if verdict.get("cost_usd"):
+        result["cost_usd"] = round((result.get("cost_usd") or 0) + verdict["cost_usd"], 4)
+    result.update(inline=len(inline), demoted=len(demoted), dropped=len(dropped),
+                  event=verdict["event"], reason=verdict["reason"],
+                  summary=payload.get("summary") or "")
+
+    # 게시 직전 문장 다듬기. 마크다운 전체가 아니라 **구성 요소**만 넘긴다 —
+    # 제목·라벨·문서 구조는 코드가 조립하므로 편집자가 건드릴 일이 없다.
+    polcfg = pcfg.get("polish") or {}
+    targets = ([f.get("body") or "" for f in inline]
+               + [payload.get("summary") or "", verdict.get("reason") or ""])
+    if polcfg.get("enabled", True) and any(t.strip() for t in targets):
+        polished, changed, reverted, pcost = reviewer.polish(
+            targets, model=polcfg.get("model") or "sonnet",
+            timeout=polcfg.get("timeoutSec") or 300)
+        for f, t in zip(inline, polished):
+            f["body"] = t
+        payload["summary"] = polished[len(inline)]
+        verdict["reason"] = polished[len(inline) + 1]
+        result["polished"] = {"changed": changed, "reverted": reverted,
+                              "of": len(targets), "cost_usd": round(pcost, 4)}
+        if pcost:
+            result["cost_usd"] = round((result.get("cost_usd") or 0) + pcost, 4)
+        _log("  문장 다듬기 %d/%d건 반영%s"
+             % (changed, len(targets),
+                " · %d건은 내용이 바뀌어 원문 유지" % reverted if reverted else ""))
+
+    body = _summary_body(payload, inline, demoted, verdict, note=pcfg.get("note"))
+    comments = [{"path": f["path"], "line": f["line"], "side": "RIGHT",
+                 "body": _comment_body(f)} for f in inline]
+    patches = {f.get("filename"): f.get("patch") for f in files}
+
+    if pcfg.get("dryRun", True):
+        path = store.draft_path(repo, number)
+        with open(path, "w", encoding="utf-8") as fp:
+            fp.write("<!-- event: %s -->\n" % verdict["event"])
+            fp.write(body + "\n\n---\n\n")
+            for c in comments:
+                fp.write("### %s:%s\n%s\n\n" % (c["path"], c["line"], c["body"]))
+            if dropped:
+                fp.write("---\n\n### 판정이 버린 지적 %d건\n" % len(dropped))
+                for f in dropped:
+                    fp.write("- [%s] %s\n" % (f["severity"], f["title"]))
+        # 사람이 읽는 .md 옆에 게시용 사본을 남긴다. 검토 후 게시할 때 리뷰를 다시
+        # 돌리지 않으려면 지금 만들어진 body 와 인라인 좌표가 그대로 있어야 한다.
+        payload_path = store.draft_payload_path(repo, number)
+        with open(payload_path, "w", encoding="utf-8") as fp:
+            json.dump({
+                "repo": repo, "number": number, "title": result.get("title") or "",
+                "sha": sha, "account": me, "event": verdict["event"],
+                "reason": verdict.get("reason") or "", "body": body,
+                "comments": [dict(c, hunk=gh.hunk_around(patches.get(c["path"]), c["line"]))
+                             for c in comments],
+                "inline": len(inline), "demoted": len(demoted),
+                "dropped": [{"severity": f.get("severity"), "title": f.get("title")}
+                            for f in dropped],
+                "cost_usd": result.get("cost_usd"),
+                "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            }, fp, ensure_ascii=False, indent=2)
+        result["draft"] = path
+        result["draftPayload"] = payload_path
+        result["posted"] = False
+        return result
+
+    # 게시는 단계적으로 내려간다. 자기 PR 에 APPROVE 를 내면 422 이므로 이벤트만
+    # COMMENT 로 바꿔 한 번 더, 그래도 실패면 inline 좌표 문제이니 요약 코멘트로.
+    try:
+        gh.post_review(repo, number, sha, body, comments, event=verdict["event"],
+                       account=acct)
+        result["posted"] = True
+        _verify_posted(repo, number, result, acct, me)
+        return result
+    except gh.GhError as e:
+        first = str(e)[:200]
+        _log("  %s 게시 실패: %s" % (verdict["event"], first[:120]))
+    if verdict["event"] != "COMMENT":
+        try:
+            fallback_v = dict(verdict, event="COMMENT",
+                              guard="%s 게시가 거절되어 COMMENT 로 내렸습니다." % verdict["event"])
+            gh.post_review(repo, number, sha,
+                           _summary_body(payload, inline, demoted, fallback_v,
+                                         note=pcfg.get("note")),
+                           comments, event="COMMENT", account=acct)
+            result.update(posted=True, event="COMMENT", degraded=True, post_error=first)
+            _verify_posted(repo, number, result, acct, me)
+            return result
+        except gh.GhError as e:
+            _log("  COMMENT 재시도 실패: %s" % str(e)[:120])
+    fallback_v = dict(verdict, event="COMMENT",
+                      guard="inline 게시가 거절되어 요약만 남깁니다.")
+    gh.post_issue_comment(repo, number,
+                          _summary_body(payload, [], inline + demoted, fallback_v,
+                                        note=pcfg.get("note")),
+                          account=acct)
+    result.update(posted=True, event="COMMENT", degraded=True, post_error=first)
+    return result
+
+
+def _publish(repo, number, cfg, preview=False):
+    """저장된 초안을 리뷰 없이 그대로 게시한다.
+
+    process_pr 의 게시 사다리와 형태는 같지만 입력이 다르다 — 거기서는 방금 만든
+    payload 로 본문을 다시 조립할 수 있고, 여기서는 그때 굳어진 본문 하나뿐이다.
+    되돌릴 수 없는 게시라, 좌표가 어긋나는 조건이면 올리지 않고 물러난다.
+    """
+    path = store.draft_payload_path(repo, number)
+    if not os.path.exists(path):
+        _log("게시할 초안이 없습니다 (%s)" % path)
+        return 1
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+    except (ValueError, OSError) as e:
+        _log("초안을 읽지 못했습니다: %s" % e)
+        return 1
+
+    entry = cfg_mod.repo_entry(cfg, repo)
+    if not entry:
+        _log("화이트리스트에 없는 저장소입니다 — 게시하지 않습니다")
+        return 1
+    acct = entry.get("account") or cfg.get("account")
+    me = gh.whoami(acct) if acct else (gh.active_account() or "")
+    if acct and (me or "").lower() != acct.lower():
+        _log("계정 불일치 — 설정은 %s 인데 토큰의 주인은 %s 입니다. 게시하지 않습니다."
+             % (acct, me or "?"))
+        return 1
+
+    meta = gh.pr_meta(repo, number, account=acct)
+    if meta.get("state") != "OPEN":
+        _log("PR 이 열려 있지 않습니다 — 게시하지 않습니다")
+        return 1
+    head = meta.get("headRefOid")
+    if head != d.get("sha"):
+        _log("초안을 만든 뒤 새 커밋이 올라왔습니다 (초안 %s → 현재 %s)."
+             % (str(d.get("sha"))[:12], str(head)[:12]))
+        _log("  인라인 좌표가 어긋나므로 게시하지 않습니다 — `review-bot review %s#%s` 로 다시 리뷰하세요."
+             % (repo, number))
+        return 2
+
+    comments = d.get("comments") or []
+    event = d.get("event") or "COMMENT"
+    body = d.get("body") or ""
+    if preview:
+        print("게시 예정 — %s#%s · %s · 인라인 %d · 본문 %d"
+              % (repo, number, event, len(comments), d.get("demoted") or 0))
+        print("커밋 %s (현재 head 와 일치)" % str(head)[:12])
+        for c in comments:
+            print("  · %s:%s" % (c.get("path"), c.get("line")))
+        print("--- 요약 본문 %d자 ---" % len(body))
+        print(body[:600] + ("…" if len(body) > 600 else ""))
+        return 0
+
+    result = {"repo": repo, "number": number, "title": d.get("title") or "",
+              "account": me, "sha": head, "event": event, "published": True,
+              "inline": len(comments), "demoted": d.get("demoted") or 0,
+              "dropped": len(d.get("dropped") or []), "cost_usd": 0.0,
+              "reason": d.get("reason") or ""}
+    first = None
+    try:
+        gh.post_review(repo, number, head, body, comments, event=event, account=acct)
+        result["posted"] = True
+    except gh.GhError as e:
+        first = str(e)[:200]
+        _log("  %s 게시 실패: %s" % (event, first[:120]))
+        note = "\n\n> ⚠️ %s 게시가 거절되어 COMMENT 로 내렸습니다." % event
+        try:
+            if event == "COMMENT":
+                raise gh.GhError(first)
+            gh.post_review(repo, number, head, body + note, comments,
+                           event="COMMENT", account=acct)
+            result.update(posted=True, event="COMMENT", degraded=True, post_error=first)
+        except gh.GhError as e2:
+            _log("  COMMENT 재시도 실패: %s" % str(e2)[:120])
+            gh.post_issue_comment(
+                repo, number,
+                body + "\n\n> ⚠️ 인라인 게시가 거절되어 요약만 남깁니다.", account=acct)
+            result.update(posted=True, event="COMMENT", degraded=True,
+                          inline=0, post_error=first)
+
+    _verify_posted(repo, number, result, acct, me)
+    state = store.load()
+    prev = state.get(store.key(repo, number)) or {}
+    store.mark(state, repo, number, head, inline=result.get("inline"),
+               demoted=result.get("demoted"), posted=True,
+               cost_usd=prev.get("cost_usd") or d.get("cost_usd"),
+               event=result.get("event"))
+    store.save(state)
+    store.log_run(result)
+    try:
+        os.remove(path)                 # 게시했으니 대기 목록에서 뺀다 (.md 는 남는다)
+    except OSError:
+        pass
+    _log("게시 — %s · inline %d · 요약 %d"
+         % (EVENT_LABEL.get(result.get("event"), result.get("event") or "-"),
+            result.get("inline") or 0, result.get("demoted") or 0))
+    return 0
+
+
+def cmd_publish(args, cfg):
+    repo, number = _parse_target(args.target)
+    if not store.acquire_lock():
+        _log("틱이 돌고 있습니다 — 끝난 뒤 다시 부르세요.")
+        return 1
+    try:
+        return _publish(repo, number, cfg, preview=args.dry_run)
+    finally:
+        store.release_lock()
+
+
+def cmd_drafts(args, cfg):
+    drafts = store.pending_drafts()
+    if not drafts:
+        print("게시를 기다리는 초안이 없습니다")
+        return 0
+    for d in drafts:
+        print("%s#%-6s %-9s 인라인 %-2s 본문 %-2s %s  %s"
+              % (d.get("repo"), d.get("number"), d.get("event"), d.get("inline"),
+                 d.get("demoted"), (d.get("at") or "")[:16], (d.get("title") or "")[:40]))
+    print("\n게시: review-bot publish <owner/repo#123>")
+    return 0
+
+
+def cmd_forget(args, cfg):
+    """이력에서 기록을 지운다.
+
+    runs.jsonl 은 덧붙이기만 하는 파일이라 부분 삭제는 통째로 다시 쓰는 수밖에 없다.
+    리뷰가 도는 중에 겹치면 그 사이 덧붙은 기록을 잃으므로 틱과 같은 lock 을 잡는다.
+    """
+    if not (args.target or args.all or args.older_than):
+        print("무엇을 지울지 정하세요 — <owner/repo#123> 또는 --all 또는 --older-than <일>")
+        return 1
+    if not store.acquire_lock():
+        _log("틱이 돌고 있습니다 — 끝난 뒤 다시 부르세요.")
+        return 1
+    try:
+        rows = store.read_runs()
+        before = len(rows)
+        repo = number = None
+        if args.target:
+            repo, number = _parse_target(args.target)
+
+        cutoff = None
+        if args.older_than:
+            cutoff = time.strftime(
+                "%Y-%m-%dT%H:%M:%S",
+                time.localtime(time.time() - float(args.older_than) * 86400))
+
+        def doomed(r):
+            if args.all:
+                return True
+            if repo is not None:
+                if r.get("repo") != repo or r.get("number") != number:
+                    return False
+                if args.at and (r.get("at") or "") != args.at:
+                    return False
+                return cutoff is None or (r.get("at") or "") < cutoff
+            return cutoff is not None and (r.get("at") or "") < cutoff
+
+        keep = [r for r in rows if not doomed(r)]
+        removed = before - len(keep)
+        if removed:
+            store.write_runs(keep)
+
+        # 지문까지 지우면 그 PR 은 "본 적 없는 것" 이 되어 다음 틱에 다시 리뷰한다.
+        forgotten = 0
+        if args.reset:
+            state = store.load()
+            for key in list(state):
+                if args.all or (repo is not None and key == store.key(repo, number)):
+                    del state[key]
+                    forgotten += 1
+            if forgotten:
+                store.save(state)
+
+        print("이력 %d건 삭제 (남은 %d건)" % (removed, len(keep)))
+        if forgotten:
+            print("처리 지문 %d건도 지웠습니다 — 다음 틱에 다시 리뷰합니다 (비용 발생)"
+                  % forgotten)
+        return 0
+    finally:
+        store.release_lock()
+
+
+def cmd_interval(args, cfg):
+    """틱 주기 조회·변경. launchd plist 를 고치고 job 을 다시 올린다."""
+    path = _plist_path()
+    if not os.path.exists(path):
+        print("launchd plist 이 없습니다: %s" % path)
+        return 1
+    real = os.path.realpath(path)                 # 심볼릭 링크면 원본을 고친다
+    try:
+        with open(real, "rb") as f:
+            data = plistlib.load(f)
+    except (OSError, ValueError, plistlib.InvalidFileException) as e:
+        print("plist 를 읽지 못했습니다: %s" % e)
+        return 1
+
+    cur = data.get("StartInterval") or 0
+    if args.minutes is None:
+        print("%g분 (%d초)" % (cur / 60.0, cur))
+        return 0
+
+    secs = int(round(float(args.minutes) * 60))
+    if secs < 60:
+        print("최소 1분입니다 — 리뷰 한 건이 보통 15분 넘게 걸립니다")
+        return 1
+    if secs == cur:
+        print("%g분 (그대로)" % (secs / 60.0))
+        return 0
+
+    # 다시 올리는 사이 job 이 잠깐 내려가므로, 도는 틱이 있으면 건드리지 않는다.
+    lock = _lock_info()
+    if lock and lock.get("alive"):
+        print("틱이 돌고 있습니다 (pid %s) — 끝난 뒤 바꾸세요" % lock["pid"])
+        return 1
+
+    data["StartInterval"] = secs
+    tmp = real + ".tmp"
+    with open(tmp, "wb") as f:
+        plistlib.dump(data, f)
+    os.replace(tmp, real)
+
+    uid = os.getuid()
+    target = "gui/%d/%s" % (uid, LAUNCHD_LABEL)
+    subprocess.run(["launchctl", "bootout", target],
+                   capture_output=True, text=True, timeout=30)
+    boot = subprocess.run(["launchctl", "bootstrap", "gui/%d" % uid, path],
+                          capture_output=True, text=True, timeout=30)
+    check = subprocess.run(["launchctl", "print", target],
+                           capture_output=True, text=True, timeout=30)
+    if check.returncode != 0:
+        print("⚠️ job 을 다시 올리지 못했습니다 — 봇이 멈춘 상태입니다.")
+        print("   %s" % (boot.stderr or boot.stdout or "").strip()[:200])
+        print("   수동 복구: launchctl bootstrap gui/%d %s" % (uid, path))
+        return 1
+    # job 을 다시 올리면 launchd 의 주기 타이머도 처음부터 다시 센다.
+    store.set_schedule_anchor("reload", secs)
+    print("%g분 (%d초) — job 을 다시 올렸습니다" % (secs / 60.0, secs))
+    return 0
+
+
+def cmd_mode(args, cfg):
+    """게시 모드 토글. 사람 검토를 거칠지 말지는 이 한 값이 정한다."""
+    path = args.config or os.path.join(cfg_mod.ROOT, "config.json")
+    if not args.mode:
+        print("검토 후 게시 (초안만)" if cfg["post"].get("dryRun", True) else "자동 게시")
+        return 0
+    dry = (args.mode == "draft")
+    raw = {}
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                raw = json.load(f)
+        except (ValueError, OSError) as e:
+            raise SystemExit("config.json 을 읽지 못했습니다: %s" % e)
+    raw.setdefault("post", {})["dryRun"] = dry
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(raw, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+    print("검토 후 게시 (초안만)" if dry else "자동 게시")
+    return 0
+
+
+def cmd_cap(args, cfg):
+    """틱당 리뷰 상한 조회·변경.
+
+    launchd 를 건드리지 않으므로 도는 틱이 있어도 안전하다. 틱은 시작할 때 설정을
+    한 번 읽으므로, 바꾼 값은 다음 틱부터 적용된다.
+    """
+    path = args.config or os.path.join(cfg_mod.ROOT, "config.json")
+    cur = cfg["limits"].get("maxPerTick") or 2
+    if args.count is None:
+        print("%d건" % cur)
+        return 0
+    n = args.count
+    if n < 1:
+        print("최소 1건입니다 — 아예 멈추려면 `review-bot pause` 를 쓰세요")
+        return 1
+    if n > 20:
+        print("최대 20건입니다 — 한 건에 보통 10~20분, $2~9 가 듭니다")
+        return 1
+    if n == cur:
+        print("%d건 (그대로)" % n)
+        return 0
+    raw = {}
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                raw = json.load(f)
+        except (ValueError, OSError) as e:
+            raise SystemExit("config.json 을 읽지 못했습니다: %s" % e)
+    raw.setdefault("limits", {})["maxPerTick"] = n
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(raw, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+    print("틱당 리뷰 상한 %d건 → %d건" % (cur, n))
+    lock = _lock_info()
+    if lock and lock.get("alive"):
+        print("지금 도는 틱(pid %s)은 이전 상한으로 끝냅니다 — 다음 틱부터 적용됩니다"
+              % lock["pid"])
+    return 0
+
+
+def cmd_tick(args, cfg):
+    # launchd 가 띄운 틱만 타이머 기준점이 된다 — 손으로 부른 틱은 launchd 의 시계와
+    # 무관하다. stdout 이 bot.log 로 리다이렉트돼 있으면 launchd 가 띄운 것이다.
+    if _same_file_as_stdout(store.LOG_TEXT):
+        store.set_schedule_anchor("launchd-tick", _interval_sec())
+    if store.is_paused():
+        _log("일시정지 상태입니다 (state/PAUSED). `review-bot resume` 으로 해제하세요.")
+        return 0
+    if not store.acquire_lock():
+        _log("이전 틱이 아직 돌고 있습니다 — 건너뜁니다.")
+        return 0
+    try:
+        return _tick(cfg)
+    finally:
+        store.release_lock()
+
+
+def _gc(cfg, verbose=False):
+    """부산물을 치운다. 틱마다 조용히 돌고, gc 커맨드로 직접 부를 수도 있다."""
+    g = cfg.get("gc") or {}
+    out = []
+    swept = worktree.sweep(cfg.get("repos"))
+    if swept:
+        out.append("워크트리 %d개" % swept)
+    ns, freed = janitor.sweep_sessions(g.get("sessionDays", 3))
+    if ns:
+        out.append("claude 세션 %d개 (%s)" % (ns, janitor.human(freed)))
+    nd = janitor.prune_drafts(g.get("draftDays", 14))
+    if nd:
+        out.append("초안 %d개" % nd)
+    nt = janitor.trim_runs(store.LOG, g.get("runsMaxLines", 2000))
+    if nt:
+        out.append("이력 %d줄" % nt)
+    nv = janitor.trim_runs(store.VERIFY_LOG, g.get("verifyMaxLines", 20000))
+    if nv:
+        out.append("반증 기록 %d줄" % nv)
+    if janitor.rotate_logs(g.get("logMaxBytes", 5000000)):
+        out.append("로그 로테이션")
+    nc, cfreed = janitor.sweep_cache_repos(cfg.get("repos"))
+    if nc:
+        out.append("캐시 클론 %d개 (%s)" % (nc, janitor.human(cfreed)))
+    state = store.load()
+    npr = janitor.prune_reviewed(state, g.get("reviewedDays", 90))
+    if npr:
+        store.save(state)
+        out.append("오래된 기록 %d건" % npr)
+    if out and (verbose or swept):
+        _log("정리: " + " · ".join(out))
+    elif verbose:
+        _log("정리할 것 없음")
+    return out
+
+
+def cmd_gc(args, cfg):
+    _gc(cfg, verbose=True)
+    return 0
+
+
+def _accounts(cfg):
+    """계정 → 그 계정으로 다루는 저장소 집합. None 은 전역 활성 gh 를 뜻한다."""
+    groups = {}
+    for repo, entry in (cfg.get("repos") or {}).items():
+        if (entry or {}).get("enabled") is False:
+            continue
+        acct = (entry or {}).get("account") or cfg.get("account")
+        groups.setdefault(acct, set()).add(repo)
+    return groups
+
+
+def _tick(cfg):
+    _gc(cfg)
+    state = store.load()
+
+    # 계정마다 따로 조회한다. 리뷰 요청은 @me 기준이라 계정이 다르면 목록이 다르다.
+    targets, total = [], 0
+    for acct, repos in _accounts(cfg).items():
+        try:
+            if acct:
+                me = gh.whoami(acct)
+                if (me or "").lower() != acct.lower():
+                    _log("계정 %s 의 토큰 주인이 %s 입니다 — 이 계정의 저장소는 건너뜁니다"
+                         % (acct, me or "?"))
+                    continue
+            prs = gh.review_requests(account=acct)
+        except gh.GhError as e:
+            _log("리뷰 요청 조회 실패 (%s): %s" % (acct or "전역 gh", e))
+            continue
+        total += len(prs)
+        targets += [p for p in prs if p["repo"] in repos]
+    _log("리뷰 요청 %d건 (감시 대상 %d건)" % (total, len(targets)))
+
+    cap = cfg["limits"].get("maxPerTick") or 2
+    done, reviewed = [], 0
+
+    for pr in targets:
+        if reviewed >= cap:
+            _log("틱당 상한 %d건 도달 — 나머지는 다음 틱에" % cap)
+            break
+        _log("· %s#%s %s" % (pr["repo"], pr["number"], pr["title"][:50]))
+        try:
+            r = process_pr(pr, cfg, state)
+        except (gh.GhError, worktree.WorktreeError, reviewer.ReviewError) as e:
+            _log("  실패: %s" % str(e)[:200])
+            store.log_run({"repo": pr["repo"], "number": pr["number"],
+                           "error": str(e)[:300]})
+            continue
+        if r.get("skipped"):
+            _log("  건너뜀 — %s" % r["skipped"])
+            continue
+        reviewed += 1
+        done.append(r)
+        store.mark(state, r["repo"], r["number"], r["sha"],
+                   inline=r.get("inline"), demoted=r.get("demoted"),
+                   posted=r.get("posted"), cost_usd=r.get("cost_usd"),
+                   event=r.get("event"))
+        store.save(state)
+        store.log_run(r)
+        where = "초안" if r.get("draft") else ("게시" if r.get("posted") else "-")
+        _log("  %s — %s · inline %d · 요약 %d"
+             % (where, EVENT_LABEL.get(r.get("event"), r.get("event") or "-"),
+                r.get("inline") or 0, r.get("demoted") or 0))
+
+    if done and cfg["notify"].get("enabled", True):
+        head = done[0]
+        title = "리뷰 %d건 %s" % (len(done), "초안" if head.get("draft") else "게시")
+        msg = "; ".join("%s#%s → %d건" % (d["repo"].split("/")[-1], d["number"],
+                                          (d.get("inline") or 0) + (d.get("demoted") or 0))
+                        for d in done)
+        notify.send("review-bot · " + title, msg,
+                    sound=cfg["notify"].get("sound"), enabled=True)
+    if not done:
+        _log("새로 리뷰할 PR 없음")
+    return 0
+
+
+def _parse_target(s):
+    s = s.strip()
+    if "/pull/" in s:
+        parts = s.split("/")
+        i = parts.index("pull")
+        return "%s/%s" % (parts[i - 2], parts[i - 1]), int(parts[i + 1])
+    if "#" in s:
+        repo, num = s.split("#", 1)
+        return repo, int(num)
+    raise SystemExit("PR 을 owner/repo#123 또는 PR URL 로 지정하세요")
+
+
+def _narrow(cfg, agent_csv, note):
+    """이번 실행에만 적용할 설정 — 리뷰어를 좁히고, 본문에 실을 안내를 단다."""
+    out = cfg
+    if agent_csv:
+        names = [a.strip() for a in agent_csv.split(",") if a.strip()]
+        for name in names:
+            try:
+                agents_mod.load(name)
+            except agents_mod.AgentError as e:
+                raise SystemExit(str(e))
+        out = dict(out, review=dict(out["review"], agents=names))
+    if note:
+        out = dict(out, post=dict(out["post"], note=note))
+    return out
+
+
+def cmd_review(args, cfg):
+    """PR 하나를 지금 리뷰한다. 이미 리뷰한 커밋이어도 강제로 다시 본다.
+
+    틱과 같은 lock 을 잡는다. 겹치면 sweep 이 틱이 쓰고 있는 워크트리를 지워
+    버리고, 같은 PR 을 둘이 리뷰해 같은 지적을 두 번 게시하기 때문이다.
+    일시정지(PAUSED)는 보지 않는다 — 손으로 부르는 명령은 사람의 의도다.
+    """
+    repo, number = _parse_target(args.target)
+    cfg = _narrow(cfg, getattr(args, "agents", None), getattr(args, "note", None))
+    if not store.acquire_lock():
+        _log("틱이 돌고 있습니다 — 끝난 뒤 다시 부르거나 `review-bot pause` 로 멈추세요.")
+        return 1
+    try:
+        worktree.sweep(cfg.get("repos"))
+        state = store.load()
+        pr = {"repo": repo, "number": number, "title": ""}
+        try:
+            r = process_pr(pr, cfg, state, force=True)
+        except (gh.GhError, worktree.WorktreeError, reviewer.ReviewError) as e:
+            _log("실패: %s" % str(e)[:300])
+            store.log_run({"repo": repo, "number": number, "error": str(e)[:300]})
+            return 1
+        if r.get("skipped"):
+            _log("건너뜀 — %s" % r["skipped"])
+            return 0
+        store.mark(state, repo, number, r["sha"], inline=r.get("inline"),
+                   demoted=r.get("demoted"), posted=r.get("posted"),
+                   cost_usd=r.get("cost_usd"), event=r.get("event"))
+        store.save(state)
+        store.log_run(r)
+        print(json.dumps(r, ensure_ascii=False, indent=2))
+        return 0
+    finally:
+        store.release_lock()
+
+
+LAUNCHD_LABEL = "com.review-bot.agent"
+
+
+def _plist_path():
+    return os.path.expanduser("~/Library/LaunchAgents/%s.plist" % LAUNCHD_LABEL)
+
+
+def _interval_sec():
+    """틱 주기. launchd plist 가 유일한 사실이다."""
+    try:
+        with open(_plist_path(), "rb") as f:
+            return plistlib.load(f).get("StartInterval")
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return None
+
+
+def _agent_info(names, model_cfg=None):
+    """설정된 리뷰어들이 실제로 어떤 정의를 물고 있는지.
+
+    frontmatter 의 model 과 tools 는 참고용이다 — 봇은 모델을 config 로 덮고
+    도구는 reviewer.ALLOWED_TOOLS 로 고정한다. 둘 다 보여 줘야 오해가 없다.
+    `runsAs` 가 그 리뷰어가 실제로 도는 모델이다.
+    """
+    out = []
+    for name in names:
+        info = {"name": name, "exists": False, "tools": [], "description": "",
+                "model": "", "runsAs": cfg_mod.model_for(model_cfg, name),
+                "role": ""}
+        try:
+            meta, body = agents_mod.load(name)
+            info["exists"] = True
+            info["description"] = meta.get("description") or ""
+            info["model"] = meta.get("model") or ""
+            raw = (meta.get("tools") or "").strip().strip("[]")
+            info["tools"] = [t.strip() for t in raw.split(",") if t.strip()]
+            lines = [l for l in body.splitlines() if l.strip() and not l.startswith("#")]
+            info["role"] = "\n".join(lines[:5])[:400]
+            info["path"] = os.path.join(agents_mod.AGENTS_DIR, name + ".md")
+        except agents_mod.AgentError as e:
+            info["error"] = str(e)
+        out.append(info)
+    return out
+
+
+def _model_summary(m):
+    """에이전트별 dict 를 한 줄로 접는다.
+
+    status 는 사람이 읽는 화면이고, 이 값을 읽는 설정 앱도 문자열을 기대한다.
+    구조화된 원본이 필요하면 `modelByAgent` 를 본다.
+    """
+    if not isinstance(m, dict):
+        return m or "opus"
+    rest = ["%s: %s" % (k, v) for k, v in sorted(m.items()) if k != "default"]
+    base = m.get("default") or "opus"
+    return "%s (%s)" % (base, ", ".join(rest)) if rest else base
+
+
+def _config_info(cfg):
+    rcfg, pcfg = cfg["review"], cfg["post"]
+    return {
+        "account": cfg.get("account"),
+        "model": _model_summary(rcfg.get("model")),
+        "modelByAgent": rcfg.get("model") if isinstance(rcfg.get("model"), dict) else None,
+        "judgeModel": pcfg.get("judgeModel"),
+        "parallel": bool(rcfg.get("parallel", True)),
+        "maxTurns": rcfg.get("maxTurns"),
+        "timeoutSec": rcfg.get("timeoutSec"),
+        "maxChangedFiles": rcfg.get("maxChangedFiles"),
+        "maxDiffLines": rcfg.get("maxDiffLines"),
+        "minSeverity": pcfg.get("minSeverity"),
+        "maxFindingsPerPR": pcfg.get("maxFindingsPerPR"),
+        "allowedEvents": pcfg.get("allowedEvents") or [],
+        "autonomous": bool(pcfg.get("autonomous", True)),
+        "maxPerTick": cfg["limits"].get("maxPerTick"),
+        "intervalSec": _interval_sec(),
+        # 봇이 리뷰어에게 실제로 주는 도구. 에이전트 정의의 tools 보다 이쪽이 세다.
+        "botTools": [t for t in (reviewer.ALLOWED_TOOLS or "").split(",") if t],
+        "agents": _agent_info(rcfg.get("agents") or [], rcfg.get("model")),
+    }
+
+
+def _lock_info():
+    """지금 틱이 돌고 있는가. lock 파일의 주인이 살아 있어야 진짜다."""
+    if not os.path.exists(store.LOCK):
+        return None
+    try:
+        with open(store.LOCK, encoding="utf-8") as f:
+            parts = (f.read() or "").split()
+        pid = int(parts[0])
+        since = parts[1] if len(parts) > 1 else ""
+    except (ValueError, OSError, IndexError):
+        return None
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return {"pid": pid, "since": since, "alive": False}
+    return {"pid": pid, "since": since, "alive": True}
+
+
+def _paused_info():
+    if not store.is_paused():
+        return None
+    try:
+        with open(store.PAUSED, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        lines = []
+    return {"at": (lines[0] if lines else ""), "reason": (lines[1] if len(lines) > 1 else "")}
+
+
+def status_payload(cfg, skip_details=False):
+    """앱·스크립트가 읽는 상태 스냅샷. 사람이 읽는 cmd_status 와 같은 사실을 낸다.
+
+    토큰이 필요한 조회는 전부 여기(봇 프로세스) 안에서 끝난다 — 호출하는 쪽은
+    키체인도 gh 계정도 알 필요가 없다.
+    """
+    groups = _accounts(cfg)
+    state = store.load()
+    accounts, errors, prs = [], [], []
+    for acct, repos in groups.items():
+        info = {"account": acct, "repos": sorted(repos), "tokenOwner": None, "ok": False}
+        try:
+            me = gh.whoami(acct) if acct else (gh.active_account() or "")
+            info["tokenOwner"] = me
+            info["ok"] = (not acct) or ((me or "").lower() == (acct or "").lower())
+        except gh.GhError as e:
+            info["error"] = str(e)[:200]
+        accounts.append(info)
+        try:
+            prs += gh.review_requests(account=acct)
+        except gh.GhError as e:
+            errors.append("리뷰 요청 조회 실패 (%s): %s" % (acct or "전역 gh", str(e)[:200]))
+    known = set(cfg.get("repos") or {})
+    pending = []
+    for p in prs:
+        rec = state.get(store.key(p["repo"], p["number"])) or {}
+        if p["repo"] not in known:
+            st = "unwatched"
+        elif not rec:
+            st = "new"
+        elif rec.get("posted") is False:
+            st = "draft"
+        else:
+            st = "posted"
+        item = dict(p, watched=p["repo"] in known, status=st,
+                    event=rec.get("event"), lastSha=rec.get("sha"))
+        if p["repo"] in known and not skip_details:
+            acct = (cfg_mod.repo_entry(cfg, p["repo"]) or {}).get("account") or cfg.get("account")
+            try:
+                me = gh.whoami(acct) if acct else (gh.active_account() or "")
+                item["requestedBy"] = gh.review_requester(p["repo"], p["number"], me,
+                                                          account=acct)
+            except gh.GhError:
+                item["requestedBy"] = None
+            try:
+                meta = gh.pr_meta(p["repo"], p["number"], account=acct)
+                item["issues"] = gh.linked_issues(p["repo"], p["number"],
+                                                  meta.get("title") or p["title"],
+                                                  meta.get("body") or "", account=acct)
+                item["prAuthor"] = (meta.get("author") or {}).get("login") or p["author"]
+                item["isDraft"] = bool(meta.get("isDraft"))
+                item["changedFiles"] = meta.get("changedFiles")
+            except gh.GhError:
+                item["issues"] = []
+        pending.append(item)
+    return {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "accounts": accounts,
+        "repos": sorted(cfg.get("repos") or {}),
+        # UI 가 편집하려면 이름만으로는 부족하다 — 켜짐 여부와 로컬 클론까지 준다.
+        "repoDetails": [
+            {"slug": name,
+             "enabled": bool(e.get("enabled", True)),
+             "account": e.get("account") or "",
+             "localPath": e.get("localPath") or "",
+             "cloned": os.path.isdir(os.path.join(
+                 os.path.expanduser(e.get("localPath") or "/nonexistent"), ".git"))}
+            for name, e in sorted((cfg.get("repos") or {}).items())],
+        "dryRun": bool(cfg["post"].get("dryRun", True)),
+        "maxPerTick": cfg["limits"].get("maxPerTick") or 2,
+        "paused": _paused_info(),
+        "running": _lock_info(),
+        "config": _config_info(cfg),
+        "schedule": store.read_schedule() if hasattr(store, "read_schedule") else None,
+        "pending": pending,
+        "drafts": [{"repo": d.get("repo"), "number": d.get("number"),
+                    "title": d.get("title"), "event": d.get("event"),
+                    "inline": d.get("inline"), "demoted": d.get("demoted"),
+                    "sha": d.get("sha"), "at": d.get("at")}
+                   for d in store.pending_drafts()],
+        "reviewed": state,
+        "errors": errors,
+    }
+
+
+def cmd_status(args, cfg):
+    if getattr(args, "json", False):
+        print(json.dumps(status_payload(cfg, skip_details=getattr(args, "fast", False)),
+                         ensure_ascii=False, indent=2))
+        return 0
+    groups = _accounts(cfg)
+    for acct, repos in groups.items():
+        if acct:
+            try:
+                me = gh.whoami(acct)
+                mark = "✓" if (me or "").lower() == acct.lower() else "❌ 토큰 주인은 %s" % me
+            except gh.GhError as e:
+                mark = "❌ %s" % str(e)[:60]
+            print("계정: %s %s → %s" % (acct, mark, ", ".join(sorted(repos))))
+        else:
+            print("계정: (전역 gh 활성 계정 %s) → %s"
+                  % (gh.active_account() or "?", ", ".join(sorted(repos))))
+    print("감시 저장소: %s" % (", ".join(cfg.get("repos") or {}) or "(없음 — 아무것도 리뷰하지 않습니다)"))
+    print("게시 모드: %s" % ("dry-run (초안만)" if cfg["post"].get("dryRun", True) else "자동 게시"))
+    print("일시정지: %s" % ("예" if store.is_paused() else "아니오"))
+    state = store.load()
+    prs = []
+    for acct in groups:
+        try:
+            prs += gh.review_requests(account=acct)
+        except gh.GhError as e:
+            print("리뷰 요청 조회 실패 (%s): %s" % (acct or "전역 gh", e))
+    known = set(cfg.get("repos") or {})
+    print("\n대기 중인 리뷰 요청 %d건:" % len(prs))
+    for p in prs:
+        rec = state.get(store.key(p["repo"], p["number"]))
+        if not rec:
+            mark = "· 대기" if p["repo"] in known else "  (감시 대상 아님)"
+        elif rec.get("posted") is False:
+            # 초안만 있는 기록. 게시 모드에서는 다음 틱이 다시 리뷰해서 게시한다.
+            mark = "◦ 초안만" if cfg["post"].get("dryRun", True) else "◦ 초안만 → 재리뷰"
+        else:
+            mark = "✓ 리뷰함"
+        print("  %-10s %s#%-6s %s" % (mark, p["repo"], p["number"], p["title"][:52]))
+    print("\n처리 이력 %d건" % len(state))
+    return 0
+
+
+# verify.md 의 confidence 루브릭과 같은 구간이어야 분포를 읽을 수 있다.
+CONF_BUCKETS = ((0, 25), (26, 50), (51, 75), (76, 90), (91, 100))
+FATES = ("inline", "body", "drop", "filtered", "rejected")
+
+
+def cmd_verify_log(args, cfg):
+    """반증이 매긴 confidence 가 실제로 무엇을 갈랐는지 본다.
+
+    지금 봇은 confidence 로 아무것도 거르지 않는다 (verdict 만 본다). 이 표는
+    "점수의 컷이 필요한가, 필요하면 몇 점인가" 를 감이 아니라 분포로 답하기
+    위한 것이다.
+    """
+    rows = store.read_verify()
+    if not rows:
+        print("반증 기록이 없습니다 — 리뷰를 한 번 돌리면 쌓입니다.")
+        return 0
+    if getattr(args, "json", False):
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return 0
+
+    print("반증 기록 %d건 (%s ~ %s)\n"
+          % (len(rows), rows[0].get("at", "?")[:10], rows[-1].get("at", "?")[:10]))
+    print("%-10s %s" % ("confidence", "".join("%-10s" % f for f in FATES)))
+    for lo, hi in CONF_BUCKETS:
+        sel = [r for r in rows if isinstance(r.get("confidence"), int)
+               and lo <= r["confidence"] <= hi]
+        if not sel:
+            continue
+        counts = ["%-10s" % sum(1 for r in sel if r.get("fate") == f) for f in FATES]
+        print("%-10s %s (합 %d)" % ("%d-%d" % (lo, hi), "".join(counts), len(sel)))
+    unscored = [r for r in rows if not isinstance(r.get("confidence"), int)]
+    if unscored:
+        print("\n점수 없음 %d건 (검증 실패 — 지적은 살렸습니다)" % len(unscored))
+
+    print("\n판정별:")
+    for v in ("TRUE_POSITIVE", "FALSE_POSITIVE"):
+        sel = [r for r in rows if r.get("verdict") == v]
+        if sel:
+            cs = [r["confidence"] for r in sel if isinstance(r.get("confidence"), int)]
+            rng = " · conf %d~%d" % (min(cs), max(cs)) if cs else ""
+            print("  %-15s %d건%s" % (v, len(sel), rng))
+
+    if getattr(args, "verbose", False):
+        print("\n전체 기록:")
+        for r in rows[-(args.limit):]:
+            print("  [%s/%s → %s] %s:%s %s"
+                  % (r.get("verdict", "?"), r.get("confidence", "?"),
+                     r.get("fate", "?"), r.get("path"), r.get("line"),
+                     (r.get("title") or "")[:50]))
+    return 0
+
+
+# 에이전트 정의에 반드시 있어야 하는 것. 봇은 역할 본문만 쓰므로 Role 이 비면
+# 리뷰어가 무엇을 보는 사람인지 아무도 모르는 채로 돈다.
+REQUIRED_SECTIONS = ("Role",)
+
+
+def _agent_summary(name, model_cfg):
+    meta, _ = agents_mod.load(name)
+    raw = (meta.get("tools") or "").strip().strip("[]")
+    return {"name": name,
+            "runsAs": cfg_mod.model_for(model_cfg, name),
+            "frontmatterModel": meta.get("model") or "",
+            "tools": [t.strip() for t in raw.split(",") if t.strip()],
+            "description": (meta.get("description") or "")[:100]}
+
+
+BUNDLED_AGENTS = os.path.join(cfg_mod.ROOT, "agents")
+
+
+def cmd_setup(args, cfg):
+    """처음 한 번 돌리는 설치. 번들 리뷰어를 깔고 launchd 를 이 기계에 맞춘다.
+
+    봇은 리뷰어 정의를 ~/.claude/agents/ 에서 읽는다. 저장소가 들고 온 정의를
+    거기에 복사해 두지 않으면 새 기계에서는 리뷰어가 하나도 서지 않는다.
+    """
+    steps = []
+
+    # 1) 번들 리뷰어 설치
+    if os.path.isdir(BUNDLED_AGENTS):
+        os.makedirs(agents_mod.AGENTS_DIR, exist_ok=True)
+        for fn in sorted(os.listdir(BUNDLED_AGENTS)):
+            if not fn.endswith(".md"):
+                continue
+            src = os.path.join(BUNDLED_AGENTS, fn)
+            dest = os.path.join(agents_mod.AGENTS_DIR, fn)
+            if os.path.exists(dest) and not args.force:
+                steps.append("리뷰어 %s — 이미 있어 건너뜀 (덮어쓰려면 --force)" % fn[:-3])
+                continue
+            shutil.copyfile(src, dest)
+            steps.append("리뷰어 %s → %s" % (fn[:-3], dest))
+
+    # 2) config.json 이 없으면 예시에서 만든다
+    cfg_path = args.config or os.path.join(cfg_mod.ROOT, "config.json")
+    if not os.path.exists(cfg_path):
+        example = os.path.join(cfg_mod.ROOT, "config.example.json")
+        if os.path.exists(example):
+            shutil.copyfile(example, cfg_path)
+            steps.append("설정 %s (예시에서 복사 — repos 를 채우세요)" % cfg_path)
+
+    # 3) launchd plist 를 이 기계의 경로로 찍어 낸다
+    if args.launchd:
+        steps.append(_write_plist(args.interval))
+
+    for line in steps:
+        print("  " + line)
+    print()
+    print("다음으로:")
+    print("  review-bot repo add <owner/repo> --path <로컬 클론>")
+    print("  review-bot account set <gh 계정>")
+    print("  review-bot doctor")
+    return 0
+
+
+def _write_plist(interval_min):
+    """launchd plist 를 지금 이 설치 위치로 만들어 넣는다."""
+    root = cfg_mod.ROOT
+    label = LAUNCHD_LABEL
+    path = _plist_path()
+    if os.path.islink(path):
+        # 이미 저장소의 plist 로 링크가 걸려 있다. 덮어쓰면 그 링크가 끊긴다.
+        return ("launchd %s — 이미 링크로 등록되어 있어 건드리지 않았습니다" % path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    plist = {
+        "Label": label,
+        "ProgramArguments": [os.path.join(root, "review-bot"), "tick"],
+        "WorkingDirectory": root,
+        "StandardOutPath": os.path.join(root, "state", "bot.log"),
+        "StandardErrorPath": os.path.join(root, "state", "bot.err"),
+        "StartInterval": max(60, int(interval_min) * 60),
+        "RunAtLoad": False,
+        "EnvironmentVariables": {"PATH": os.environ.get(
+            "PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")},
+    }
+    os.makedirs(os.path.join(root, "state"), exist_ok=True)
+    with open(path, "wb") as f:
+        plistlib.dump(plist, f)
+    return ("launchd %s (%d분 간격) — 켜려면 `launchctl load %s`"
+            % (path, interval_min, path))
+
+
+def cmd_agent(args, cfg):
+    """리뷰어 등록·해제·목록. 정의 파일은 ~/.claude/agents/ 에 산다."""
+    raw = cfg_mod.load_raw(args.config)
+    rcfg = raw.setdefault("review", {})
+    listed = rcfg.get("agents")
+    if listed is None:                    # 파일에 없으면 기본값이 돌고 있는 것이다
+        listed = list(cfg["review"]["agents"])
+
+    if args.action == "list":
+        for name in listed:
+            try:
+                info = _agent_summary(name, cfg["review"].get("model"))
+                print("%-24s %-8s 도구 %s" % (
+                    info["name"], info["runsAs"], ",".join(info["tools"]) or "-"))
+                if info["description"]:
+                    print("  %s" % info["description"])
+            except agents_mod.AgentError as e:
+                print("%-24s ❌ %s" % (name, e))
+        if not listed:
+            print("등록된 리뷰어가 없습니다.")
+        return 0
+
+    if args.action == "add":
+        src = os.path.expanduser(args.target)
+        if not src.endswith(".md"):
+            raise SystemExit("에이전트 정의는 .md 파일이어야 합니다: %s" % src)
+        try:
+            meta, body = agents_mod.parse(src)
+        except agents_mod.AgentError as e:
+            raise SystemExit(str(e))
+        name = (args.name or meta.get("name") or
+                os.path.basename(src)[:-3]).strip()
+        if not name or "/" in name or name.startswith("."):
+            raise SystemExit("에이전트 이름이 이상합니다: %r" % name)
+        missing = [h for h in REQUIRED_SECTIONS
+                   if ("# " + h) not in body]
+        if missing:
+            raise SystemExit("정의에 %s 섹션이 없습니다 — 봇은 그 본문으로 리뷰어를 세웁니다"
+                             % ", ".join(missing))
+
+        dest = os.path.join(agents_mod.AGENTS_DIR, name + ".md")
+        if os.path.abspath(src) != os.path.abspath(dest):
+            if os.path.exists(dest) and not args.force:
+                raise SystemExit("이미 있습니다: %s — 덮어쓰려면 --force" % dest)
+            os.makedirs(agents_mod.AGENTS_DIR, exist_ok=True)
+            shutil.copyfile(src, dest)
+            print("정의 복사 → %s" % dest)
+
+        if name in listed:
+            print("이미 등록된 리뷰어입니다: %s" % name)
+        else:
+            listed.append(name)
+            rcfg["agents"] = listed
+            cfg_mod.save_raw(raw, args.config)
+            print("등록: %s (리뷰어 %d개)" % (name, len(listed)))
+        if args.model:
+            return _set_agent_model(raw, name, args.model, args.config)
+        # 걷어내고 남는 것이 실제로 리뷰어에게 가는 본문이다 — 등록 직후에 보여 준다
+        role = agents_mod.role(name)
+        secs = [l[2:] for l in role.splitlines() if l.startswith("# ")]
+        print("  봇이 쓰는 섹션: %s (%d자)" % (", ".join(secs) or "(없음)", len(role)))
+        print("  실제 모델: %s · 도구: %s"
+              % (cfg_mod.model_for(cfg["review"].get("model"), name),
+                 reviewer.ALLOWED_TOOLS))
+        return 0
+
+    if args.action == "remove":
+        name = args.target
+        if name not in listed:
+            raise SystemExit("등록되어 있지 않습니다: %s" % name)
+        listed.remove(name)
+        rcfg["agents"] = listed
+        # 모델 지정도 같이 걷어낸다. 남겨 두면 없는 리뷰어의 설정이 쌓인다.
+        m = rcfg.get("model")
+        if isinstance(m, dict) and name in m:
+            del m[name]
+        cfg_mod.save_raw(raw, args.config)
+        print("해제: %s (리뷰어 %d개) — 정의 파일은 그대로 둡니다" % (name, len(listed)))
+        return 0
+
+    if args.action == "model":
+        if not args.target or not args.model:
+            raise SystemExit("사용법: review-bot agent model <이름> --model <모델>")
+        if args.target not in listed:
+            raise SystemExit("등록되어 있지 않습니다: %s" % args.target)
+        return _set_agent_model(raw, args.target, args.model, args.config)
+    return 1
+
+
+def _set_agent_model(raw, name, model, path):
+    """리뷰어 하나의 모델을 지정한다. 문자열 설정이면 dict 로 승격한다."""
+    rcfg = raw.setdefault("review", {})
+    m = rcfg.get("model")
+    if not isinstance(m, dict):
+        m = {"default": m or "sonnet"}
+    m[name] = model
+    rcfg["model"] = m
+    cfg_mod.save_raw(raw, path)
+    print("모델: %s → %s" % (name, model))
+    return 0
+
+
+def cmd_repo(args, cfg):
+    """감시할 저장소 등록·해제·목록. 화이트리스트가 곧 안전장치다."""
+    raw = cfg_mod.load_raw(args.config)
+    repos = raw.setdefault("repos", {})
+
+    if args.action == "list":
+        if not repos:
+            print("감시 저장소가 없습니다 — 아무 PR 도 리뷰하지 않습니다.")
+        for name, e in sorted(repos.items()):
+            lp = os.path.expanduser(e.get("localPath") or "")
+            mark = "" if not lp else (" · 클론 있음" if os.path.isdir(os.path.join(lp, ".git"))
+                                      else " · ❌ 클론 없음: %s" % lp)
+            print("%-30s %s%s%s" % (
+                name, "켜짐" if e.get("enabled", True) else "꺼짐",
+                " · 계정 %s" % e["account"] if e.get("account") else "", mark))
+        return 0
+
+    if "/" not in (args.target or ""):
+        raise SystemExit("저장소는 owner/repo 형식입니다: %r" % args.target)
+
+    if args.action == "add":
+        entry = dict(repos.get(args.target) or {})
+        entry["enabled"] = True
+        if args.path:
+            entry["localPath"] = args.path
+        if args.account:
+            entry["account"] = args.account
+        repos[args.target] = entry
+        cfg_mod.save_raw(raw, args.config)
+        print("등록: %s%s" % (args.target,
+                            " (로컬 %s)" % entry["localPath"] if entry.get("localPath") else ""))
+        lp = os.path.expanduser(entry.get("localPath") or "")
+        if lp and not os.path.isdir(os.path.join(lp, ".git")):
+            print("  ⚠ 그 경로에 git 클론이 없습니다 — 봇이 캐시에 새로 clone 합니다")
+        return 0
+
+    if args.action in ("remove", "disable", "enable"):
+        if args.target not in repos:
+            raise SystemExit("등록되어 있지 않습니다: %s" % args.target)
+        if args.action == "remove":
+            del repos[args.target]
+            print("해제: %s" % args.target)
+        else:
+            repos[args.target]["enabled"] = (args.action == "enable")
+            print("%s: %s" % (args.target, "켬" if args.action == "enable" else "끔"))
+        cfg_mod.save_raw(raw, args.config)
+        return 0
+    return 1
+
+
+def cmd_account(args, cfg):
+    """봇이 조회·게시에 쓸 gh 계정. 토큰의 주인과 일치해야 게시가 나간다."""
+    raw = cfg_mod.load_raw(args.config)
+    if args.action == "list":
+        cur = raw.get("account")
+        print("설정된 계정: %s" % (cur or "(없음 — 그때그때 활성인 gh 계정을 따릅니다)"))
+        try:
+            print("현재 gh 활성 계정: %s" % (gh.active_account() or "?"))
+        except gh.GhError as e:
+            print("gh 상태를 읽지 못했습니다: %s" % e)
+        if cur:
+            try:
+                me = gh.whoami(cur)
+                print("토큰 주인: %s %s" % (me, "✓" if (me or "").lower() == cur.lower() else "❌ 불일치"))
+            except gh.GhError as e:
+                print("❌ %s" % e)
+        for name, e in sorted((raw.get("repos") or {}).items()):
+            if e.get("account"):
+                print("  %s → %s (저장소별 지정)" % (name, e["account"]))
+        return 0
+
+    if args.action == "set":
+        if not args.target:
+            raise SystemExit("사용법: review-bot account set <계정>")
+        try:
+            me = gh.whoami(args.target)
+        except gh.GhError as e:
+            raise SystemExit("그 계정으로 인증되지 않습니다 (%s) — 먼저 `gh auth login` 하세요" % e)
+        if (me or "").lower() != args.target.lower():
+            raise SystemExit("토큰의 주인이 %s 입니다 — 계정을 바꾸지 않았습니다" % me)
+        raw["account"] = args.target
+        cfg_mod.save_raw(raw, args.config)
+        print("계정: %s ✓" % args.target)
+        return 0
+
+    if args.action == "clear":
+        raw.pop("account", None)
+        cfg_mod.save_raw(raw, args.config)
+        print("계정 지정을 지웠습니다 — 그때그때 활성인 gh 계정을 따릅니다")
+        return 0
+    return 1
+
+
+def cmd_runs(args, cfg):
+    if not os.path.exists(store.LOG):
+        print("이력 없음")
+        return 0
+    with open(store.LOG, encoding="utf-8") as f:
+        rows = [json.loads(l) for l in f if l.strip()]
+    for r in rows[-(args.limit):]:
+        print("%s %s#%s %s" % (
+            r.get("at", ""), r.get("repo"), r.get("number"),
+            r.get("error") or "%s · inline %s · 본문 %s · %s" % (
+                r.get("event") or "-", r.get("inline"), r.get("demoted"),
+                "게시" if r.get("posted") else "초안")))
+    return 0
+
+
+def cmd_pause(args, cfg):
+    store.pause(args.reason or "")
+    print("일시정지했습니다. tick 이 아무것도 하지 않습니다.")
+    return 0
+
+
+def cmd_resume(args, cfg):
+    store.resume()
+    print("재개했습니다.")
+    return 0
+
+
+def cmd_doctor(args, cfg):
+    ok = True
+    for tool in ("gh", "git", "claude"):
+        p = shutil.which(tool)
+        print("%-8s %s" % (tool, p or "없음 ❌"))
+        ok = ok and bool(p)
+    print("%-8s %s (전역 활성)" % ("gh 계정", gh.active_account() or "미인증 ❌"))
+    for acct, repos in _accounts(cfg).items():
+        if not acct:
+            print("%-8s 고정 안 됨 — 활성 계정을 따라갑니다. 계정이 둘이면 config 에 account 를 적으세요 ⚠️"
+                  % "계정")
+            continue
+        try:
+            me = gh.whoami(acct)
+            good = (me or "").lower() == acct.lower()
+            print("%-8s %s → 토큰 주인 %s %s" % ("고정 계정", acct, me, "✓" if good else "❌ 불일치"))
+            ok = ok and good
+        except gh.GhError as e:
+            print("%-8s %s ❌ %s" % ("고정 계정", acct, str(e)[:80]))
+            ok = False
+    repos = cfg.get("repos") or {}
+    if not repos:
+        print("설정   저장소 화이트리스트가 비어 있습니다 — 아무것도 리뷰하지 않습니다 ⚠️")
+    for repo, e in repos.items():
+        lp = os.path.expanduser(e.get("localPath") or "")
+        state = "로컬 클론 %s" % ("있음" if lp and os.path.isdir(os.path.join(lp, ".git"))
+                                   else "없음 (봇 캐시에 clone 합니다)")
+        print("%-8s %s — %s" % ("저장소", repo, state))
+    missing = []
+    for a in cfg["review"]["agents"]:
+        f = os.path.join(agents_mod.AGENTS_DIR, a + ".md")
+        here = os.path.exists(f)
+        print("%-8s %s %s" % ("리뷰어", a, "✓" if here else "❌ 정의 없음"))
+        if not here:
+            missing.append(a)
+        ok = ok and here
+    if missing:
+        bundled = [f[:-3] for f in os.listdir(BUNDLED_AGENTS)
+                   if f.endswith(".md")] if os.path.isdir(BUNDLED_AGENTS) else []
+        if [m for m in missing if m in bundled]:
+            print("         → `review-bot setup` 이 번들 리뷰어를 설치합니다")
+        else:
+            print("         → `review-bot agent add <정의.md>` 로 등록하거나, "
+                  "`review-bot agent remove <이름>` 으로 목록에서 빼세요")
+    print("\n%s" % ("점검 통과" if ok else "빠진 것이 있습니다"))
+    return 0 if ok else 1
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="review-bot", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--config", help="설정 파일 경로")
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("tick").set_defaults(fn=cmd_tick)
+    r = sub.add_parser("review")
+    r.add_argument("target")
+    r.add_argument("--agents", help="이번만 이 리뷰어들로 (쉼표 구분). 빠진 관점만 보완할 때")
+    r.add_argument("--note", help="요약 본문 맨 위에 실을 안내 — 왜 또 리뷰가 올라왔는지")
+    r.set_defaults(fn=cmd_review)
+    st = sub.add_parser("status")
+    st.add_argument("--json", action="store_true", help="앱·스크립트가 읽을 JSON 으로 출력")
+    st.add_argument("--fast", action="store_true",
+                    help="PR 별 추가 조회(요청자·연결된 이슈)를 건너뛴다")
+    st.set_defaults(fn=cmd_status)
+    ru = sub.add_parser("runs"); ru.add_argument("-n", "--limit", type=int, default=20)
+    ru.set_defaults(fn=cmd_runs)
+    st = sub.add_parser("setup", help="처음 한 번 — 번들 리뷰어 설치와 launchd 등록")
+    st.add_argument("--force", action="store_true", help="이미 있는 리뷰어 정의도 덮어쓴다")
+    st.add_argument("--launchd", action="store_true", help="launchd plist 를 만든다")
+    st.add_argument("--interval", type=int, default=15, help="틱 주기(분)")
+    st.add_argument("--config")
+    st.set_defaults(fn=cmd_setup)
+
+    ag = sub.add_parser("agent", help="리뷰어 등록·해제·목록")
+    ag.add_argument("action", choices=["list", "add", "remove", "model"])
+    ag.add_argument("target", nargs="?", help="add 는 .md 경로, remove/model 은 이름")
+    ag.add_argument("--name", help="등록할 이름 (기본: 정의의 name)")
+    ag.add_argument("--model", help="이 리뷰어가 쓸 모델")
+    ag.add_argument("--force", action="store_true", help="같은 이름의 정의를 덮어쓴다")
+    ag.add_argument("--config")
+    ag.set_defaults(fn=cmd_agent)
+
+    rp = sub.add_parser("repo", help="감시 저장소 등록·해제·목록")
+    rp.add_argument("action", choices=["list", "add", "remove", "enable", "disable"])
+    rp.add_argument("target", nargs="?", help="owner/repo")
+    rp.add_argument("--path", help="로컬 클론 경로 (worktree 를 여기서 뜬다)")
+    rp.add_argument("--account", help="이 저장소에만 쓸 gh 계정")
+    rp.add_argument("--config")
+    rp.set_defaults(fn=cmd_repo)
+
+    ac = sub.add_parser("account", help="게시에 쓸 gh 계정")
+    ac.add_argument("action", choices=["list", "set", "clear"])
+    ac.add_argument("target", nargs="?")
+    ac.add_argument("--config")
+    ac.set_defaults(fn=cmd_account)
+
+    vl = sub.add_parser("verify-log")
+    vl.add_argument("-n", "--limit", type=int, default=30)
+    vl.add_argument("-v", "--verbose", action="store_true", help="기록을 하나씩 펼친다")
+    vl.add_argument("--json", action="store_true")
+    vl.set_defaults(fn=cmd_verify_log)
+    p = sub.add_parser("pause"); p.add_argument("reason", nargs="?"); p.set_defaults(fn=cmd_pause)
+    sub.add_parser("resume").set_defaults(fn=cmd_resume)
+    pb = sub.add_parser("publish"); pb.add_argument("target")
+    pb.add_argument("--dry-run", action="store_true", help="올리지 않고 무엇이 나갈지만 보여준다")
+    pb.set_defaults(fn=cmd_publish)
+    sub.add_parser("drafts").set_defaults(fn=cmd_drafts)
+    fg = sub.add_parser("forget")
+    fg.add_argument("target", nargs="?", help="owner/repo#123 — 그 PR 의 이력")
+    fg.add_argument("--at", help="그 PR 의 특정 기록 하나 (runs 의 at 값)")
+    fg.add_argument("--all", action="store_true", help="이력 전체")
+    fg.add_argument("--older-than", type=float, metavar="일", help="N일 지난 기록")
+    fg.add_argument("--reset", action="store_true",
+                    help="처리 지문까지 지워 다시 리뷰하게 한다 (비용 발생)")
+    fg.set_defaults(fn=cmd_forget)
+    iv = sub.add_parser("interval")
+    iv.add_argument("minutes", nargs="?", type=float, help="틱 주기(분). 생략하면 조회")
+    iv.set_defaults(fn=cmd_interval)
+    md = sub.add_parser("mode")
+    md.add_argument("mode", nargs="?", choices=["auto", "draft"],
+                    help="auto=바로 게시, draft=초안만 남기고 사람이 게시")
+    md.set_defaults(fn=cmd_mode)
+    cp = sub.add_parser("cap")
+    cp.add_argument("count", nargs="?", type=int,
+                    help="틱 한 번에 리뷰할 PR 최대 건수. 생략하면 조회")
+    cp.set_defaults(fn=cmd_cap)
+    sub.add_parser("gc").set_defaults(fn=cmd_gc)
+    sub.add_parser("doctor").set_defaults(fn=cmd_doctor)
+    args = ap.parse_args()
+    if not getattr(args, "fn", None):
+        ap.print_help()
+        return 0
+    return args.fn(args, cfg_mod.load(args.config))
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
