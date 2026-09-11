@@ -11,6 +11,10 @@ LOG = os.path.join(STATE_DIR, "runs.jsonl")
 # 이 점수가 실제로 무엇을 가르는지 데이터가 쌓인 뒤에 판단하려고 남기는 것이다.
 VERIFY_LOG = os.path.join(STATE_DIR, "verify.jsonl")
 LOG_TEXT = os.path.join(STATE_DIR, "bot.log")   # launchd 가 stdout 을 붙이는 그 파일
+# 날짜별 틱 로그. launchd 는 bot.log 하나에 파일 핸들을 잡고 있어 그 파일 자체를
+# 쪼갤 수 없으므로, 봇이 여기에 따로 적는다. bot.log 는 launchd 의 raw 출력으로
+# 남겨 두고(예기치 못한 stderr 도 거기 떨어진다), 사람이 읽는 것은 이쪽이다.
+LOGS_DIR = os.path.join(STATE_DIR, "logs")
 PAUSED = os.path.join(STATE_DIR, "PAUSED")
 DRAFTS = os.path.join(STATE_DIR, "drafts")
 
@@ -99,6 +103,42 @@ def mark(data, repo, number, sha, **fields):
     rec.update(fields)
     data[key(repo, number)] = rec
     return data
+
+
+def day_log_path(day=None):
+    return os.path.join(LOGS_DIR, "%s.log" % (day or time.strftime("%Y-%m-%d")))
+
+
+def append_day_log(line):
+    """오늘 날짜 파일에 한 줄 붙인다. 실패해도 리뷰를 막지 않는다."""
+    try:
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        with open(day_log_path(), "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def log_days():
+    """로그가 있는 날짜, 최근 것부터."""
+    if not os.path.isdir(LOGS_DIR):
+        return []
+    days = [f[:-4] for f in os.listdir(LOGS_DIR)
+            if f.endswith(".log") and len(f) == 14]
+    return sorted(days, reverse=True)
+
+
+def read_day_log(day=None, max_lines=4000):
+    """하루치 로그 줄. 없으면 빈 목록."""
+    path = day_log_path(day)
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [l.rstrip("\n") for l in f]
+    except OSError:
+        return []
+    return lines[-max_lines:]
 
 
 def log_run(record):

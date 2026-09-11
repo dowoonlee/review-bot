@@ -97,6 +97,29 @@ def rotate_logs(max_bytes=5_000_000):
     return n
 
 
+def prune_day_logs(keep_days=30):
+    """날짜별 틱 로그를 보존 기간만큼만 남긴다 — (지운 개수, 바이트)."""
+    logs = os.path.join(STATE_DIR, "logs")
+    if not os.path.isdir(logs):
+        return 0, 0
+    cutoff = time.strftime("%Y-%m-%d",
+                           time.localtime(time.time() - keep_days * 86400))
+    n, freed = 0, 0
+    for name in sorted(os.listdir(logs)):
+        if not name.endswith(".log") or len(name) != 14:
+            continue
+        if name[:-4] >= cutoff:
+            continue
+        path = os.path.join(logs, name)
+        try:
+            freed += os.path.getsize(path)
+            os.remove(path)
+            n += 1
+        except OSError:
+            pass
+    return n, freed
+
+
 def prune_reviewed(state, keep_days=90):
     """닫힌 지 오래된 PR 기록은 중복 방지에 더 쓸모가 없다."""
     cutoff = time.strftime("%Y-%m-%dT%H:%M:%S",

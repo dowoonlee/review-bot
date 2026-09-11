@@ -56,6 +56,9 @@ def _log(msg):
     # launchd 로 뜨면 stdout 이 곧 bot.log 라 그대로 두면 되지만, 터미널이나 앱에서
     # 부르면 아무 데도 남지 않는다 — 앱의 "지금 틱" 으로 돈 리뷰가 로그에서 통째로
     # 사라졌다. 같은 파일이 아닐 때만 덧붙인다.
+    # 날짜별 파일이 사람이 읽는 로그다. stdout 이 bot.log 로 리다이렉트돼 있어도
+    # 여기에는 따로 적는다 — 그래야 하루치만 꺼내 보거나 오래된 날을 지울 수 있다.
+    store.append_day_log(line)
     if _same_file_as_stdout(store.LOG_TEXT):
         return
     try:
@@ -841,33 +844,10 @@ def cmd_cap(args, cfg):
     return 0
 
 
-def _log_day_break():
-    """날짜가 바뀌면 로그에 구분선을 남긴다.
-
-    bot.log 는 시각만 찍는다. 그래서 어제 16:29 줄과 오늘 16:20 줄이 나란히 놓이면
-    눈으로 구분할 수 없고, 실제로 어제 에러를 오늘 것으로 읽는 일이 있었다.
-    """
-    today = time.strftime("%Y-%m-%d")
-    marker = os.path.join(store.STATE_DIR, ".logday")
-    try:
-        with open(marker, encoding="utf-8") as f:
-            if f.read().strip() == today:
-                return
-    except OSError:
-        pass
-    print("───────────────── %s ─────────────────" % today, flush=True)
-    try:
-        with open(marker, "w", encoding="utf-8") as f:
-            f.write(today)
-    except OSError:
-        pass
-
-
 def cmd_tick(args, cfg):
     # launchd 가 띄운 틱만 타이머 기준점이 된다 — 손으로 부른 틱은 launchd 의 시계와
     # 무관하다. stdout 이 bot.log 로 리다이렉트돼 있으면 launchd 가 띄운 것이다.
     if _same_file_as_stdout(store.LOG_TEXT):
-        _log_day_break()
         store.set_schedule_anchor("launchd-tick", _interval_sec())
     if store.is_paused():
         _log("일시정지 상태입니다 (state/PAUSED). `review-bot resume` 으로 해제하세요.")
@@ -902,6 +882,9 @@ def _gc(cfg, verbose=False):
         out.append("반증 기록 %d줄" % nv)
     if janitor.rotate_logs(g.get("logMaxBytes", 5000000)):
         out.append("로그 로테이션")
+    nl, lfreed = janitor.prune_day_logs(g.get("logDays", 30))
+    if nl:
+        out.append("지난 로그 %d일치 (%s)" % (nl, janitor.human(lfreed)))
     nc, cfreed = janitor.sweep_cache_repos(cfg.get("repos"))
     if nc:
         out.append("캐시 클론 %d개 (%s)" % (nc, janitor.human(cfreed)))

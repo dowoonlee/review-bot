@@ -98,6 +98,8 @@ DEFAULTS = {
         # 봐야 하는 자료라 넉넉히 남긴다.
         "verifyMaxLines": 20000,
         "logMaxBytes": 5000000,
+        # 날짜별 틱 로그 보존 기간. 하루치가 보통 수십 KB 라 넉넉히 둔다.
+        "logDays": 30,
         "reviewedDays": 90,
     },
 }

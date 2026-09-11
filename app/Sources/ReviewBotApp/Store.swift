@@ -10,6 +10,10 @@ import Observation
 final class BotStore {
     var runs: [RunRecord] = []
     var logLines: [LogLine] = []
+    /// 지금 보고 있는 날짜. 기본은 오늘 — 지난 로그는 사용자가 고를 때만 읽는다.
+    var logDay: String = BotPaths.today
+    /// 로그가 있는 날짜, 최근 것부터.
+    var logDays: [String] = []
     var reviewed: [String: ReviewedRecord] = [:]
     var status: StatusSnapshot?
     var live: [LiveSession] = []
@@ -173,8 +177,26 @@ final class BotStore {
         runs.sort { ($0.at ?? "") > ($1.at ?? "") }
     }
 
+    /// 보고 있는 날짜를 바꾼다. 파일이 다르므로 처음부터 다시 읽는다.
+    func showLogDay(_ day: String) {
+        guard day != logDay else { return }
+        logDay = day
+        logOffset = 0
+        logLines.removeAll()
+        readLog()
+    }
+
+    private func scanLogDays() {
+        let fm = FileManager.default
+        let names = (try? fm.contentsOfDirectory(atPath: BotPaths.logsDir.path)) ?? []
+        logDays = names.filter { $0.hasSuffix(".log") && $0.count == 14 }
+            .map { String($0.dropLast(4)) }
+            .sorted(by: >)
+    }
+
     private func readLog() {
-        guard let data = newBytes(BotPaths.botLog, offset: &logOffset) else { return }
+        scanLogDays()
+        guard let data = newBytes(BotPaths.dayLog(logDay), offset: &logOffset) else { return }
         if logOffset == UInt64(data.count) { logLines.removeAll() }
         let text = String(decoding: data, as: UTF8.self)
         for raw in text.split(separator: "\n", omittingEmptySubsequences: true) {

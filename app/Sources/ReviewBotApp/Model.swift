@@ -22,6 +22,15 @@ enum BotPaths {
     static var schedule: URL { state.appending(path: "schedule.json") }
     static var runsLog: URL { state.appending(path: "runs.jsonl") }
     static var botLog: URL { state.appending(path: "bot.log") }
+    /// 날짜별 틱 로그가 사는 곳. 사람이 읽는 것은 이쪽이다.
+    static var logsDir: URL { state.appending(path: "logs") }
+    static func dayLog(_ day: String) -> URL {
+        logsDir.appending(path: "\(day).log")
+    }
+    static var today: String {
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: Date())
+    }
     static var reviewed: URL { state.appending(path: "reviewed.json") }
     static var paused: URL { state.appending(path: "PAUSED") }
     static var lock: URL { state.appending(path: "tick.lock") }

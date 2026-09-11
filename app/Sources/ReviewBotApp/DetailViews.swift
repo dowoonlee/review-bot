@@ -350,8 +350,38 @@ struct PendingDetailView: View {
 
 struct LogPaneView: View {
     @Environment(BotStore.self) private var store
+    @State private var showPicker = false
+
+    /// 날짜 줄. 기본은 오늘만 보여 주고, 지난 날은 고를 때만 읽는다 — 로그를
+    /// 한 파일에 쌓아 두면 어제 것이 오늘 것처럼 보인다.
+    private var dayBar: some View {
+        HStack(spacing: 8) {
+            Text(store.logDay == BotPaths.today ? "오늘" : store.logDay)
+                .f(.caption, .semibold)
+            if store.logDay != BotPaths.today {
+                Button("오늘로") { store.showLogDay(BotPaths.today) }.f(.caption2)
+            }
+            Spacer()
+            let earlier = store.logDays.filter { $0 != store.logDay }
+            if !earlier.isEmpty {
+                Menu {
+                    ForEach(earlier, id: \.self) { d in
+                        Button(d == BotPaths.today ? "오늘" : d) { store.showLogDay(d) }
+                    }
+                } label: {
+                    Label("지난 로그 \(earlier.count)일", systemImage: "calendar")
+                        .f(.caption2)
+                }
+                .menuStyle(.borderlessButton).fixedSize()
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .background(.quaternary.opacity(0.25))
+    }
 
     var body: some View {
+        VStack(spacing: 0) {
+        dayBar
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
@@ -385,6 +415,7 @@ struct LogPaneView: View {
                     .background(.red.opacity(0.15), in: RoundedRectangle(cornerRadius: 6))
                     .padding(10)
             }
+        }
         }
     }
 }
