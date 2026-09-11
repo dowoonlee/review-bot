@@ -185,10 +185,21 @@ final class BotStore {
             logLines.append(LogLine(
                 id: logLines.count, time: time, text: trimmed,
                 indented: body.hasPrefix("  ") || body.hasPrefix("·"),
-                isError: trimmed.contains("실패") || trimmed.contains("초과")
-                      || trimmed.contains("불일치") || trimmed.contains("안전장치")))
+                isError: Self.looksLikeError(trimmed)))
         }
         if logLines.count > 2000 { logLines.removeFirst(logLines.count - 2000) }
+    }
+
+    /// 로그 한 줄이 에러인가.
+    ///
+    /// `—` 뒤는 모델이 쓴 자유 텍스트다 — 반증 사유·판정 사유·리뷰어 요약이 거기
+    /// 실린다. 코드 리뷰 글에는 "실패 경로", "키무관 실패" 같은 말이 정상적으로
+    /// 나오므로, 그 구간까지 훑으면 멀쩡한 기록이 빨갛게 칠해진다. 봇이 찍는
+    /// 라벨은 항상 `—` 앞에 오므로 거기까지만 본다.
+    static func looksLikeError(_ line: String) -> Bool {
+        let head = line.components(separatedBy: " — ").first ?? line
+        return head.contains("실패") || head.contains("초과")
+            || head.contains("불일치") || head.contains("안전장치")
     }
 
     private func readReviewed() {

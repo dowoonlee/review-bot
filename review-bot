@@ -379,7 +379,7 @@ def process_pr(pr, cfg, state, force=False):
                 _log("  반증 %d건 통과 · %d건 반증됨" % (len(kept), len(rejected)))
                 for f in rejected:
                     v = f.get("_verify") or {}
-                    _log("    반증됨 [conf %s] %s — %s"
+                    _log("    반증됨 (진짜일 가능성 %s/100) %s — %s"
                          % (v.get("confidence", "?"),
                             (f.get("title") or "")[:50], (v.get("reason") or "")[:90]))
         ok = True
