@@ -30,6 +30,14 @@ final class BotStore {
     var busy: String?               // 실행 중인 명령 이름
     var statusError: String?
     var statusLoadedAt: Date?
+    var isRefreshingStatus = false
+
+    var sentPRs: [SentPR] {
+        (status?.outgoing ?? []).sorted {
+            if $0.priority != $1.priority { return $0.priority < $1.priority }
+            return ($0.requestedAt ?? $0.updatedAt, $0.id) < ($1.requestedAt ?? $1.updatedAt, $1.id)
+        }
+    }
 
     private var runsOffset: UInt64 = 0
     private var logOffset: UInt64 = 0
@@ -389,14 +397,20 @@ final class BotStore {
     // MARK: 봇 호출
 
     func refreshStatus() async {
+        guard !isRefreshingStatus else { return }
+        isRefreshingStatus = true
+        defer { isRefreshingStatus = false }
         lastStatusFetch = Date()
         let result = await Shell.run([BotPaths.executable.path, "status", "--json"],
                                      cwd: BotPaths.root.path)
         guard let data = result.output.data(using: .utf8),
-              let snap = try? JSONDecoder().decode(StatusSnapshot.self, from: data) else {
+              var snap = try? JSONDecoder().decode(StatusSnapshot.self, from: data) else {
             statusError = result.output.isEmpty ? "status 응답 없음" : String(result.output.prefix(300))
             return
         }
+        // 일부 계정 조회 실패는 빈 목록으로 보이지 않게 이전 결과를 유지한다.
+        let failed = Set(snap.outgoingFailedAccounts ?? [])
+        snap.outgoing = (snap.outgoing ?? []) + (status?.outgoing ?? []).filter { failed.contains($0.account) }
         status = snap
         statusError = snap.errors.first
         statusLoadedAt = Date()

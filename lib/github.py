@@ -131,6 +131,106 @@ def review_requests(limit=30, account=None, attempts=3):
     return [r for r in out if r["repo"] and r["number"]]
 
 
+_SENT_REQUESTS_QUERY = """
+query($searchQuery: String!, $cursor: String) {
+  search(query: $searchQuery, type: ISSUE, first: 25, after: $cursor) {
+    issueCount
+    pageInfo { hasNextPage endCursor }
+    nodes { ... on PullRequest {
+      number title url updatedAt isDraft reviewDecision mergeable
+      repository { nameWithOwner }
+      author { login }
+      reviewRequests(first: 100) {
+        pageInfo { hasNextPage }
+        nodes { requestedReviewer {
+          ... on User { login }
+          ... on Team { slug organization { login } }
+          ... on Mannequin { login }
+        } }
+      }
+      latestReviews(first: 100) {
+        pageInfo { hasNextPage }
+        nodes { author { login } state submittedAt }
+      }
+      timelineItems(last: 1, itemTypes: [REVIEW_REQUESTED_EVENT]) {
+        nodes { ... on ReviewRequestedEvent { createdAt } }
+      }
+      commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+    } }
+  }
+}
+"""
+
+
+def sent_review_requests(account=None):
+    """내가 작성한 열린 PR 중 리뷰 요청 이력이 있는 것. 리뷰가 끝나도 유지한다.
+
+    검색은 페이지를 끝까지 읽는다. 상세 연결의 한도 초과는 조용히 잘라내지 않고
+    경고한다. 이 조회는 status 전용이며 자동 리뷰 대상에는 들어가지 않는다.
+    """
+    login = whoami(account)
+    if not login:
+        raise GhError("현재 계정을 확인할 수 없습니다")
+    cursor, out, warnings = None, [], []
+    while True:
+        args = ["api", "graphql", "-f", "query=" + _SENT_REQUESTS_QUERY,
+                "-f", "searchQuery=is:pr is:open author:%s sort:updated-desc" % login]
+        if cursor:
+            args += ["-f", "cursor=" + cursor]
+        payload = _gh_json(args, timeout=60, account=account)
+        if payload.get("errors"):
+            raise GhError("보낸 요청 GraphQL 조회 실패")
+        search = (payload.get("data") or {}).get("search")
+        if search is None:
+            raise GhError("보낸 요청 검색 결과가 없습니다")
+        for pr in search.get("nodes") or []:
+            if not pr or not pr.get("number"):
+                continue
+            requests = pr.get("reviewRequests") or {}
+            history = (pr.get("timelineItems") or {}).get("nodes") or []
+            if not requests.get("nodes") and not history:
+                continue
+            reviews = pr.get("latestReviews") or {}
+            reviewers = {}
+            for review in reviews.get("nodes") or []:
+                name = (review.get("author") or {}).get("login")
+                if name:
+                    reviewers[name.lower()] = {"name": name, "state": review["state"]}
+            for request in requests.get("nodes") or []:
+                target = request.get("requestedReviewer") or {}
+                name = target.get("login") or (
+                    "%s/%s" % ((target.get("organization") or {}).get("login"), target["slug"])
+                    if target.get("slug") else None)
+                if name:
+                    reviewers[name.lower()] = {"name": name, "state": "PENDING"}
+            repo = pr["repository"]["nameWithOwner"]
+            incomplete = any(c.get("pageInfo", {}).get("hasNextPage")
+                             for c in (requests, reviews))
+            if incomplete:
+                warnings.append("%s#%s: 리뷰어가 많아 일부만 표시합니다" % (repo, pr["number"]))
+            commits = (pr.get("commits") or {}).get("nodes") or []
+            checks = ((commits[-1].get("commit") or {}).get("statusCheckRollup") or {}) if commits else {}
+            out.append({
+                "repo": repo, "number": pr["number"], "title": pr["title"],
+                "url": pr["url"], "author": (pr.get("author") or {}).get("login") or login,
+                "account": account or "global", "updatedAt": pr["updatedAt"],
+                "isDraft": pr["isDraft"], "reviewDecision": pr.get("reviewDecision"),
+                "mergeable": pr.get("mergeable"), "checksState": checks.get("state"),
+                "requestedAt": history[-1].get("createdAt") if history else None,
+                "reviewers": sorted(reviewers.values(), key=lambda r: (r["state"] != "PENDING", r["name"])),
+            })
+        page = search["pageInfo"]
+        if not page["hasNextPage"]:
+            if search.get("issueCount", 0) > 1000:
+                warnings.append("보낸 요청 검색 한도(열린 PR 1,000개)를 초과했습니다")
+            break
+        next_cursor = page.get("endCursor")
+        if not next_cursor or next_cursor == cursor:
+            raise GhError("보낸 요청의 다음 페이지를 읽을 수 없습니다")
+        cursor = next_cursor
+    return out, warnings
+
+
 def pr_meta(repo, number, account=None):
     return _gh_json([
         "pr", "view", str(number), "--repo", repo, "--json",

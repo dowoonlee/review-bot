@@ -3,6 +3,8 @@ import SwiftUI
 enum Selection: Hashable {
     case home
     case settings
+    case requests(Bool)
+    case sent(String)
     case draft(String)
     case run(String)
     case live(String)
@@ -15,6 +17,8 @@ enum Selection: Hashable {
         switch self {
         case .home: "home"
         case .settings: "settings"
+        case .requests(let sent): sent ? "sentRequests" : "receivedRequests"
+        case .sent(let id): "sent:\(id)"
         case .log: "log"
         case .draft(let id): "draft:\(id)"
         case .run(let id): "run:\(id)"
@@ -27,6 +31,8 @@ enum Selection: Hashable {
         switch raw {
         case "home": .home
         case "settings": .settings
+        case "sentRequests": .requests(true)
+        case "receivedRequests": .requests(false)
         case "log": .log
         default: nil
         }
@@ -185,6 +191,7 @@ struct DashboardView: View {
     private var sidebar: some View {
         List(selection: $selection) {
             Label("홈", systemImage: "house").tag(Selection.home)
+            Label("리뷰 요청", systemImage: "arrow.left.arrow.right").tag(Selection.requests(false))
 
             if !store.live.isEmpty {
                 Section("라이브 세션") {
@@ -222,22 +229,6 @@ struct DashboardView: View {
                                 .f(.caption2).foregroundStyle(.secondary)
                         }
                         .tag(Selection.draft(d.id))
-                    }
-                }
-            }
-
-            if let pending = store.status?.pending, !pending.isEmpty {
-                Section("대기 중인 리뷰 요청") {
-                    ForEach(pending) { p in
-                        VStack(alignment: .leading, spacing: 1) {
-                            HStack(spacing: 5) {
-                                Image(systemName: icon(for: p.status))
-                                    .f(.caption2).foregroundStyle(color(for: p.status))
-                                Text(p.label).f(.callout)
-                            }
-                            Text(p.title).f(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                        }
-                        .tag(Selection.pending(p.id))
                     }
                 }
             }
@@ -351,28 +342,19 @@ struct DashboardView: View {
         store.runGroups.max { ($0.latestAt) < ($1.latestAt) }?.id
     }
 
-    private func icon(for status: String) -> String {
-        switch status {
-        case "posted": "checkmark.circle.fill"
-        case "draft": "doc.text"
-        case "new": "circle"
-        default: "eye.slash"
-        }
-    }
-    private func color(for status: String) -> Color {
-        switch status {
-        case "posted": .green
-        case "draft": .orange
-        case "new": .blue
-        default: .secondary
-        }
-    }
-
     // MARK: 상세
 
     @ViewBuilder
     private var detail: some View {
         switch selection {
+        case .requests(let sent):
+            RequestsPaneView(selection: $selection, initiallySent: sent)
+                .id(sent)
+        case .sent(let id):
+            if let pr = store.sentPRs.first(where: { $0.id == id }) {
+                SentPRDetailView(pr: pr) { selection = .requests(true) }
+            }
+            else { ContentUnavailableView("닫혔거나 목록에서 사라진 PR입니다", systemImage: "tray") }
         case .settings:
             SettingsPaneView()
         case .draft(let id):

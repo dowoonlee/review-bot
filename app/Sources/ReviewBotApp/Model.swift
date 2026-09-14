@@ -125,6 +125,9 @@ struct StatusSnapshot: Decodable, Sendable {
     var paused: PausedInfo?
     var running: RunningInfo?
     var pending: [PendingPR]
+    var outgoing: [SentPR]?
+    var outgoingErrors: [String]?
+    var outgoingFailedAccounts: [String]?
     var config: BotConfig?
     var reviewed: [String: ReviewedRecord]
     var errors: [String]
@@ -169,6 +172,65 @@ struct PendingPR: Decodable, Sendable, Identifiable {
 
     var id: String { "\(repo)#\(number)" }
     var label: String { "\(repo.split(separator: "/").last.map(String.init) ?? repo)#\(number)" }
+}
+
+struct SentPR: Decodable, Sendable, Identifiable {
+    var repo: String
+    var number: Int
+    var title: String
+    var url: String
+    var author: String
+    var account: String
+    var updatedAt: String
+    var isDraft: Bool
+    var reviewDecision: String?
+    var mergeable: String?
+    var checksState: String?
+    var requestedAt: String?
+    var reviewers: [PRReviewer]
+
+    var id: String { "\(account):\(repo)#\(number)" }
+    var label: String { "\(repo)#\(number)" }
+    var reviewLabel: String {
+        switch reviewDecision {
+        case "CHANGES_REQUESTED": "수정 필요"
+        case "APPROVED": "승인 충족"
+        case "REVIEW_REQUIRED": "리뷰 대기"
+        default: reviewers.contains { $0.state == "PENDING" } ? "리뷰 대기" : "리뷰 확인"
+        }
+    }
+    var priority: Int {
+        switch reviewLabel {
+        case "수정 필요": 0
+        case "리뷰 대기": 1
+        case "승인 충족": 2
+        default: 3
+        }
+    }
+    var checksLabel: String {
+        switch checksState {
+        case "SUCCESS": "CI 통과"
+        case "FAILURE", "ERROR": "CI 실패"
+        case "PENDING", "EXPECTED": "CI 대기"
+        default: "CI 정보 없음"
+        }
+    }
+}
+
+struct PRReviewer: Decodable, Sendable, Identifiable {
+    var name: String
+    var state: String
+    var id: String { name }
+    var label: String {
+        switch state {
+        case "PENDING": "대기"
+        case "APPROVED": "승인"
+        case "CHANGES_REQUESTED": "변경 요청"
+        case "COMMENTED": "코멘트"
+        case "DISMISSED": "리뷰 무효화"
+        default: "확인 필요"
+        }
+    }
 }
 
 // MARK: - 봇 로그

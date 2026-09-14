@@ -1165,6 +1165,7 @@ def status_payload(cfg, skip_details=False):
     groups = _accounts(cfg)
     state = store.load()
     accounts, errors, prs = [], [], []
+    outgoing, outgoing_errors, outgoing_failed_accounts = [], [], []
     for acct, repos in groups.items():
         info = {"account": acct, "repos": sorted(repos), "tokenOwner": None, "ok": False}
         try:
@@ -1178,6 +1179,13 @@ def status_payload(cfg, skip_details=False):
             prs += gh.review_requests(account=acct)
         except gh.GhError as e:
             errors.append("리뷰 요청 조회 실패 (%s): %s" % (acct or "전역 gh", str(e)[:200]))
+        try:
+            sent, warnings = gh.sent_review_requests(account=acct)
+            outgoing.extend(sent)
+            outgoing_errors.extend(warnings)
+        except gh.GhError as e:
+            outgoing_failed_accounts.append(acct or "global")
+            outgoing_errors.append("보낸 요청 조회 실패 (%s): %s" % (acct or "전역 gh", str(e)[:200]))
     known = set(cfg.get("repos") or {})
     pending = []
     for p in prs:
@@ -1231,6 +1239,9 @@ def status_payload(cfg, skip_details=False):
         "config": _config_info(cfg),
         "schedule": store.read_schedule() if hasattr(store, "read_schedule") else None,
         "pending": pending,
+        "outgoing": list({(p["account"], p["repo"], p["number"]): p for p in outgoing}.values()),
+        "outgoingErrors": outgoing_errors,
+        "outgoingFailedAccounts": outgoing_failed_accounts,
         "drafts": [{"repo": d.get("repo"), "number": d.get("number"),
                     "title": d.get("title"), "event": d.get("event"),
                     "inline": d.get("inline"), "demoted": d.get("demoted"),

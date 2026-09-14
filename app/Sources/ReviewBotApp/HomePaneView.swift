@@ -14,7 +14,12 @@ struct HomePaneView: View {
                 nowCard
                 if !store.drafts.isEmpty { draftsCard }
                 todayCard
-                pendingCard
+                RequestsSyncStatus()
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 290), spacing: 14, alignment: .top)],
+                          alignment: .leading, spacing: 14) {
+                    pendingCard
+                    sentCard
+                }
                 recentCard
             }
             .padding(20)
@@ -128,11 +133,15 @@ struct HomePaneView: View {
         let pending = store.status?.pending ?? []
         return card {
             VStack(alignment: .leading, spacing: 8) {
-                Text("나에게 온 리뷰 요청 \(pending.count)건").f(.callout, .semibold)
+                HStack {
+                    Text("받은 리뷰 요청 \(pending.count)건").f(.callout, .semibold)
+                    Spacer()
+                    Button("전체 보기") { selection = .requests(false) }.f(.caption)
+                }
                 if pending.isEmpty {
                     Text("없습니다").f(.caption).foregroundStyle(.tertiary)
                 }
-                ForEach(pending.prefix(5)) { p in
+                ForEach(pending.prefix(3)) { p in
                     Button { selection = .pending(p.id) } label: {
                         HStack(spacing: 6) {
                             Image(systemName: store.reviewed["\(p.repo)#\(p.number)"] != nil
@@ -145,6 +154,36 @@ struct HomePaneView: View {
                             Spacer()
                             Image(systemName: "chevron.right").f(.caption2).foregroundStyle(.tertiary)
                         }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private var sentCard: some View {
+        card {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("보낸 리뷰 요청 \(store.sentPRs.count)건").f(.callout, .semibold)
+                    Spacer()
+                    Button("전체 보기") { selection = .requests(true) }.f(.caption)
+                }
+                if store.sentPRs.isEmpty {
+                    Text(store.status == nil ? "조회 중입니다" : "표시할 요청이 없습니다")
+                        .f(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(store.sentPRs.prefix(3)) { pr in
+                    Button { selection = .sent(pr.id) } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(pr.label).f(.caption).lineLimit(1)
+                                Spacer()
+                                SentReviewBadge(pr: pr)
+                            }
+                            Text(pr.title).f(.callout).lineLimit(1)
+                        }
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
