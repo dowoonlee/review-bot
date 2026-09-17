@@ -240,7 +240,10 @@ struct PendingDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(pr.label).f(.title2, .semibold)
+                    HStack(spacing: 10) {
+                        PRNumberBadge(number: pr.number)
+                        Text(pr.repo).f(.callout).foregroundStyle(.secondary)
+                    }
                     Text(pr.title).f(.callout).foregroundStyle(.secondary)
                     HStack(spacing: 10) {
                         Label(pr.prAuthor ?? pr.author, systemImage: "person")

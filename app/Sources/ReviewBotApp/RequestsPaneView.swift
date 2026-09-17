@@ -49,18 +49,139 @@ struct SentReviewBadge: View {
     }
 }
 
+private struct ReviewerStatusRow: View {
+    let reviewer: PRReviewer
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "person.fill").f(.body).foregroundStyle(.secondary)
+            Text(reviewer.name).f(.title3, .semibold)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(reviewer.label).f(.body, .medium)
+                .foregroundStyle(statusColor)
+                .fixedSize()
+        }
+    }
+
+    private var statusColor: Color {
+        switch reviewer.state {
+        case "APPROVED": .green
+        case "CHANGES_REQUESTED": .orange
+        case "PENDING": .secondary
+        default: .blue
+        }
+    }
+}
+
+private struct ReviewerGroup: Identifiable {
+    let name: String                        // 빈 문자열이면 리뷰어가 없는 PR 묶음
+    let entries: [(SentPR, PRReviewer?)]
+    var id: String { name }
+    /// "변경 요청 1 · 승인 2 · 대기 3" 처럼 이 리뷰어의 상태별 건수를 요약한다.
+    var summary: String {
+        var counts: [String: Int] = [:]
+        for (_, reviewer) in entries { if let r = reviewer { counts[r.label, default: 0] += 1 } }
+        return ["변경 요청", "코멘트", "승인", "대기"].compactMap { label in
+            counts[label].map { "\(label) \($0)" }
+        }.joined(separator: " · ")
+    }
+}
+
+private enum ReviewFilter: String, CaseIterable {
+    case all = "전체 리뷰 상태"
+    case changes = "수정 필요"
+    case approved = "승인 충족"
+    case pending = "리뷰 대기"
+    case other = "리뷰 확인"
+
+    func matches(_ pr: SentPR) -> Bool {
+        self == .all || pr.reviewLabel == rawValue
+    }
+}
+
+private enum PRConditionFilter: String, CaseIterable {
+    case all = "전체 PR 조건"
+    case conflict = "충돌 있음"
+    case noConflict = "충돌 없음"
+    case checksFailed = "CI 실패"
+    case checksPending = "CI 대기"
+    case checksPassed = "CI 통과"
+    case checksUnknown = "CI 정보 없음"
+    case draft = "초안 PR"
+
+    func matches(_ pr: SentPR) -> Bool {
+        switch self {
+        case .all: true
+        case .conflict: pr.mergeable == "CONFLICTING"
+        case .noConflict: pr.mergeable == "MERGEABLE"
+        case .draft: pr.isDraft
+        default: pr.checksLabel == rawValue
+        }
+    }
+}
+
+private enum ReceivedFilter: String, CaseIterable {
+    case all = "전체 처리 상태"
+    case new = "새 요청"
+    case draft = "봇 초안 검토"
+    case posted = "봇 리뷰 게시됨"
+    case unwatched = "자동 리뷰 대상 아님"
+
+    func matches(_ pr: PendingPR) -> Bool {
+        switch self {
+        case .all: true
+        case .new: pr.status == "new"
+        case .draft: pr.status == "draft"
+        case .posted: pr.status == "posted"
+        case .unwatched: pr.status == "unwatched"
+        }
+    }
+}
+
 struct RequestsPaneView: View {
     @Environment(BotStore.self) private var store
     @Binding var selection: Selection?
     let initiallySent: Bool
     @State private var search = ""
     @State private var repo = ""
+    @AppStorage("requests.reviewFilter") private var reviewFilter: ReviewFilter = .all
+    @AppStorage("requests.conditionFilter") private var conditionFilter: PRConditionFilter = .all
+    @AppStorage("requests.receivedFilter") private var receivedFilter: ReceivedFilter = .all
+    @AppStorage("requests.groupByReviewer") private var groupByReviewer = false
+
+    private var hasFilters: Bool {
+        !search.isEmpty || !repo.isEmpty || (initiallySent
+            ? reviewFilter != .all || conditionFilter != .all : receivedFilter != .all)
+    }
 
     private var received: [PendingPR] {
-        (store.status?.pending ?? []).filter { matches($0.repo, $0.title, $0.number) }
+        (store.status?.pending ?? []).filter { matches($0.repo, $0.title, $0.number) && receivedFilter.matches($0) }
     }
     private var sent: [SentPR] {
-        store.sentPRs.filter { matches($0.repo, $0.title, $0.number) }
+        store.sentPRs.filter {
+            matches($0.repo, $0.title, $0.number) && reviewFilter.matches($0) && conditionFilter.matches($0)
+        }
+    }
+    /// 리뷰어별 묶음. 한 PR 에 리뷰어가 여럿이면 각 리뷰어 아래 모두 나온다. 리뷰어가 없는 PR 은 맨 뒤 "리뷰어 없음".
+    private var sentByReviewer: [ReviewerGroup] {
+        var groups: [String: [(SentPR, PRReviewer?)]] = [:]
+        for pr in sent {
+            if pr.reviewers.isEmpty { groups["", default: []].append((pr, nil)); continue }
+            for reviewer in pr.reviewers { groups[reviewer.name, default: []].append((pr, reviewer)) }
+        }
+        return groups.keys.sorted { a, b in
+            if a.isEmpty != b.isEmpty { return b.isEmpty }
+            return a.localizedCaseInsensitiveCompare(b) == .orderedAscending
+        }.map { name in
+            // 묶음 안에서는 그 리뷰어가 답을 남긴 PR 을 위로, 아직 대기 중인 PR 을 아래로 둔다.
+            let entries = groups[name]!.sorted { a, b in
+                let (pa, pb) = (a.1?.priority ?? 3, b.1?.priority ?? 3)
+                if pa != pb { return pa < pb }
+                return (a.0.priority, a.0.requestedAt ?? a.0.updatedAt, a.0.id)
+                    < (b.0.priority, b.0.requestedAt ?? b.0.updatedAt, b.0.id)
+            }
+            return ReviewerGroup(name: name, entries: entries)
+        }
     }
     private var repos: [String] {
         Array(Set(initiallySent ? store.sentPRs.map(\.repo) : (store.status?.pending ?? []).map(\.repo))).sorted()
@@ -81,7 +202,7 @@ struct RequestsPaneView: View {
                 Text("보낸 요청 (\(store.sentPRs.count))").tag(true)
             }
             .pickerStyle(.segmented)
-            Text(initiallySent ? "내가 작성한 열린 PR 중 리뷰를 요청한 이력이 있는 PR입니다. 수정 필요, 리뷰 대기 순으로 표시합니다."
+            Text(initiallySent ? "내가 작성한 열린 PR 중 리뷰를 요청한 이력이 있는 PR입니다. 리뷰가 달린 PR과 승인된 PR을 먼저, 리뷰 대기는 뒤에 표시합니다."
                  : "나에게 리뷰를 요청한 열린 PR입니다. 봇의 처리 상태를 함께 표시합니다.")
                 .f(.caption).foregroundStyle(.secondary)
             RequestsSyncStatus()
@@ -94,16 +215,51 @@ struct RequestsPaneView: View {
                 }
                 .frame(maxWidth: 280)
             }
+            statusFilters
+            HStack {
+                Text("\(initiallySent ? sent.count : received.count)건 표시")
+                    .f(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if initiallySent {
+                    Toggle("리뷰어별 묶기", isOn: $groupByReviewer)
+                        .toggleStyle(.checkbox).f(.caption)
+                }
+                if hasFilters {
+                    Button("필터 초기화") {
+                        search = ""
+                        repo = ""
+                        if initiallySent { reviewFilter = .all; conditionFilter = .all }
+                        else { receivedFilter = .all }
+                    }
+                    .f(.caption)
+                }
+            }
             if (initiallySent && sent.isEmpty) || (!initiallySent && received.isEmpty) {
                 ContentUnavailableView {
                     Label(store.isRefreshingStatus ? "조회 중입니다" : "표시할 요청이 없습니다", systemImage: "tray")
                 } description: {
-                    Text(search.isEmpty && repo.isEmpty ? "조회 상태를 확인하거나 새로고침하세요." : "검색어나 저장소 필터를 바꿔 보세요.")
+                    Text(hasFilters ? "검색어, 저장소 또는 상태 필터를 바꿔 보세요." : "조회 상태를 확인하거나 새로고침하세요.")
                 }
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        if initiallySent {
+                        if initiallySent && groupByReviewer {
+                            // 묶음마다 카드로 감싸 리뷰어 경계가 한눈에 보이게 한다.
+                            ForEach(sentByReviewer) { group in
+                                VStack(alignment: .leading, spacing: 0) {
+                                    reviewerHeader(group)
+                                    ForEach(Array(group.entries.enumerated()), id: \.element.0.id) { index, entry in
+                                        let (pr, reviewer) = entry
+                                        Button { selection = .sent(pr.id) } label: { sentRow(pr, highlight: reviewer?.name) }
+                                            .buttonStyle(.plain)
+                                        if index < group.entries.count - 1 { Divider() }
+                                    }
+                                }
+                                .padding(.horizontal, 14).padding(.bottom, 4)
+                                .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10))
+                                .padding(.bottom, 14)
+                            }
+                        } else if initiallySent {
                             ForEach(sent) { pr in
                                 Button { selection = .sent(pr.id) } label: { sentRow(pr) }
                                     .buttonStyle(.plain)
@@ -121,20 +277,72 @@ struct RequestsPaneView: View {
             }
         }
         .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onChange(of: repos) {
+            if !repo.isEmpty && !repos.contains(repo) { repo = "" }
+        }
     }
 
-    private func sentRow(_ pr: SentPR) -> some View {
+    @ViewBuilder
+    private var statusFilters: some View {
+        if initiallySent {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 16) {
+                    Picker("리뷰 상태", selection: $reviewFilter) {
+                        ForEach(ReviewFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }
+                    Picker("PR 조건", selection: $conditionFilter) {
+                        ForEach(PRConditionFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }
+                }
+                Text("두 조건을 모두 만족하는 PR을 표시합니다. 예: 승인 충족 + 충돌 있음")
+                    .f(.caption).foregroundStyle(.secondary)
+            }
+        } else {
+            Picker("처리 상태", selection: $receivedFilter) {
+                ForEach(ReceivedFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }
+            .frame(maxWidth: 360, alignment: .leading)
+        }
+    }
+
+    private func reviewerHeader(_ group: ReviewerGroup) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: group.name.isEmpty ? "person.slash" : "person.fill")
+                .f(.body).foregroundStyle(.secondary)
+            Text(group.name.isEmpty ? "리뷰어 없음" : group.name).f(.title3, .semibold)
+            Text("\(group.entries.count)건").f(.callout).foregroundStyle(.secondary)
+            if !group.summary.isEmpty {
+                Text("·").foregroundStyle(.tertiary)
+                Text(group.summary).f(.callout).foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.top, 14).padding(.bottom, 10)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private func sentRow(_ pr: SentPR, highlight: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .top) {
+                PRNumberBadge(number: pr.number)
                 Text(pr.title).f(.body, .medium).lineLimit(2)
                 Spacer()
                 SentReviewBadge(pr: pr)
                 Image(systemName: "chevron.right").foregroundStyle(.tertiary)
             }
-            Text(pr.label).f(.caption).foregroundStyle(.secondary)
-            Text(pr.reviewers.isEmpty ? "현재 지정된 리뷰어 없음" :
-                 pr.reviewers.map { "\($0.name) \($0.label)" }.joined(separator: " · "))
-                .f(.caption).lineLimit(2)
+            Text(pr.repo).f(.caption).foregroundStyle(.secondary)
+            if pr.reviewers.isEmpty {
+                Text("현재 지정된 리뷰어 없음").f(.body).foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(pr.reviewers) { reviewer in
+                        ReviewerStatusRow(reviewer: reviewer)
+                            .opacity(highlight == nil || highlight == reviewer.name ? 1 : 0.45)
+                    }
+                }
+                .padding(.vertical, 3)
+            }
             HStack(spacing: 12) {
                 if pr.isDraft { Text("초안 PR") }
                 Text(pr.checksLabel)
@@ -152,12 +360,13 @@ struct RequestsPaneView: View {
     private func receivedRow(_ pr: PendingPR) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack {
+                PRNumberBadge(number: pr.number)
                 Text(pr.title).f(.body, .medium).lineLimit(2)
                 Spacer()
                 Text(receivedStatus(pr)).f(.caption).foregroundStyle(.secondary)
                 Image(systemName: "chevron.right").foregroundStyle(.tertiary)
             }
-            Text("\(pr.repo)#\(pr.number) · \(pr.author) 작성").f(.caption).foregroundStyle(.secondary)
+            Text("\(pr.repo) · \(pr.author) 작성").f(.caption).foregroundStyle(.secondary)
             if let by = pr.requestedBy { Text("\(by) 님이 리뷰 요청").f(.caption) }
         }
         .padding(.vertical, 13).frame(maxWidth: .infinity, alignment: .leading)
@@ -183,7 +392,10 @@ struct SentPRDetailView: View {
                     Button(action: showList) { Label("보낸 요청 목록", systemImage: "chevron.left") }
                         .buttonStyle(.plain).f(.caption).foregroundStyle(.secondary)
                 }
-                Text(pr.label).f(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    PRNumberBadge(number: pr.number)
+                    Text(pr.repo).f(.callout).foregroundStyle(.secondary)
+                }
                 Text(pr.title).f(.title2, .semibold).textSelection(.enabled)
                 HStack {
                     SentReviewBadge(pr: pr)
@@ -197,13 +409,7 @@ struct SentPRDetailView: View {
                     Text("현재 지정된 리뷰어나 표시할 리뷰가 없습니다.").foregroundStyle(.secondary)
                 }
                 ForEach(pr.reviewers) { reviewer in
-                    HStack {
-                        Label(reviewer.name, systemImage: "person")
-                        Spacer()
-                        Text(reviewer.label)
-                            .foregroundStyle(reviewer.state == "CHANGES_REQUESTED" ? Color.orange : .secondary)
-                    }
-                    .f(.callout)
+                    ReviewerStatusRow(reviewer: reviewer)
                 }
                 Divider()
                 HStack(spacing: 16) {

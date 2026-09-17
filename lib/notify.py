@@ -10,12 +10,12 @@ def send(title, message, sound="Glass", enabled=True):
     if not enabled:
         return False
     script = 'display notification "%s" with title "%s"' % (
-        _esc(message)[:240], _esc(title)[:120])
+        _esc(str(message)[:240]), _esc(str(title)[:120]))
     if sound:
         script += ' sound name "%s"' % _esc(sound)
     try:
-        subprocess.run(["osascript", "-e", script], check=False,
-                       capture_output=True, timeout=10)
-        return True
+        result = subprocess.run(["osascript", "-e", script], check=False,
+                                capture_output=True, timeout=10)
+        return result.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False

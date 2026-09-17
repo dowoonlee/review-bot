@@ -239,3 +239,18 @@ struct DiffHunkView: View {
         }
     }
 }
+
+/// 제목 속 이슈 번호와 구분되도록 실제 PR 번호를 독립적으로 표시한다.
+struct PRNumberBadge: View {
+    let number: Int
+
+    var body: some View {
+        Text("#\(String(number))")
+            .f(.body, .bold, mono: true)
+            .foregroundStyle(Color.accentColor)
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
+            .fixedSize()
+            .accessibilityLabel("PR 번호 \(number)")
+    }
+}

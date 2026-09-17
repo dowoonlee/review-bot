@@ -13,7 +13,7 @@ def pr(number=1, requested=True):
         "updatedAt": "2026-09-14T00:00:00Z", "isDraft": False,
         "reviewDecision": "APPROVED", "mergeable": "MERGEABLE",
         "reviewRequests": {"nodes": [], "pageInfo": {"hasNextPage": False}},
-        "latestReviews": {"nodes": [{"author": {"login": "reviewer"}, "state": "APPROVED"}],
+        "latestReviews": {"nodes": [{"id": "R1", "author": {"login": "reviewer"}, "state": "APPROVED"}],
                           "pageInfo": {"hasNextPage": False}},
         "timelineItems": {"nodes": [{"createdAt": "2026-09-13T00:00:00Z"}] if requested else []},
         "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "FAILURE"}}}]},
@@ -48,6 +48,8 @@ class SentRequestsTests(unittest.TestCase):
         self.assertEqual({r["name"]: r["state"] for r in rows[0]["reviewers"]},
                          {"reviewer": "PENDING", "org/team": "PENDING"})
         self.assertIsNone(rows[0]["requestedAt"])
+        self.assertEqual(rows[0]["responses"][0]["id"], "R1")
+        self.assertEqual(rows[0]["responses"][0]["state"], "APPROVED")
 
     @patch.object(github, "whoami", return_value="me")
     def test_pagination_preserves_account_and_cursor(self, _):

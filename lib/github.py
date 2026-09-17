@@ -150,7 +150,7 @@ query($searchQuery: String!, $cursor: String) {
       }
       latestReviews(first: 100) {
         pageInfo { hasNextPage }
-        nodes { author { login } state submittedAt }
+        nodes { id author { login } state submittedAt }
       }
       timelineItems(last: 1, itemTypes: [REVIEW_REQUESTED_EVENT]) {
         nodes { ... on ReviewRequestedEvent { createdAt } }
@@ -166,7 +166,7 @@ def sent_review_requests(account=None):
     """내가 작성한 열린 PR 중 리뷰 요청 이력이 있는 것. 리뷰가 끝나도 유지한다.
 
     검색은 페이지를 끝까지 읽는다. 상세 연결의 한도 초과는 조용히 잘라내지 않고
-    경고한다. 이 조회는 status 전용이며 자동 리뷰 대상에는 들어가지 않는다.
+    경고한다. 화면과 틱의 답변 알림에서 쓰며 자동 리뷰 대상에는 들어가지 않는다.
     """
     login = whoami(account)
     if not login:
@@ -217,6 +217,12 @@ def sent_review_requests(account=None):
                 "isDraft": pr["isDraft"], "reviewDecision": pr.get("reviewDecision"),
                 "mergeable": pr.get("mergeable"), "checksState": checks.get("state"),
                 "requestedAt": history[-1].get("createdAt") if history else None,
+                # 재요청으로 표시 상태가 PENDING 이 되어도 제출된 답변은 따로 보존한다.
+                "responses": [{"id": r["id"], "author": r["author"]["login"],
+                               "state": r["state"], "submittedAt": r.get("submittedAt")}
+                              for r in reviews.get("nodes") or []
+                              if r.get("id") and (r.get("author") or {}).get("login")
+                              and r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED")],
                 "reviewers": sorted(reviewers.values(), key=lambda r: (r["state"] != "PENDING", r["name"])),
             })
         page = search["pageInfo"]

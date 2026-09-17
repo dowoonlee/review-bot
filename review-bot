@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -28,6 +29,7 @@ from lib import github as gh
 from lib import janitor
 from lib import notify
 from lib import reviewer
+from lib import replies
 from lib import store
 from lib import worktree
 
@@ -924,18 +926,35 @@ def _tick(cfg):
     targets, total = [], 0
     for acct, repos in _accounts(cfg).items():
         try:
+            me = gh.whoami(acct)
+            if not me:
+                raise gh.GhError("현재 계정을 확인할 수 없습니다")
             if acct:
-                me = gh.whoami(acct)
                 if (me or "").lower() != acct.lower():
                     _log("계정 %s 의 토큰 주인이 %s 입니다 — 이 계정의 저장소는 건너뜁니다"
                          % (acct, me or "?"))
                     continue
-            prs = gh.review_requests(account=acct)
         except gh.GhError as e:
-            _log("리뷰 요청 조회 실패 (%s): %s" % (acct or "전역 gh", e))
+            _log("계정 확인 실패 (%s): %s" % (acct or "전역 gh", e))
             continue
-        total += len(prs)
-        targets += [p for p in prs if p["repo"] in repos]
+        # 답변 확인이 오래 걸리는 코드 리뷰 뒤로 밀리지 않도록 두 조회부터 끝낸다.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            received = pool.submit(gh.review_requests, account=acct)
+            sent = pool.submit(gh.sent_review_requests, account=acct)
+            try:
+                prs = received.result()
+                total += len(prs)
+                targets += [p for p in prs if p["repo"] in repos]
+            except gh.GhError as e:
+                _log("리뷰 요청 조회 실패 (%s): %s" % (acct or "전역 gh", e))
+            try:
+                outgoing, warnings = sent.result()
+                _log("보낸 PR %d건 리뷰 답변 확인" % len(outgoing))
+                for warning in warnings:
+                    _log("리뷰 답변 조회 주의: " + warning)
+                replies.check(outgoing, me, cfg.get("notify") or {}, _log)
+            except (gh.GhError, OSError, ValueError) as e:
+                _log("리뷰 답변 확인 실패 (%s): %s" % (acct or "전역 gh", e))
     _log("리뷰 요청 %d건 (감시 대상 %d건)" % (total, len(targets)))
 
     cap = cfg["limits"].get("maxPerTick") or 2

@@ -199,10 +199,11 @@ struct SentPR: Decodable, Sendable, Identifiable {
         default: reviewers.contains { $0.state == "PENDING" } ? "리뷰 대기" : "리뷰 확인"
         }
     }
+    // 대응할 것(수정 필요·리뷰 확인·승인 충족)을 위로, 아직 리뷰가 안 달린 것은 맨 뒤로 보낸다.
     var priority: Int {
         switch reviewLabel {
         case "수정 필요": 0
-        case "리뷰 대기": 1
+        case "리뷰 확인": 1
         case "승인 충족": 2
         default: 3
         }
@@ -229,6 +230,15 @@ struct PRReviewer: Decodable, Sendable, Identifiable {
         case "COMMENTED": "코멘트"
         case "DISMISSED": "리뷰 무효화"
         default: "확인 필요"
+        }
+    }
+    /// 리뷰어별 묶음 안의 정렬. 답을 남긴 것(변경 요청 → 코멘트 등 → 승인)이 위, 대기가 맨 아래.
+    var priority: Int {
+        switch state {
+        case "CHANGES_REQUESTED": 0
+        case "APPROVED": 2
+        case "PENDING": 3
+        default: 1
         }
     }
 }

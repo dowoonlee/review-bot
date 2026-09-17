@@ -149,8 +149,11 @@ struct HomePaneView: View {
                                 .f(.caption2)
                                 .foregroundStyle(store.reviewed["\(p.repo)#\(p.number)"] != nil
                                                  ? AnyShapeStyle(Color.green) : AnyShapeStyle(.tertiary))
-                            Text("\(p.repo)#\(p.number)").f(.caption, mono: true)
-                            Text(p.title).f(.callout).lineLimit(1)
+                            PRNumberBadge(number: p.number)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(p.repo).f(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                Text(p.title).f(.callout).lineLimit(1)
+                            }
                             Spacer()
                             Image(systemName: "chevron.right").f(.caption2).foregroundStyle(.tertiary)
                         }
@@ -177,7 +180,8 @@ struct HomePaneView: View {
                     Button { selection = .sent(pr.id) } label: {
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
-                                Text(pr.label).f(.caption).lineLimit(1)
+                                PRNumberBadge(number: pr.number)
+                                Text(pr.repo).f(.caption).foregroundStyle(.secondary).lineLimit(1)
                                 Spacer()
                                 SentReviewBadge(pr: pr)
                             }
