@@ -166,6 +166,7 @@ def log_verify(repo, number, sha, rows):
             f.write(json.dumps({
                 "at": at, "repo": repo, "number": number, "sha": sha,
                 "agent": r.get("agent"), "path": r.get("path"), "line": r.get("line"),
+                "scope": r.get("_scope"),
                 "severity": r.get("severity"),
                 "severity_was": v.get("severity_was"),
                 "verdict": v.get("verdict"), "confidence": v.get("confidence"),

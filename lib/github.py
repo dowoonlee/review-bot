@@ -241,8 +241,42 @@ def pr_meta(repo, number, account=None):
     return _gh_json([
         "pr", "view", str(number), "--repo", repo, "--json",
         "headRefOid,headRefName,baseRefName,isDraft,additions,deletions,"
-        "changedFiles,title,body,author,url,mergeable,state",
+        "changedFiles,title,body,author,url,mergeable,state,statusCheckRollup",
     ], account=account)
+
+
+def ci_state(meta):
+    """head 커밋의 CI 상태를 한 단어로 — none / success / failure / pending.
+
+    판정자는 코드를 못 보고 봇은 테스트를 돌리지 않는다. 그래서 "테스트가 돌았다는
+    증거" 는 저장소의 CI 뿐이고, 그 결과를 판정 자료에 싣는다. 체크가 하나도 없으면
+    `none` — 통과가 아니라 **아무도 안 돌렸다**는 뜻이다.
+    """
+    checks = (meta or {}).get("statusCheckRollup") or []
+    if not checks:
+        return "none"
+    states = set()
+    for c in checks:
+        if not isinstance(c, dict):
+            continue
+        # CheckRun 은 status/conclusion, StatusContext 는 state 로 온다.
+        concl = str(c.get("conclusion") or c.get("state") or "").upper()
+        status = str(c.get("status") or "").upper()
+        if concl in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED",
+                     "STARTUP_FAILURE"):
+            states.add("failure")
+        elif concl in ("SUCCESS", "NEUTRAL", "SKIPPED", "EXPECTED"):
+            states.add("success")
+        elif status in ("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED") \
+                or concl in ("PENDING", ""):
+            states.add("pending")
+        else:
+            states.add("pending")
+    if "failure" in states:
+        return "failure"
+    if "pending" in states:
+        return "pending"
+    return "success"
 
 
 def pr_files(repo, number, max_pages=10, account=None):

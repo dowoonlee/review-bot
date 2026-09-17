@@ -94,6 +94,47 @@ def _snap_line(line, postable, tolerance=3):
     return min(near, key=lambda p: (abs(p - line), p)) if near else None
 
 
+def _scope_findings(findings, files_by_path, strict=True):
+    """지적마다 그 좌표가 이 PR 의 변경 안인지 diff 로 가른다 — (남긴 것, 버린 것).
+
+    각 지적에 `_scope` 를 단다: added(추가·수정 라인) / context(diff 안이지만 바뀌지
+    않은 문맥 라인) / outside(diff 밖) / unknown(라인 미상). strict 면 outside 와
+    변경 파일 목록에 없는 경로는 **반증 전에** 버린다.
+
+    이전에는 이런 지적을 본문으로 강등해 살렸다. 그 결과 base 에 그대로 있던
+    코드의 문제가 "이 PR 의 지적" 으로 게시됐다 — 리뷰어 프롬프트가 "변경된 라인만"
+    이라고 해도 모델은 워크트리에서 읽은 것을 전부 이 PR 의 것으로 여긴다. 범위는
+    모델의 말이 아니라 diff 가 정한다.
+    """
+    kept, dropped = [], []
+    for f in findings or []:
+        if not isinstance(f, dict):
+            continue
+        f = dict(f)
+        path = (f.get("path") or "").strip().lstrip("./")
+        entry = files_by_path.get(path)
+        line = f.get("line")
+        if not entry:
+            f["_scope"] = "outside"
+            f["_why"] = "변경 파일 목록에 없는 경로"
+        elif not line:
+            f["_scope"] = "unknown"
+        else:
+            snapped = _snap_line(line, entry["postable"])
+            if not snapped:
+                f["_scope"] = "outside"
+                f["_why"] = "diff 밖의 라인"
+            elif snapped in entry.get("added", ()):
+                f["_scope"] = "added"
+            else:
+                f["_scope"] = "context"
+        if strict and f["_scope"] == "outside":
+            dropped.append(f)
+        else:
+            kept.append(f)
+    return kept, dropped
+
+
 def _validate(findings, files_by_path, post_cfg):
     """모델이 준 findings 를 (inline 가능, 요약으로 강등) 으로 가른다."""
     min_sev = SEV.get(post_cfg.get("minSeverity") or "nit", 1)
@@ -254,11 +295,16 @@ def _apply_placements(candidates, inline, placements):
     return fin, fbody, dropped
 
 
-def _guard_event(event, findings, payload, pcfg):
+def _guard_event(event, findings, payload, pcfg, ci=None):
     """판정이 넘을 수 없는 선. 넘으면 COMMENT 로 내리고 그 이유를 돌려준다.
 
     판정은 자율이지만, 승인·변경요청은 봇 소유자의 이름으로 나가는 상태 변경이라
     스스로 모순되는 판정만은 코드에서 막는다.
+
+    승인의 문턱은 `post.approveMaxSeverity`(기본 nit) 다 — 그보다 높은 등급이
+    게시될 지적에 하나라도 남으면 승인하지 않는다. "머지 전 처리가 권장되는 건" 을
+    달아 놓고 ✅ Approve 를 찍은 리뷰가 실제로 나갔고, 그건 읽는 사람에게 둘 중
+    무엇을 믿으라는 건지 알 수 없는 신호다.
     """
     allowed = pcfg.get("allowedEvents") or ["COMMENT"]
     has_blocking = any(f.get("severity") == "blocking" for f in findings)
@@ -270,6 +316,15 @@ def _guard_event(event, findings, payload, pcfg):
         return "COMMENT", "리뷰어 일부가 실패해 절반만 본 리뷰라 승인하지 않습니다."
     if event == "APPROVE" and has_blocking:
         return "COMMENT", "blocking 지적이 남아 있어 승인과 모순되므로 COMMENT 로 게시합니다."
+    if event == "APPROVE":
+        cap = SEV.get(pcfg.get("approveMaxSeverity") or "nit", 1)
+        above = [f for f in findings if SEV.get(f.get("severity"), 2) > cap]
+        if above:
+            return "COMMENT", ("%s 등급 지적이 %d건 남아 있어 승인하지 않습니다 — 머지 전 "
+                               "처리를 권하면서 승인하는 것은 모순입니다."
+                               % (SEV_LABEL.get(above[0].get("severity"), "P2"), len(above)))
+    if event == "APPROVE" and pcfg.get("approveNeedsGreenCi", True) and ci == "failure":
+        return "COMMENT", "CI 가 실패한 커밋이라 승인하지 않습니다."
     if event == "REQUEST_CHANGES" and not has_blocking:
         return "COMMENT", "blocking 지적 없이 변경 요청을 낼 수 없어 COMMENT 로 게시합니다."
     return event, ""
@@ -321,8 +376,13 @@ def process_pr(pr, cfg, state, force=False):
     if churn > (rcfg.get("maxDiffLines") or 1500):
         return dict(result, skipped="변경 %d줄 — 상한 초과" % churn)
 
-    files_by_path = {f["filename"]: {"postable": gh.postable_lines(f.get("patch"))}
+    files_by_path = {f["filename"]: {"postable": gh.postable_lines(f.get("patch")),
+                                     "added": gh.added_lines(f.get("patch")),
+                                     "patch": f.get("patch") or ""}
                      for f in files}
+    # 봇은 테스트를 돌리지 않는다. 테스트가 돌았다는 증거는 저장소의 CI 뿐이라
+    # 판정 자료에 싣고, 실패했으면 승인을 막는다.
+    meta["_ci"] = gh.ci_state(meta)
 
     _log("  리뷰 시작 — 파일 %d · %d줄" % (len(files), churn))
     # 지금 무엇을 보고 있는지 남긴다 — 앱의 라이브 세션 화면이 이걸 읽는다.
@@ -358,6 +418,17 @@ def process_pr(pr, cfg, state, force=False):
                                   parallel=rcfg.get("parallel", True), ctx=ctx)
         # 반증 — 워크트리가 살아 있는 이 안에서만 가능하다. 판정 단계는 코드를
         # 볼 수 없으므로 근거의 문체로만 판단한다. 여기서는 코드를 다시 읽는다.
+        # 범위 — 반증보다 먼저다. diff 밖의 지적은 검증할 가치도 비용도 없다.
+        payload["findings"], out_of_scope = _scope_findings(
+            payload.get("findings") or [], files_by_path,
+            strict=rcfg.get("strictScope", True))
+        if out_of_scope:
+            result["out_of_scope"] = len(out_of_scope)
+            _log("  범위 밖 %d건 버림" % len(out_of_scope))
+            for f in out_of_scope:
+                _log("    %s — %s:%s (%s)" % ((f.get("title") or "")[:50],
+                                             f.get("path"), f.get("line") or "?",
+                                             f.get("_why") or "diff 밖"))
         vcfg = rcfg.get("verify") or {}
         verify_rows = []
         if vcfg.get("enabled", True) and payload.get("findings"):
@@ -367,7 +438,8 @@ def process_pr(pr, cfg, state, force=False):
                     model=vcfg.get("model") or "haiku",
                     timeout=vcfg.get("timeoutSec") or 300,
                     max_turns=vcfg.get("maxTurns", 15),
-                    workers=vcfg.get("workers", 4))
+                    workers=vcfg.get("workers", 4),
+                    patches={p: e["patch"] for p, e in files_by_path.items()})
             except (reviewer.ReviewError, OSError) as e:
                 # 검증이 통째로 실패하면 검증 이전 상태로 돌아간다 — 리뷰를
                 # 버리지는 않는다.
@@ -414,7 +486,8 @@ def process_pr(pr, cfg, state, force=False):
             verdict.update(reviewer.judge(
                 meta, payload, candidates,
                 pcfg.get("allowedEvents") or ["COMMENT"],
-                model=pcfg.get("judgeModel") or "sonnet"))
+                model=pcfg.get("judgeModel") or "sonnet",
+                approve_max_severity=pcfg.get("approveMaxSeverity") or "nit"))
             _log("  판정 %s — %s" % (verdict["event"], verdict["reason"][:80]))
         except reviewer.ReviewError as e:
             _log("  판정 실패 → COMMENT: %s" % str(e)[:120])
@@ -422,7 +495,7 @@ def process_pr(pr, cfg, state, force=False):
     inline, demoted, dropped = _apply_placements(candidates, inline,
                                                  verdict.get("placements") or {})
     verdict["event"], guard = _guard_event(verdict["event"], inline + demoted,
-                                           payload, pcfg)
+                                           payload, pcfg, ci=meta.get("_ci"))
     if guard:
         _log("  안전장치: %s" % guard)
         verdict["guard"] = guard

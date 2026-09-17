@@ -121,6 +121,41 @@ def _context_block(ctx):
     return "\n".join(out).strip()
 
 
+# 리뷰어에게 실어 주는 diff 의 상한. maxDiffLines(기본 1500줄) 안의 PR 은 통째로
+# 들어가고, 그 위는 파일 단위로 자른다 — 프롬프트가 터지는 것보다 일부 파일의 diff
+# 가 빠지는 편이 낫고, 빠진 파일은 그 사실을 적어 리뷰어가 워크트리에서 읽게 한다.
+DIFF_CHAR_CAP = 160_000
+
+
+def _diff_block(files, cap=DIFF_CHAR_CAP):
+    """PR 의 diff 를 리뷰어가 읽을 형태로 접는다.
+
+    리뷰어는 head 워크트리만 보고 Bash 가 없어 **무엇이 바뀌었는지** 스스로 알 수
+    없다. diff 없이는 옮겨진 코드와 새로 쓴 코드를 구분하지 못해, 기존 결함을 이
+    PR 의 결함으로 적는다 — 실제로 base 에 그대로 있던 문구를 "새로 추가된" 이라고
+    지적한 적이 있다. 그래서 GitHub 이 준 patch 를 그대로 싣는다.
+    """
+    out, used, omitted = [], 0, []
+    for fl in files or []:
+        name = fl.get("filename") or "?"
+        patch = fl.get("patch") or ""
+        if not patch:
+            omitted.append("%s (patch 없음 — 바이너리이거나 너무 큼)" % name)
+            continue
+        chunk = "### `%s`\n```diff\n%s\n```\n" % (name, patch.replace("```", "`\u200b``"))
+        if used + len(chunk) > cap:
+            omitted.append(name)
+            continue
+        out.append(chunk)
+        used += len(chunk)
+    if not out and not omitted:
+        return "(diff 없음)"
+    if omitted:
+        out.append("(diff 를 싣지 못한 파일 — 워크트리에서 직접 읽으세요: %s)"
+                   % ", ".join("`%s`" % o for o in omitted))
+    return "\n".join(out).strip()
+
+
 def _roster_block(agent_name, roster):
     """이 PR 을 함께 보는 리뷰어 명단.
 
@@ -161,6 +196,7 @@ def build_prompt(agent_name, meta, files, ctx=None, roster=None):
         additions=meta.get("additions") or 0,
         deletions=meta.get("deletions") or 0,
         body=body, files_block=files_block,
+        diff_block=_diff_block(files),
         context_block=_context_block(ctx),
         roster_block=_roster_block(agent_name, roster))
     return prompt
@@ -379,7 +415,22 @@ VERDICT_PROMPT = os.path.join(ROOT, "prompts", "verdict.md")
 PLACEMENTS = ("inline", "body", "drop")
 
 
-def judge(meta, payload, findings, allowed_events, model="sonnet", timeout=180):
+SCOPE_LABEL = {
+    "added": "이 PR 이 추가·수정한 라인",
+    "context": "이 PR 에서 바뀌지 않은 라인 (변경 근처의 문맥)",
+    "outside": "변경 범위 밖",
+    "unknown": "라인 미상",
+}
+CI_LABEL = {
+    "none": "없음 — 이 PR 에 체크가 하나도 안 돌았습니다. 테스트가 통과했다는 증거가 없습니다.",
+    "success": "통과",
+    "failure": "실패",
+    "pending": "진행 중",
+}
+
+
+def judge(meta, payload, findings, allowed_events, model="sonnet", timeout=180,
+          approve_max_severity="nit"):
     """리뷰 결과를 놓고 event 와 지적별 게시 형태를 정한다.
 
     코드를 다시 읽지 않는다. 리뷰어들이 남긴 근거의 질을 보고 판단하는 메타
@@ -406,10 +457,12 @@ def judge(meta, payload, findings, allowed_events, model="sonnet", timeout=180):
                 (v.get("reason") or "").replace("\n", " ")[:250])
         elif v.get("error"):
             vline = "\n  검증: 실패 — 반증을 돌리지 못한 채 올라온 지적입니다"
-        rows.append("- id=%d [%s · %s] `%s` inline_ok=%s\n  %s\n  %s%s" % (
+        scope = SCOPE_LABEL.get(fd.get("_scope") or "unknown", SCOPE_LABEL["unknown"])
+        rows.append("- id=%d [%s · %s] `%s` inline_ok=%s · 위치: %s\n  %s\n  %s%s" % (
             i, fd.get("severity"), fd.get("agent"), loc,
-            "false" if fd.get("_why") else "true",
+            "false" if fd.get("_why") else "true", scope,
             fd.get("title"), (fd.get("body") or "").replace("\n", " ")[:400], vline))
+    ci = str(meta.get("_ci") or "none")
     prompt = tpl.format(
         repo=meta["_repo"], number=meta["_number"], title=meta.get("title") or "",
         author=(meta.get("author") or {}).get("login") or "",
@@ -417,6 +470,8 @@ def judge(meta, payload, findings, allowed_events, model="sonnet", timeout=180):
         additions=meta.get("additions") or 0, deletions=meta.get("deletions") or 0,
         summaries=payload.get("summary") or "(요약 없음)", errors=errors,
         findings="\n".join(rows) or "(지적 없음)",
+        ci=CI_LABEL.get(ci, ci),
+        approve_max_severity=approve_max_severity,
         allowed_events=", ".join(allowed_events))
 
     out = _run(prompt, ROOT, model, 1, timeout, "verdict", tools="", key="event")
@@ -437,8 +492,19 @@ VERDICTS = ("TRUE_POSITIVE", "FALSE_POSITIVE")
 SEVERITY_RANK = cfg_mod.SEVERITY_ORDER
 
 
+SCOPE_NOTE = {
+    "added": "이 라인은 **이 PR 이 추가하거나 고친 라인**입니다.",
+    "context": ("이 라인 자체는 **이 PR 에서 바뀌지 않았습니다** (변경 근처의 문맥 라인). "
+                "근처의 `+`/`-` 변경이 이 라인의 동작을 바꾸거나 깨뜨릴 때만 이 PR 의 "
+                "문제입니다. 변경과 무관하게 원래 있던 문제면 FALSE_POSITIVE 입니다."),
+    "outside": "이 라인은 이 PR 의 diff 밖입니다.",
+    "unknown": ("라인이 특정되지 않은 지적입니다. 지적이 말하는 코드가 아래 diff 의 `+` "
+                "라인에 실제로 있는지부터 찾으세요."),
+}
+
+
 def verify(findings, meta, cwd, model="haiku", timeout=300,
-           max_turns=15, workers=4):
+           max_turns=15, workers=4, patches=None):
     """지적을 하나씩 반증해 보고 살아남은 것만 돌려준다.
 
     (살아남은 것, 버린 것) 을 준다. 리뷰어는 자기가 찾은 것을 스스로 채점하면
@@ -459,12 +525,20 @@ def verify(findings, meta, cwd, model="haiku", timeout=300,
     def one(idx_fd):
         i, fd = idx_fd
         line = fd.get("line")
+        path = (fd.get("path") or "").strip().lstrip("./")
+        patch = (patches or {}).get(path) or ""
+        # 검증자에게는 그 파일의 diff 만 준다 — 전체 diff 는 좁은 확인 작업에 과하고,
+        # 이것만 있어도 "옮겨진 코드인가, 새로 쓴 코드인가" 는 가려진다.
+        diff_block = ("```diff\n%s\n```" % patch.replace("```", "`\u200b``")
+                      if patch else "(이 파일의 diff 를 얻지 못했습니다)")
         prompt = tpl.format(
             repo=meta["_repo"], number=meta["_number"],
             agent=fd.get("agent") or "?", path=fd.get("path") or "?",
             line_suffix=(":%s" % line) if line else " (라인 미상)",
             severity=fd.get("severity") or "suggestion",
-            title=fd.get("title") or "", body=fd.get("body") or "")
+            title=fd.get("title") or "", body=fd.get("body") or "",
+            scope_note=SCOPE_NOTE.get(fd.get("_scope") or "unknown", SCOPE_NOTE["unknown"]),
+            diff_block=diff_block)
         out = _run(prompt, cwd, model, max_turns, timeout,
                    "verify-%d" % i, key="verdict")
         return i, out
