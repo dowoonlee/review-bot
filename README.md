@@ -141,13 +141,14 @@ $ review-bot tick
 | `post.dryRun` | 기본 `true`. 게시하지 않고 `state/drafts/` 에 초안만 남깁니다. |
 | `limits.maxPerTick` | 한 틱에 리뷰할 PR 상한 (기본 2). 사용량과 틱 시간의 고삐입니다. |
 | `post.maxFindingsPerPR` | 코멘트 폭탄 방지 (기본 15). 넘치면 요약으로 내려갑니다. |
-| `review.maxDiffLines` / `maxChangedFiles` | 너무 큰 PR 은 리뷰 품질이 떨어지므로 건너뜁니다. |
+| `review.maxDiffLines` / `maxChangedFiles` | 너무 큰 PR 은 건너뜁니다 (기본 3000줄 / 80개). **측정해서 정한 값입니다** — 아래 「크기 상한을 정하는 법」 참조. 걸리면 알림이 울리고 `runs.jsonl` 에 남습니다. |
 | `review-bot pause` | 즉시 정지. `state/PAUSED` 가 있으면 tick 이 아무 일도 하지 않습니다. |
 | 본인 PR 제외 | 작성자가 활성 gh 계정이면 건너뜁니다. 본인 PR 의 지적은 수정 커밋으로 반영하는 것이 규칙입니다. |
 | `post.allowedEvents` | 판정이 낼 수 있는 이벤트. 여기서 `APPROVE` 를 빼면 봇은 승인하지 않습니다. |
 | 판정 모순 차단 | blocking 이 남았는데 APPROVE, blocking 없이 REQUEST_CHANGES, 리뷰어 일부가 실패했는데 APPROVE, `post.approveMaxSeverity`(기본 nit) 보다 높은 지적을 남기고 APPROVE, CI 가 실패했는데 APPROVE — 이런 판정은 코드가 `COMMENT` 로 내리고 그 사실을 본문에 적습니다. |
 | `review.strictScope` | diff 밖의 좌표를 가리키는 지적은 반증 전에 버립니다. 기존 코드의 문제를 이 PR 작성자에게 묻지 않습니다. |
 | 재리뷰 지문 | `PR 번호 + head SHA` 로 기록해, 같은 커밋을 두 번 리뷰하지 않습니다. |
+| 정찰 실패 차단 | RepoMind 에 닿지 못하면 (`repomind.required: true`) 리뷰를 시작하지 않고 알림을 울립니다. 이력 없는 리뷰가 조용히 나가는 것을 막습니다. |
 | 틱 lock | 이전 틱이 아직 돌고 있으면 새 틱은 건너뜁니다. launchd 는 겹쳐 띄웁니다. |
 | 고아 청소 | 틱을 시작할 때, 비정상 종료가 남긴 워크트리와 ref 를 먼저 쓸어냅니다. |
 
@@ -439,11 +440,88 @@ Apple Development. 그 뒤 `./build.sh` 를 다시 돌리면 그 신원을 알�
 | `review.verify.model` | `haiku` | 반증 검증자 모델. 지적 하나당 1콜입니다. 이제 diff 를 놓고 "옮겨진 코드인가" 까지 가려야 하므로, 이 저장소의 `config.json` 은 `sonnet` 으로 올려 두었습니다. |
 | `review.verify.workers` | 4 | 동시에 띄울 검증자 수 |
 | `limits.maxPerTick` | 2 | 틱당 리뷰 상한 |
+| `repomind.enabled` | `false` | 사내 RepoMind MCP 서버로 **리뷰 전 정찰**을 합니다. 리뷰어가 이 영역의 과거 이력(`impact`/`rationale`/`search`)을 직접 조회합니다. |
+| `repomind.required` | `true` | 정찰이 불가능하면 리뷰를 **시작하지 않습니다.** 사내망 밖에서도 돌려야 하면 `false` 로 내리세요 — 대신 이력 없는 리뷰가 나갑니다. |
+| `repomind.keychainService` | `review-bot-repomind` | 토큰을 꺼낼 keychain 항목 이름. **설정 파일에도 저장소에도 토큰 값을 두지 않습니다.** |
 | `review.parallel` | `true` | 에이전트를 동시에 띄웁니다. **메모리가 빠듯하면 `false`** 로 내리세요. |
 
 ## 요구사항
 
 macOS · `claude` CLI · `gh` (인증 완료) · `git` · Python 3.9+ (표준 라이브러리만).
+
+### 크기 상한을 정하는 법
+
+`maxChangedFiles` / `maxDiffLines` 는 **리뷰를 아예 시작하지 않는** 선입니다.
+걸린 PR 은 알림 한 번과 `runs.jsonl` 기록을 남기고 넘어갑니다 (같은 커밋에
+대해서는 한 번만 — 매 틱 울리면 사람이 알림을 끕니다).
+
+어림잡지 말고 그 저장소를 재세요. `skcc-ai/c2` 에서 4주치 PR 351건(릴리스
+승격 제외)을 잰 결과:
+
+| | 중앙값 | p75 | p90 | p95 |
+|---|---|---|---|---|
+| 파일 | 10 | 23 | 44 | 63 |
+| 줄 | 483 | 1,265 | 2,469 | 5,274 |
+
+분포가 **base 브랜치로 갈립니다.** `develop` 으로 가는 일반 PR 은 위와 같지만,
+릴리스·승격 PR(`release/*`, `aws/prd` 등)은 중앙값이 192개 / 14,524줄입니다.
+상한이 실제로 하는 일은 후자를 막는 것이고, 전자를 같이 막으면 안 됩니다.
+
+그래서 p90 을 덮는 **80개 / 3,000줄** 로 잡았습니다. 이전의 40/1500 은 일반
+PR 의 77% 만 통과시켰습니다 — 남의 PR 네 건 중 하나가 말없이 버려졌습니다.
+
+**글자 상한은 줄 상한에서 유도됩니다.** 리뷰어 프롬프트에 실리는 diff 예산은
+`maxDiffLines × 80자 × 1.2` 이고 400,000자(≈100k 토큰)가 천장입니다. 두 상한을
+따로 두면 줄 상한을 올린 순간 리뷰어가 diff 없이 파일을 보게 되는데, 그 상태가
+바로 옮겨진 코드를 새 코드로 착각하는 조건입니다.
+
+상한을 넘긴 PR 도 손으로는 볼 수 있습니다:
+
+```bash
+review-bot review owner/repo#1234 --force-size
+```
+
+diff 가 예산을 넘으면 일부 파일은 프롬프트에서 빠지고, 빠진 파일 목록이 리뷰어에게
+전달돼 워크트리에서 직접 읽게 됩니다.
+
+**`excludeGlobs` 가 그 저장소와 맞는지 확인하세요.** c2 에서 재 보니 기본 목록이
+걷어낸 파일이 **0%** 였습니다 — poetry 가 아니라 uv 를 쓰는데 `uv.lock` 이 목록에
+없었습니다. 안 맞는 목록은 있으나 마나이면서 있는 것처럼 보입니다.
+
+### RepoMind 정찰 (선택)
+
+리뷰어는 워크트리의 코드는 다 읽을 수 있지만 **이 코드가 왜 이렇게 됐는지**는
+모릅니다. 봇이 직접 모아 주는 커밋 이력·과거 코멘트는 파일 10개·커밋 5건이
+상한이라 큰 PR 에서는 사실상 없는 것과 같습니다. 사내 RepoMind MCP 서버를
+붙이면 리뷰어가 `impact`/`rationale`/`search` 로 직접 이력을 캡니다.
+
+토큰은 **keychain 에만** 둡니다. 환경변수로 두면 손으로 돌릴 때는 되고 예약
+틱에서만 401 이 나는데 — launchd 는 로그인 셸을 거치지 않아 `.zshrc` 를 읽지
+않습니다 — 그 형태의 고장은 가장 늦게 발견됩니다.
+
+```bash
+security add-generic-password -a "$USER" -s review-bot-repomind -U -w
+```
+
+`-w` 를 **맨 뒤에 두고 값을 붙이지 마세요.** 그러면 터미널이 값을 묻고, 토큰이
+명령줄(`ps` 로 보입니다)에도 셸 이력에도 남지 않습니다.
+
+```json
+"repomind": {
+  "enabled": true,
+  "url": "http://<서버>:8798/mcp",
+  "keychainService": "review-bot-repomind",
+  "required": true
+}
+```
+
+`review-bot doctor` 가 keychain 항목·서버 연결·토큰 유효성을 한 줄씩 확인합니다.
+디스크에 쓰이는 MCP 설정(`state/mcp-repomind.json`)에는 `${REPOMIND_TOKEN}`
+참조만 적히고, 값은 리뷰어 프로세스의 환경변수로만 흘러갑니다.
+
+봉인은 그대로입니다. `--strict-mcp-config` 는 "MCP 를 끈다" 가 아니라
+"`--mcp-config` 로 준 것 말고는 무시한다" 는 뜻이라, RepoMind 하나를 명시적으로
+건네도 Notion·Gmail 같은 반출 통로는 닫혀 있습니다.
 
 ### gh 계정이 둘 이상이면
 

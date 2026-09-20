@@ -84,6 +84,30 @@ def already_done(data, repo, number, sha, rereview_on_new, dry_run=False):
     return True
 
 
+def skip_key(repo, number):
+    # `key()` 와 겹치지 않는 이름이어야 한다 — 겹치면 `already_done` 이 건너뛴
+    # PR 을 "리뷰 완료" 로 읽는다.
+    return "skip:%s#%s" % (repo, number)
+
+
+def skip_announced(data, repo, number, sha, reason):
+    """이 커밋의 이 사유를 이미 알렸는가.
+
+    크기 상한에 걸린 PR 은 새 커밋이 올라오기 전까지 매 틱 같은 자리에서 걸린다.
+    그때마다 알림을 울리면 사람은 알림을 끄고, 그러면 처음부터 안 알린 것과
+    같아진다. 그래서 커밋 하나당 한 번만 말한다.
+    """
+    rec = data.get(skip_key(repo, number))
+    return bool(rec) and rec.get("sha") == sha and rec.get("reason") == reason
+
+
+def mark_skip_announced(data, repo, number, sha, reason):
+    data[skip_key(repo, number)] = {
+        "sha": sha, "reason": reason,
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    return data
+
+
 def has_pending_draft(repo, number, sha=None):
     """게시를 기다리는 초안이 있는가. sha 를 주면 그 커밋의 것인지까지 본다."""
     path = draft_payload_path(repo, number)

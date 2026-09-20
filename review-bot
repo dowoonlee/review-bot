@@ -28,6 +28,8 @@ from lib import config as cfg_mod
 from lib import github as gh
 from lib import janitor
 from lib import notify
+from lib import repomind as repomind_mod
+from lib import secrets
 from lib import reviewer
 from lib import replies
 from lib import store
@@ -330,7 +332,70 @@ def _guard_event(event, findings, payload, pcfg, ci=None):
     return event, ""
 
 
-def process_pr(pr, cfg, state, force=False):
+def _connect_repomind(cfg):
+    """RepoMind 를 붙이고 한 번 찔러 본다 — (mcp, 중단 사유).
+
+    `mcp` 가 None 이고 사유가 None 이면 그냥 꺼져 있는 것이다. 사유가 있으면
+    정찰이 불가능하다는 뜻이고, `repomind.required` 가 켜져 있으면 호출자가
+    리뷰를 시작하지 않는다.
+
+    실패를 삼키지 않는 것이 이 함수의 요점이다. 서버가 죽거나 토큰이 만료되면
+    리뷰어는 도구만 못 부를 뿐 리뷰는 그럴듯하게 끝나서, 이력 없는 리뷰가 몇 주
+    동안 나가도 아무도 모른다. 그래서 로그와 알림 양쪽에 남긴다.
+    """
+    rc = cfg.get("repomind") or {}
+    if not rc.get("enabled"):
+        return None, None
+    try:
+        mcp = repomind_mod.connect(cfg)
+        mcp.preflight()
+    except repomind_mod.RepomindError as e:
+        why = str(e)
+        required = rc.get("required", True)
+        _log("정찰 불가 — RepoMind: %s" % why)
+        _log("  → %s" % ("리뷰를 시작하지 않습니다 (repomind.required=true)" if required
+                          else "이력 없이 리뷰를 계속합니다 (repomind.required=false)"))
+        notify.send("review-bot · 정찰 불가",
+                    "RepoMind: %s" % why[:180],
+                    sound=(cfg.get("notify") or {}).get("sound"),
+                    enabled=(cfg.get("notify") or {}).get("enabled", True))
+        store.log_run({"repo": "-", "number": 0,
+                       "error": "repomind: %s" % why[:200],
+                       "repomindDown": True, "blocked": bool(required)})
+        return None, (why if required else None)
+    _log("정찰 준비 — RepoMind %d개 도구" % len(mcp.tools))
+    return mcp, None
+
+
+def _announce_skip(r, cfg, state):
+    """크기 상한에 걸린 PR 을 사람에게 알린다 — 커밋 하나당 한 번.
+
+    이 함수가 없던 동안 틱은 "건너뜀" 한 줄을 로그에만 남기고 "새로 리뷰할 PR
+    없음" 으로 끝냈다. `runs.jsonl` 에도 `reviewed.json` 에도 아무것도 남지
+    않아서, 봇이 일을 안 하는 것인지 할 일이 없는 것인지 로그를 열어 보기
+    전에는 구분할 수 없었다. 리뷰를 안 하기로 한 결정은 결정이므로 보고한다.
+    """
+    if r.get("skipKind") != "size":
+        return False
+    repo, number, sha = r.get("repo"), r.get("number"), r.get("sha")
+    reason = r.get("skipped") or ""
+    if store.skip_announced(state, repo, number, sha, reason):
+        return False
+    store.log_run({"repo": repo, "number": number, "sha": sha,
+                   "title": r.get("title"), "skipped": reason,
+                   "files": r.get("files"), "churn": r.get("churn")})
+    notify.send("review-bot · 너무 커서 건너뜀",
+                "%s#%s — %s" % (repo, number, reason),
+                sound=(cfg.get("notify") or {}).get("sound"),
+                enabled=(cfg.get("notify") or {}).get("enabled", True))
+    store.mark_skip_announced(state, repo, number, sha, reason)
+    store.save(state)
+    _log("  → 알림을 보냈습니다. 그래도 보려면 "
+         "`review-bot review %s#%s --force-size`" % (repo, number))
+    return True
+
+
+def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
     """PR 하나를 리뷰하고 게시까지. 결과 dict 를 돌려준다."""
     repo, number = pr["repo"], pr["number"]
     rcfg, pcfg = cfg["review"], cfg["post"]
@@ -370,11 +435,23 @@ def process_pr(pr, cfg, state, force=False):
              if not _skip_file(f.get("filename") or "", rcfg)]
     if not files:
         return dict(result, skipped="리뷰할 파일 없음")
-    if len(files) > (rcfg.get("maxChangedFiles") or 40):
-        return dict(result, skipped="파일 %d개 — 상한 초과" % len(files))
     churn = sum((f.get("additions") or 0) + (f.get("deletions") or 0) for f in files)
-    if churn > (rcfg.get("maxDiffLines") or 1500):
-        return dict(result, skipped="변경 %d줄 — 상한 초과" % churn)
+    cap_f = rcfg.get("maxChangedFiles") or 80
+    cap_l = rcfg.get("maxDiffLines") or 3000
+    over = []
+    if len(files) > cap_f:
+        over.append("파일 %d개(상한 %d)" % (len(files), cap_f))
+    if churn > cap_l:
+        over.append("%d줄(상한 %d)" % (churn, cap_l))
+    if over and not force_size:
+        # 두 축을 한 번에 알려 준다. 하나씩 걸리면 상한을 올려도 다음 틱에서 다른
+        # 축에 다시 걸려, 고치는 사람이 같은 자리를 두 번 오게 된다.
+        # skipKind 로 표시해 두는 것은 이 건너뜀만 사람에게 알리기 위해서다 —
+        # "이미 리뷰함", "본인 PR" 같은 것은 설계대로 동작한 것이라 알릴 일이 아니다.
+        return dict(result, skipped=" · ".join(over) + " — 상한 초과",
+                    skipKind="size", files=len(files), churn=churn)
+    if over and force_size:
+        _log("  상한 초과(%s) — --force-size 로 그대로 진행합니다" % " · ".join(over))
 
     files_by_path = {f["filename"]: {"postable": gh.postable_lines(f.get("patch")),
                                      "added": gh.added_lines(f.get("patch")),
@@ -409,13 +486,17 @@ def process_pr(pr, cfg, state, force=False):
         ctx = {"history": worktree.file_history(base, wsha, list(files_by_path)),
                "comments": gh.file_review_comments(repo, list(files_by_path),
                                                    account=acct)}
-        _log("  맥락: 커밋이력 %d파일 · 과거 코멘트 %d파일"
-             % (len(ctx["history"]), len(ctx["comments"])))
+        _log("  맥락: 커밋이력 %d파일 · 과거 코멘트 %d파일 · 정찰 %s"
+             % (len(ctx["history"]), len(ctx["comments"]),
+                "RepoMind" if mcp else "없음"))
         payload = reviewer.review(meta, files, rcfg["agents"], cwd=wt,
                                   model=rcfg.get("model"),
                                   max_turns=rcfg.get("maxTurns", 0),
                                   timeout=rcfg.get("timeoutSec") or 3600,
-                                  parallel=rcfg.get("parallel", True), ctx=ctx)
+                                  parallel=rcfg.get("parallel", True), ctx=ctx,
+                                  mcp=mcp,
+                                  diff_cap=reviewer.diff_char_cap(
+                                      rcfg.get("maxDiffLines")))
         # 반증 — 워크트리가 살아 있는 이 안에서만 가능하다. 판정 단계는 코드를
         # 볼 수 없으므로 근거의 문체로만 판단한다. 여기서는 코드를 다시 읽는다.
         # 범위 — 반증보다 먼저다. diff 밖의 지적은 검증할 가치도 비용도 없다.
@@ -1033,13 +1114,20 @@ def _tick(cfg):
     cap = cfg["limits"].get("maxPerTick") or 2
     done, reviewed = [], 0
 
+    # 볼 PR 이 있을 때만 붙인다 — 조용한 틱마다 사내 서버를 찌를 이유가 없다.
+    mcp = None
+    if targets:
+        mcp, blocked = _connect_repomind(cfg)
+        if blocked:
+            return 1
+
     for pr in targets:
         if reviewed >= cap:
             _log("틱당 상한 %d건 도달 — 나머지는 다음 틱에" % cap)
             break
         _log("· %s#%s %s" % (pr["repo"], pr["number"], pr["title"][:50]))
         try:
-            r = process_pr(pr, cfg, state)
+            r = process_pr(pr, cfg, state, mcp=mcp)
         except (gh.GhError, worktree.WorktreeError, reviewer.ReviewError) as e:
             _log("  실패: %s" % str(e)[:200])
             store.log_run({"repo": pr["repo"], "number": pr["number"],
@@ -1047,6 +1135,7 @@ def _tick(cfg):
             continue
         if r.get("skipped"):
             _log("  건너뜀 — %s" % r["skipped"])
+            _announce_skip(r, cfg, state)
             continue
         reviewed += 1
         done.append(r)
@@ -1118,14 +1207,20 @@ def cmd_review(args, cfg):
         worktree.sweep(cfg.get("repos"))
         state = store.load()
         pr = {"repo": repo, "number": number, "title": ""}
+        mcp, blocked = _connect_repomind(cfg)
+        if blocked:
+            return 1
         try:
-            r = process_pr(pr, cfg, state, force=True)
+            r = process_pr(pr, cfg, state, force=True, mcp=mcp,
+                           force_size=getattr(args, "force_size", False))
         except (gh.GhError, worktree.WorktreeError, reviewer.ReviewError) as e:
             _log("실패: %s" % str(e)[:300])
             store.log_run({"repo": repo, "number": number, "error": str(e)[:300]})
             return 1
         if r.get("skipped"):
             _log("건너뜀 — %s" % r["skipped"])
+            if r.get("skipKind") == "size":
+                _log("상한을 무시하고 보려면 --force-size 를 붙이세요")
             return 0
         store.mark(state, repo, number, r["sha"], inline=r.get("inline"),
                    demoted=r.get("demoted"), posted=r.get("posted"),
@@ -1207,6 +1302,10 @@ def _config_info(cfg):
         "timeoutSec": rcfg.get("timeoutSec"),
         "maxChangedFiles": rcfg.get("maxChangedFiles"),
         "maxDiffLines": rcfg.get("maxDiffLines"),
+        # url 만 싣는다 — 토큰은 어떤 형태로도 이 dict 에 들어오지 않는다.
+        "repomind": ((cfg.get("repomind") or {}).get("url") or "(url 없음)"
+                     if (cfg.get("repomind") or {}).get("enabled") else None),
+        "repomindRequired": bool((cfg.get("repomind") or {}).get("required", True)),
         "minSeverity": pcfg.get("minSeverity"),
         "maxFindingsPerPR": pcfg.get("maxFindingsPerPR"),
         "allowedEvents": pcfg.get("allowedEvents") or [],
@@ -1811,11 +1910,15 @@ def cmd_runs(args, cfg):
     with open(store.LOG, encoding="utf-8") as f:
         rows = [json.loads(l) for l in f if l.strip()]
     for r in rows[-(args.limit):]:
-        print("%s %s#%s %s" % (
-            r.get("at", ""), r.get("repo"), r.get("number"),
-            r.get("error") or "%s · inline %s · 본문 %s · %s" % (
+        if r.get("skipped"):
+            what = "건너뜀 — %s" % r["skipped"]
+        elif r.get("error"):
+            what = r["error"]
+        else:
+            what = "%s · inline %s · 본문 %s · %s" % (
                 r.get("event") or "-", r.get("inline"), r.get("demoted"),
-                "게시" if r.get("posted") else "초안")))
+                "게시" if r.get("posted") else "초안")
+        print("%s %s#%s %s" % (r.get("at", ""), r.get("repo"), r.get("number"), what))
     return 0
 
 
@@ -1851,6 +1954,40 @@ def cmd_doctor(args, cfg):
         except gh.GhError as e:
             print("%-8s %s ❌ %s" % ("고정 계정", acct, str(e)[:80]))
             ok = False
+    rc = cfg.get("repomind") or {}
+    if not rc.get("enabled"):
+        print("%-8s 꺼짐 — 리뷰어가 과거 이력을 보지 못합니다" % "정찰")
+    else:
+        svc = rc.get("keychainService") or "review-bot-repomind"
+        acct_kc = rc.get("keychainAccount") or ""
+        # 값은 이 호출 밖으로 나오지 않는다 — 상태만 받는다.
+        kc = secrets.keychain_state(svc, acct_kc or None)
+        print("%-8s keychain '%s' %s" % ("정찰", svc, {
+            "ok": "✓", "empty": "값이 비어 있음 ❌", "missing": "없음 ❌"}[kc]))
+        if kc == "empty":
+            print("         → 프롬프트에 값이 전달되지 않은 채 저장됐습니다.")
+            print("           아래 명령을 **터미널에서 직접** 다시 실행하세요 —")
+            print("           security 는 stdin 이 아니라 TTY 에서 값을 읽습니다")
+        if kc != "ok":
+            print('         → security add-generic-password -a "$USER" -s %s%s -U -w' %
+                  (svc, (" -a " + acct_kc) if acct_kc else ""))
+            print("           -w 를 맨 뒤에 두고 값을 붙이지 마세요. 그러면 묻습니다 —")
+            print("           명령줄(ps)에도 셸 이력에도 토큰이 남지 않습니다")
+            if os.environ.get(repomind_mod.ENV_VAR):
+                print("         ⚠️ 지금 셸에는 %s 가 있지만 launchd 는 .zshrc 를 읽지 않습니다 —"
+                      % repomind_mod.ENV_VAR)
+                print("           keychain 에 넣지 않으면 예약 틱에서만 401 이 납니다")
+            ok = False
+        try:
+            mcp = repomind_mod.connect(cfg)
+            mcp.preflight()
+            print("%-8s %s ✓ (도구 %d개)" % ("정찰", mcp.url, len(mcp.tools)))
+        except repomind_mod.RepomindError as e:
+            print("%-8s %s ❌ %s" % ("정찰", rc.get("url") or "(url 없음)", str(e)[:90]))
+            if rc.get("required", True):
+                print("         → repomind.required=true 라 이 상태에서는 리뷰를 시작하지 않습니다")
+            ok = False
+
     repos = cfg.get("repos") or {}
     if not repos:
         print("설정   저장소 화이트리스트가 비어 있습니다 — 아무것도 리뷰하지 않습니다 ⚠️")
@@ -1917,6 +2054,9 @@ def main():
     r.add_argument("target")
     r.add_argument("--agents", help="이번만 이 리뷰어들로 (쉼표 구분). 빠진 관점만 보완할 때")
     r.add_argument("--note", help="요약 본문 맨 위에 실을 안내 — 왜 또 리뷰가 올라왔는지")
+    r.add_argument("--force-size", action="store_true",
+                   help="크기 상한을 무시하고 본다. diff 가 프롬프트에 다 들어가지 "
+                        "못하면 일부 파일은 리뷰어가 워크트리에서 직접 읽습니다")
     r.set_defaults(fn=cmd_review)
     st = sub.add_parser("status")
     st.add_argument("--json", action="store_true", help="앱·스크립트가 읽을 JSON 으로 출력")

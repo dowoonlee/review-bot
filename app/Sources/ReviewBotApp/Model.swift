@@ -71,13 +71,17 @@ struct RunRecord: Decodable, Identifiable, Sendable {
     var lostAnchors: Int?
     var degraded: Bool?
     var postError: String?
+    /// 크기 상한에 걸려 리뷰하지 않은 경우의 사유. 리뷰 기록과 같은 파일에 섞인다.
+    var skipped: String?
+    var files: Int?
+    var churn: Int?
 
     var id: String { "\(repo ?? "?")#\(number ?? 0)@\(at ?? "?")" }
 
     enum CodingKeys: String, CodingKey {
         case repo, number, title, account, sha, inline, demoted, dropped
         case event, reason, summary, draft, posted, at, error, degraded
-        case reviewDecision, lostAnchors
+        case reviewDecision, lostAnchors, skipped, files, churn
         case costUSD = "cost_usd"
         case agentErrors = "agent_errors"
         case postError = "post_error"
@@ -86,6 +90,7 @@ struct RunRecord: Decodable, Identifiable, Sendable {
     var prLabel: String { "\(repo?.split(separator: "/").last.map(String.init) ?? "?")#\(number ?? 0)" }
     var findingCount: Int { (inline ?? 0) + (demoted ?? 0) }
     var failed: Bool { error != nil }
+    var wasSkipped: Bool { skipped != nil }
     var partial: Bool { !(agentErrors ?? []).isEmpty }
     var date: Date? { RunRecord.stamp.date(from: at ?? "") }
 

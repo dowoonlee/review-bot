@@ -34,8 +34,18 @@ DEFAULTS = {
         "maxTurns": 0,
         # 상한이 없을 때 폭주를 막는 유일한 끈. 리뷰어 하나당 벽시계 시간.
         "timeoutSec": 3600,
-        "maxDiffLines": 1500,
-        "maxChangedFiles": 40,
+        # 리뷰를 아예 시작하지 않는 크기.
+        #
+        # 처음의 40개/1500줄은 "설정 없이 돌려도 사고가 안 날 값" 으로 어림잡은
+        # 것이었다. skcc-ai/c2 의 PR 351건(develop·기능 브랜치 대상, 릴리스 승격
+        # 제외)을 재 보니 중앙값 10개/483줄, p90 이 44개/2469줄이었고, 40/1500 은
+        # 그 모집단의 77% 만 통과시켰다 — 남의 PR 네 건 중 하나가 말없이 버려졌다.
+        # p90 을 덮도록 올린다. 릴리스·승격 PR(중앙값 192개/14524줄)은 여전히
+        # 걸리는데, 그것이 이 상한이 실제로 하는 일이다.
+        #
+        # 저장소마다 분포가 다르다. 옮길 때는 어림잡지 말고 다시 재라.
+        "maxDiffLines": 3000,
+        "maxChangedFiles": 80,
         "skipDrafts": True,
         # head 가 바뀌면(=새 커밋 push) 다시 리뷰한다.
         "rereviewOnNewCommits": True,
@@ -60,8 +70,12 @@ DEFAULTS = {
             "workers": 4,
         },
         # 경로에 이 조각이 들어가면 리뷰에서 제외 (lock 파일, 스냅샷 등)
+        # 이 목록이 그 저장소의 생성물과 맞는지 확인하라. c2 에서 재 보니 기본
+        # 목록이 걷어낸 파일이 0% 였다 — poetry 가 아니라 uv 를 쓰는데 `uv.lock`
+        # 이 없었다. 안 맞는 목록은 있으나 마나이면서 있는 것처럼 보인다.
         "excludeGlobs": ["package-lock.json", "yarn.lock", "pnpm-lock.yaml",
-                         "poetry.lock", "go.sum", "__snapshots__/", "dist/",
+                         "poetry.lock", "uv.lock", "Cargo.lock", "composer.lock",
+                         "Gemfile.lock", "go.sum", "__snapshots__/", "dist/",
                          "build/", ".min.js", ".min.css"],
     },
     "post": {
@@ -92,6 +106,28 @@ DEFAULTS = {
             "model": "sonnet",
             "timeoutSec": 300,
         },
+    },
+    # 사내 RepoMind MCP 서버 — 리뷰 전에 이 영역의 과거 이력을 정찰한다.
+    #
+    # 기본은 꺼짐이다. 사내망에서만 닿고 토큰이 있어야 하므로, 설정 없이 돌린
+    # 기계에서 매 틱 연결 실패를 뱉는 것보다 아예 안 부르는 편이 낫다.
+    "repomind": {
+        "enabled": False,
+        "url": "",
+        # 토큰은 keychain 에서 꺼낸다 — 설정 파일에도 저장소에도 값을 두지 않는다.
+        # `security add-generic-password -s <service> -a <account> -U -w` 로 넣는다.
+        "keychainService": "review-bot-repomind",
+        "keychainAccount": "",
+        # 리뷰어에게 열어 줄 도구. 전부 읽기 전용 조회다.
+        "tools": ["impact", "rationale", "search", "related", "coupling", "overview"],
+        "timeoutSec": 20,
+        # true 면 정찰이 불가능할 때 리뷰를 시작하지 않는다.
+        #
+        # 리뷰 규칙이 "사전 정찰 생략 금지" 라고 못박고 있는데, 서버가 죽었다고
+        # 이력 없는 리뷰를 조용히 내보내면 규칙이 있으나 마나다. 게다가 그 리뷰는
+        # 겉보기에 멀쩡해서 몇 주가 지나도 아무도 눈치채지 못한다. 차라리 멈추고
+        # 알림을 울린다 — 사내망 밖에서도 돌려야 하면 이 값을 false 로 내린다.
+        "required": True,
     },
     "limits": {
         # 한 틱에 리뷰할 PR 최대 개수. 틱 시간과 사용량에 직결된다.

@@ -11,6 +11,7 @@ struct RunDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 head
+                if run.wasSkipped { skippedBox }
                 if run.failed { failureBox }
                 if run.partial { partialBox }
                 if let reason = run.reason, !reason.isEmpty { verdictBox(reason) }
@@ -31,7 +32,8 @@ struct RunDetailView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Text(run.prLabel).f(.title2, .semibold)
-                if run.failed { Text("실패").f(.caption).foregroundStyle(.red) }
+                if run.wasSkipped { Text("건너뜀").f(.caption).foregroundStyle(.orange) }
+                else if run.failed { Text("실패").f(.caption).foregroundStyle(.red) }
                 else { EventBadge(event: run.event) }
                 if run.degraded == true {
                     Text("강등 게시").f(.caption2).foregroundStyle(.orange)
@@ -65,6 +67,14 @@ struct RunDetailView: View {
             Text(label).f(.caption2).foregroundStyle(.secondary)
             Text(value).f(.callout, .medium, digits: true)
         }
+    }
+
+    private var skippedBox: some View {
+        box(.orange, "너무 커서 리뷰하지 않았습니다",
+            (run.skipped ?? "")
+            + "\n\n터미널에서 `review-bot review \(run.repo ?? "")#\(run.number ?? 0) --force-size` "
+            + "로 상한을 무시하고 볼 수 있습니다. 그 경우 diff 가 프롬프트에 다 들어가지 "
+            + "못하면 일부 파일은 리뷰어가 워크트리에서 직접 읽습니다.")
     }
 
     private var failureBox: some View {

@@ -46,6 +46,22 @@
   "limits": {
     "maxPerTick": 2
   },
+  "repomind": {
+    "enabled": false,
+    "url": "http://repomind.internal:8798/mcp",
+    "keychainService": "review-bot-repomind",
+    "keychainAccount": "",
+    "tools": [
+      "impact",
+      "rationale",
+      "search",
+      "related",
+      "coupling",
+      "overview"
+    ],
+    "timeoutSec": 20,
+    "required": true
+  },
   "notify": {
     "enabled": true,
     "sound": "Glass"

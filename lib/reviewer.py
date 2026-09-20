@@ -33,7 +33,11 @@ STATE_DIR = os.path.join(ROOT, "state")
 #   --tools              어떤 도구가 존재하는지 자체를 정한다 (이것이 진짜 제한)
 #   --restricted         코드 실행 도구·WebFetch 제거, 사용자·프로젝트 설정 무시,
 #                        파일 도구를 작업 디렉터리 안으로 가둔다
-#   --strict-mcp-config  MCP 서버를 전부 빼 버린다 — Notion·Gmail 같은 반출 통로 차단
+#   --strict-mcp-config  `--mcp-config` 로 준 것 **말고는** MCP 서버를 쓰지 않는다.
+#                        이 플래그의 뜻은 "MCP 를 끈다" 가 아니라 "설정 파일에서
+#                        딸려 오는 서버를 무시한다" 이다 — 그래서 아래처럼 서버
+#                        하나를 명시적으로 건네도 Notion·Gmail 같은 반출 통로는
+#                        여전히 닫혀 있다.
 ALLOWED_TOOLS = "Read,Grep,Glob"
 HARDENING = ["--restricted", "--strict-mcp-config"]
 
@@ -121,10 +125,27 @@ def _context_block(ctx):
     return "\n".join(out).strip()
 
 
-# 리뷰어에게 실어 주는 diff 의 상한. maxDiffLines(기본 1500줄) 안의 PR 은 통째로
-# 들어가고, 그 위는 파일 단위로 자른다 — 프롬프트가 터지는 것보다 일부 파일의 diff
-# 가 빠지는 편이 낫고, 빠진 파일은 그 사실을 적어 리뷰어가 워크트리에서 읽게 한다.
-DIFF_CHAR_CAP = 160_000
+# 리뷰어에게 실어 주는 diff 의 상한.
+#
+# 줄 수 상한(`maxDiffLines`)과 글자 수 상한을 따로 두면 둘이 조용히 어긋난다.
+# 실측하면 이 저장소의 diff 는 줄당 평균 77자라, 160,000자 고정 상한은 약 2,000줄
+# 까지만 담는다 — 1500줄 상한과 우연히 맞아떨어졌을 뿐이고, 줄 상한을 올리는
+# 순간 리뷰어는 "diff 에 없는 파일" 을 워크트리에서 읽게 된다. 그 상태가 바로
+# 옮겨진 코드를 새 코드로 착각하는 조건이다.
+#
+# 그래서 글자 상한을 줄 상한에서 유도하고, 컨텍스트를 지키는 천장만 따로 둔다.
+CHARS_PER_DIFF_LINE = 80        # 실측 77.4 — 여유를 두고 올림
+DIFF_CHAR_CEILING = 400_000     # ≈100k 토큰. 나머지는 리뷰어가 코드를 읽는 데 쓴다
+DIFF_CHAR_FLOOR = 80_000
+DIFF_CHAR_CAP = 160_000         # 줄 상한을 모를 때의 기본값
+
+
+def diff_char_cap(max_diff_lines):
+    """줄 상한에 맞는 글자 상한. 전부 실리도록 잡되 천장을 넘지 않는다."""
+    if not max_diff_lines or max_diff_lines <= 0:
+        return DIFF_CHAR_CAP
+    want = int(max_diff_lines * CHARS_PER_DIFF_LINE * 1.2)   # 평균보다 긴 줄을 위한 여유
+    return max(DIFF_CHAR_FLOOR, min(DIFF_CHAR_CEILING, want))
 
 
 def _diff_block(files, cap=DIFF_CHAR_CAP):
@@ -171,7 +192,39 @@ def _roster_block(agent_name, roster):
             % (agent_name, "\n".join("- %s" % n for n in others)))
 
 
-def build_prompt(agent_name, meta, files, ctx=None, roster=None):
+def _recon_block(mcp):
+    """RepoMind 정찰 지시.
+
+    서버가 안 붙었으면 빈 문자열이다 — 없는 도구를 쓰라고 적어 두면 리뷰어가
+    도구를 찾다 턴만 태우고, 못 찾은 것을 "이력 없음" 으로 적어 버린다.
+    """
+    if not mcp:
+        return ""
+    names = ", ".join("`%s`" % t.rsplit("__", 1)[-1] for t in mcp.tools)
+    return """# 사전 정찰 — RepoMind (코드를 읽기 전에)
+
+이력이 쌓인 영역(공유·권한·마이그레이션·런타임·도구 정책 등)은 코드 정독만으로
+정책 의도와 과거 재발을 놓칩니다. **diff 를 읽기 전에** 먼저 돌리세요.
+
+- `impact(변경 파일 목록)` — 이 영역에서 과거 무엇이 깨졌나, 주의 지점
+- `rationale(핵심 파일 경로)` — 이 코드가 왜 이렇게 됐나 (설계 의문이 생겼을 때)
+- `search(증상 키워드)` — 같은 증상의 과거 이력
+- 그 밖에 쓸 수 있는 것: %s
+
+지킬 것:
+
+- 과거 이력이 확인된 지적에는 `body` 에 **`pr-NNNN` 근거를 함께 인용**하세요.
+- 신규 도메인이라 이력이 없으면 `summary` 에 그렇게 적고, 현재 코드와 재현
+  증거만으로 지적하세요.
+- **정찰은 지적의 근거가 아니라 조명입니다.** "과거에 깨진 적이 있다" 만으로는
+  지적이 되지 않습니다 — 이번 diff 의 `+` 라인에서 같은 일이 실제로 일어나는지
+  코드로 확인한 것만 남기세요.
+- 도구가 오류를 돌려주면 `summary` 의 "확인하지 못한 것" 에 그 사실을 적으세요.
+  정찰한 척하지 마세요.""" % names
+
+
+def build_prompt(agent_name, meta, files, ctx=None, roster=None, mcp=None,
+                 diff_cap=None):
     # 에이전트 정의에서 가져오는 것은 역할뿐이다. frontmatter 의 model 은 무시한다
     # — 봇이 쓰는 모델은 config 한 곳에서만 정한다. 본문에서도 헤드리스에서 못 할
     # 지시(reports 작성, lead 보고, 사용자 결정 대기)는 role() 이 걷어낸다.
@@ -196,14 +249,15 @@ def build_prompt(agent_name, meta, files, ctx=None, roster=None):
         additions=meta.get("additions") or 0,
         deletions=meta.get("deletions") or 0,
         body=body, files_block=files_block,
-        diff_block=_diff_block(files),
+        diff_block=_diff_block(files, diff_cap or DIFF_CHAR_CAP),
         context_block=_context_block(ctx),
+        recon_block=_recon_block(mcp),
         roster_block=_roster_block(agent_name, roster))
     return prompt
 
 
 def review(meta, files, agent_names, cwd, model=None, max_turns=60, timeout=900,
-           parallel=True, ctx=None):
+           parallel=True, ctx=None, mcp=None, diff_cap=None):
     """에이전트들을 돌리고 findings 를 합친다.
 
     model 은 문자열(전부 같은 모델) 또는 에이전트별 dict 둘 다 받는다 —
@@ -213,9 +267,9 @@ def review(meta, files, agent_names, cwd, model=None, max_turns=60, timeout=900,
     여유가 없는 기계에서는 동시에 띄우다 OOM 으로 죽는다. 그때 순차로 내린다.
     """
     def one(name):
-        prompt = build_prompt(name, meta, files, ctx, agent_names)
+        prompt = build_prompt(name, meta, files, ctx, agent_names, mcp, diff_cap)
         payload = _run(prompt, cwd, cfg_mod.model_for(model, name),
-                       max_turns, timeout, name)
+                       max_turns, timeout, name, mcp=mcp)
         for f in payload.get("findings") or []:
             if isinstance(f, dict):
                 f["agent"] = name          # 모델의 자칭이 아니라 실행 주체로 채운다
@@ -253,10 +307,15 @@ def review(meta, files, agent_names, cwd, model=None, max_turns=60, timeout=900,
             "_meta": {"cost_usd": round(cost, 4), "agents": per_agent}}
 
 
-def _invoke(cmd, prompt, cwd, timeout):
-    """claude 를 한 번 띄우고 (stdout, stderr, 종료 코드) 를 준다."""
+def _invoke(cmd, prompt, cwd, timeout, env_extra=None):
+    """claude 를 한 번 띄우고 (stdout, stderr, 종료 코드) 를 준다.
+
+    `env_extra` 는 비밀 값이 들어오는 자리다 (RepoMind 토큰). 자식의 환경으로만
+    들어가고 명령줄에는 올리지 않는다 — 명령줄은 `ps` 로 아무나 읽을 수 있다.
+    """
     env = dict(os.environ)
     env["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"] = "1"
+    env.update(env_extra or {})
     # 자기만의 프로세스 그룹으로 띄운다. 시간 초과 때 그룹째 죽이지 않으면
     # claude 가 띄운 자식들이 부모만 죽은 채 계속 돌아 메모리를 잡아먹는다.
     try:
@@ -282,16 +341,26 @@ def _invoke(cmd, prompt, cwd, timeout):
 
 
 def _run(prompt, cwd, model, max_turns, timeout, tag, tools=ALLOWED_TOOLS,
-         key="findings"):
+         key="findings", mcp=None):
     cmd = ["claude", "-p", "--output-format", "json", "--model", model] + HARDENING
     if max_turns and max_turns > 0:      # 0 이면 상한을 걸지 않는다
         cmd += ["--max-turns", str(max_turns)]
     # --tools 가 도구 집합을 정하고, --allowedTools 는 그것들을 물어보지 않고 쓰게 한다.
     # 헤드리스에서는 승인을 받을 사람이 없어 둘 다 없으면 아무것도 못 한다.
+    #
+    # --tools 는 **빌트인 도구만** 다룬다. MCP 도구는 거기 적어도 존재하지 않고,
+    # --mcp-config 로 서버가 붙은 뒤 --allowedTools 에 이름이 있어야 물어보지 않고
+    # 쓴다. 그래서 둘을 따로 세운다.
     cmd += ["--tools", tools or ""]
-    if tools:
-        cmd += ["--allowedTools", tools]
-    out, err, rc = _invoke(cmd, prompt, cwd, timeout)
+    allow = [tools] if tools else []
+    env_extra = None
+    if mcp and tools:
+        cmd += ["--mcp-config", mcp.config_path]
+        allow += mcp.tools
+        env_extra = mcp.env()
+    if allow:
+        cmd += ["--allowedTools", ",".join(allow)]
+    out, err, rc = _invoke(cmd, prompt, cwd, timeout, env_extra)
     envelope = _envelope(out)
     if rc == 0 and envelope:
         return _finish(envelope, tag, key)
@@ -305,7 +374,8 @@ def _run(prompt, cwd, model, max_turns, timeout, tag, tools=ALLOWED_TOOLS,
         cmd2 = (["claude", "-p", "--resume", sid, "--output-format", "json",
                  "--model", model, "--max-turns", "1", "--tools", ""] + HARDENING)
         try:
-            out2, _err2, rc2 = _invoke(cmd2, FINISH_PROMPT, cwd, min(timeout, 300))
+            out2, _err2, rc2 = _invoke(cmd2, FINISH_PROMPT, cwd, min(timeout, 300),
+                                       env_extra)
         except ReviewError as e:
             raise ReviewError("턴 예산 소진 뒤 마무리 실패: %s" % e, cost=spent)
         env2 = _envelope(out2)

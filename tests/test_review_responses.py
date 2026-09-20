@@ -115,7 +115,7 @@ class TickResponseTests(unittest.TestCase):
         bot = runpy.run_path(str(Path(__file__).resolve().parents[1] / "review-bot"))
         tick = bot["_tick"]
         processed = []
-        def process(item, cfg, state):
+        def process(item, cfg, state, mcp=None):
             processed.append(item["number"])
             return {"skipped": "already reviewed"}
         cfg = {"repos": {"org/repo": {"account": "me"}}, "limits": {}, "notify": {}}
