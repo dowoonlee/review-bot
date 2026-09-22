@@ -27,6 +27,7 @@ from lib import agents as agents_mod
 from lib import config as cfg_mod
 from lib import github as gh
 from lib import janitor
+from lib import drafts as drafts_mod
 from lib import notify
 from lib import repomind as repomind_mod
 from lib import secrets
@@ -910,6 +911,8 @@ def cmd_publish(args, cfg):
 
 
 def cmd_drafts(args, cfg):
+    for error in drafts_mod.reconcile(cfg):
+        _log(error)
     drafts = store.pending_drafts()
     if not drafts:
         print("게시를 기다리는 초안이 없습니다")
@@ -1181,6 +1184,8 @@ def _accounts(cfg):
 
 
 def _tick(cfg):
+    for error in drafts_mod.reconcile(cfg, locked=True):
+        _log(error)
     _gc(cfg)
     state = store.load()
 
@@ -1468,7 +1473,7 @@ def status_payload(cfg, skip_details=False):
     """
     groups = _accounts(cfg)
     state = store.load()
-    accounts, errors, prs = [], [], []
+    accounts, errors, prs = [], drafts_mod.reconcile(cfg), []
     outgoing, outgoing_errors, outgoing_failed_accounts = [], [], []
     for acct, repos in groups.items():
         info = {"account": acct, "repos": sorted(repos), "tokenOwner": None, "ok": False}
