@@ -53,6 +53,20 @@ DEFAULTS = {
         # 거치지 않고 버린다. false 면 예전처럼 본문으로 강등해 살린다 — 그 경로로
         # base 에 그대로 있던 코드의 문제가 "이 PR 의 지적" 으로 게시된 적이 있다.
         "strictScope": True,
+        # PR별 워크트리의 head를 일회용 컨테이너에서 테스트·브라우저 검증.
+        # repos[repo].runtime으로 저장소별 덮어쓰기 가능.
+        "runtime": {
+            "enabled": True,
+            "model": "sonnet",
+            "maxTurns": 40,
+            "planTimeoutSec": 600,
+            "setupTimeoutSec": 900,
+            "testTimeoutSec": 900,
+            "browserTimeoutSec": 300,
+            "image": "mcr.microsoft.com/playwright:v1.58.2-noble",
+            "memory": "6g",
+            "cpus": 4,
+        },
         # 리뷰어가 낸 지적을 코드 근거로 반증해 보는 단계. 워크트리가 아직
         # 살아 있는 동안 돈다 — 판정 단계는 코드를 못 보므로 거기서는 불가능하다.
         # 끄면 리뷰어의 말을 그대로 믿고 게시한다.
@@ -91,7 +105,7 @@ DEFAULTS = {
         # APPROVE 라도 COMMENT 로 내린다. nit 이면 P3·altitude 만 남았을 때 승인.
         # "머지 전 권장" (P2) 을 달아 놓고 승인하는 모순을 코드에서 막는다.
         "approveMaxSeverity": "nit",
-        # head 커밋의 CI 가 실패했으면 승인하지 않는다. 체크가 없는 저장소에는
+        # head 커밋의 CI가 실패하거나 진행 중이면 승인하지 않는다. 체크가 없는 저장소에는
         # 영향이 없다 — 대신 "CI 없음" 이 판정 자료에 실린다.
         "approveNeedsGreenCi": True,
         # 게시 직전에 문장만 다듬는다. 기계가 쓴 티(군더더기 서두, 빈 수식어, 과한
@@ -136,6 +150,7 @@ DEFAULTS = {
         # 실패한 리뷰의 세션은 원인을 볼 단서라 며칠 남긴다.
         "sessionDays": 3,
         "draftDays": 14,
+        "evidenceDays": 14,
         "runsMaxLines": 2000,
         # 반증 기록은 지적 단위라 더 빨리 쌓이지만, 임계값을 정할 때 분포를
         # 봐야 하는 자료라 넉넉히 남긴다.

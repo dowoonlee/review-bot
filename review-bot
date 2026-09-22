@@ -31,6 +31,7 @@ from lib import notify
 from lib import repomind as repomind_mod
 from lib import secrets
 from lib import reviewer
+from lib import runtime
 from lib import replies
 from lib import store
 from lib import worktree
@@ -260,7 +261,23 @@ def _summary_body(payload, inline, demoted, verdict=None, note=None):
     if inline_rest:
         parts.append("- 그 외 %d건은 인라인 코멘트를 참고하세요." % len(inline_rest))
 
-    parts += ["", "### 검증 범위", "", VERIFY_SCOPE]
+    parts += ["", "### 검증 범위", ""]
+    if payload.get("runtime", {}).get("status") not in (None, "disabled"):
+        evidence = payload["runtime"]
+        parts.append("head `%s`의 워크트리 코드와 격리 실행 결과를 확인했습니다." % evidence.get("sha", "?"))
+        for test in evidence.get("tests") or []:
+            parts.append("- 로컬 %s: **%s** (`%s`)" % (test["name"], test["status"], test["command"]))
+        visual = evidence.get("visual") or {}
+        parts.append("- 화면 검증: %s — %s" % (visual.get("status", "미실행/해당 없음"), visual.get("summary", "")))
+        for limitation in evidence.get("limitations") or []:
+            parts.append("- 미확인: " + limitation)
+    else:
+        parts.append(VERIFY_SCOPE)
+    ci = payload.get("ci_evidence") or {}
+    if ci:
+        parts.append("- CI: %s (head `%s`)" % (ci.get("state"), ci.get("sha")))
+        for check in ci.get("checks") or []:
+            parts.append("  - %s: %s %s" % (check["name"], check.get("conclusion") or check.get("status"), check.get("url") or ""))
     coverage = payload.get("coverage") or {}
     if coverage:
         parts.append("- 변경 파일 %d개 · %d묶음 · 묶음 검토 완료 %d/%d · 통합 검토 완료 %d/%d" % (
@@ -335,8 +352,12 @@ def _guard_event(event, findings, payload, pcfg, ci=None):
             return "COMMENT", ("%s 등급 지적이 %d건 남아 있어 승인하지 않습니다 — 머지 전 "
                                "처리를 권하면서 승인하는 것은 모순입니다."
                                % (SEV_LABEL.get(above[0].get("severity"), "P2"), len(above)))
-    if event == "APPROVE" and pcfg.get("approveNeedsGreenCi", True) and ci == "failure":
-        return "COMMENT", "CI 가 실패한 커밋이라 승인하지 않습니다."
+    if event == "APPROVE" and pcfg.get("approveNeedsGreenCi", True) and ci in ("failure", "pending"):
+        return "COMMENT", "CI가 실패했거나 진행 중인 커밋이라 승인하지 않습니다."
+    if event == "APPROVE":
+        blocked = runtime.approval_block(payload.get("runtime"))
+        if blocked:
+            return "COMMENT", blocked
     if event == "REQUEST_CHANGES" and not has_blocking:
         return "COMMENT", "blocking 지적 없이 변경 요청을 낼 수 없어 COMMENT 로 게시합니다."
     return event, ""
@@ -481,6 +502,7 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
         _log("  상한 초과(%s) — --force-size 로 그대로 진행합니다" % " · ".join(over))
 
     meta["_ci"] = gh.ci_state(meta)
+    meta["_ci_evidence"] = gh.ci_evidence(meta)
 
     _log("  리뷰 시작 — 파일 %d · %d줄" % (len(files), churn))
     # 지금 무엇을 보고 있는지 남긴다 — 앱의 라이브 세션 화면이 이걸 읽는다.
@@ -527,6 +549,22 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
         _log("  맥락: 커밋이력 %d파일 · 과거 코멘트 %d파일 · 정찰 %s"
              % (len(ctx["history"]), len(ctx["comments"]),
                 "RepoMind" if mcp else "없음"))
+        def runtime_progress(message):
+            _log("  " + message)
+            current = store.read_current() or {}
+            current.update(phase=message)
+            store.set_current(current)
+
+        meta["_runtime"] = runtime.collect(
+            meta, files, wt, cfg_mod._merge(rcfg.get("runtime") or {}, entry.get("runtime") or {}),
+            progress=runtime_progress)
+        # CI may finish while the isolated execution is running.
+        refreshed = gh.pr_meta(repo, number, account=acct)
+        if refreshed.get("headRefOid") != sha or refreshed.get("baseRefOid") != meta.get("baseRefOid"):
+            raise reviewer.ReviewError("실행 검증 중 base/head가 바뀌어 다시 리뷰해야 합니다.",
+                                       cost=meta["_runtime"].get("cost_usd"))
+        meta["_ci"] = gh.ci_state(refreshed)
+        meta["_ci_evidence"] = gh.ci_evidence(refreshed)
         payload = reviewer.review(meta, files, rcfg["agents"], cwd=wt,
                                   model=rcfg.get("model"),
                                   max_turns=rcfg.get("maxTurns", 0),
@@ -535,6 +573,12 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
                                   mcp=mcp, batching=rcfg, progress=progress,
                                   diff_cap=reviewer.diff_char_cap(
                                       rcfg.get("maxDiffLines")))
+        payload["runtime"] = meta["_runtime"]
+        payload["ci_evidence"] = meta["_ci_evidence"]
+        payload.setdefault("_meta", {})["cost_usd"] = (
+            (payload.get("_meta", {}).get("cost_usd") or 0) + meta["_runtime"].get("cost_usd", 0))
+        result["runtime"] = meta["_runtime"]
+        result["ci_evidence"] = meta["_ci_evidence"]
         result["review_execution"] = dict(payload.get("_meta") or {})
         # 반증 — 워크트리가 살아 있는 이 안에서만 가능하다. 판정 단계는 코드를
         # 볼 수 없으므로 근거의 문체로만 판단한다. 여기서는 코드를 다시 읽는다.
@@ -701,6 +745,21 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
         result["posted"] = False
         return result
 
+    latest = gh.pr_meta(repo, number, account=acct)
+    if latest.get("headRefOid") != sha or latest.get("baseRefOid") != meta.get("baseRefOid"):
+        raise reviewer.ReviewError("리뷰 중 base/head가 바뀌어 게시하지 않았습니다.", cost=result.get("cost_usd"))
+
+    latest_ci = gh.ci_evidence(latest)
+    ci_changed = latest_ci != payload.get("ci_evidence")
+    payload["ci_evidence"] = latest_ci
+    result["ci_evidence"] = latest_ci
+    event, guard = _guard_event(verdict["event"], inline + demoted, payload, pcfg, latest_ci["state"])
+    if event != verdict["event"]:
+        verdict.update(event=event, guard=guard)
+        result.update(event=event, reason=guard)
+    if ci_changed or guard:
+        body = _summary_body(payload, inline, demoted, verdict, note=pcfg.get("note"))
+
     # 게시는 단계적으로 내려간다. 자기 PR 에 APPROVE 를 내면 422 이므로 이벤트만
     # COMMENT 로 바꿔 한 번 더, 그래도 실패면 inline 좌표 문제이니 요약 코멘트로.
     try:
@@ -779,6 +838,9 @@ def _publish(repo, number, cfg, preview=False):
     comments = d.get("comments") or []
     event = d.get("event") or "COMMENT"
     body = d.get("body") or ""
+    if event == "APPROVE" and cfg["post"].get("approveNeedsGreenCi", True) and gh.ci_state(meta) in ("failure", "pending"):
+        event = "COMMENT"
+        body += "\n\nCI가 실패했거나 진행 중이어서 승인 대신 코멘트로 게시합니다."
     if preview:
         print("게시 예정 — %s#%s · %s · 인라인 %d · 본문 %d"
               % (repo, number, event, len(comments), d.get("demoted") or 0))
@@ -1070,6 +1132,9 @@ def _gc(cfg, verbose=False):
     ns, freed = janitor.sweep_sessions(g.get("sessionDays", 3))
     if ns:
         out.append("claude 세션 %d개 (%s)" % (ns, janitor.human(freed)))
+    ne = janitor.prune_evidence(g.get("evidenceDays", 14))
+    if ne:
+        out.append("실행 검증 자료 %d개" % ne)
     nd = janitor.prune_drafts(g.get("draftDays", 14))
     if nd:
         out.append("초안 %d개" % nd)

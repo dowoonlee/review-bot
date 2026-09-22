@@ -259,7 +259,8 @@ def build_prompt(agent_name, meta, files, ctx=None, roster=None, mcp=None,
         context_block=_context_block(ctx),
         recon_block=_recon_block(mcp),
         roster_block=_roster_block(agent_name, roster), scope_block=scope)
-    return prompt
+    from lib.runtime import evidence_block
+    return prompt + "\n\n" + evidence_block(meta)
 
 
 def _compact_summary(text, limit):
@@ -619,7 +620,7 @@ SCOPE_LABEL = {
     "unknown": "라인 미상",
 }
 CI_LABEL = {
-    "none": "없음 — 이 PR 에 체크가 하나도 안 돌았습니다. 테스트가 통과했다는 증거가 없습니다.",
+    "none": "통과한 CI 체크 없음 — 로컬 실행 검증 근거는 별도로 확인하세요.",
     "success": "통과",
     "failure": "실패",
     "pending": "진행 중",
@@ -633,6 +634,7 @@ def judge(meta, payload, findings, allowed_events, model="sonnet", timeout=180,
     코드를 다시 읽지 않는다. 리뷰어들이 남긴 근거의 질을 보고 판단하는 메타
     단계라, 툴 없이 한 턴으로 끝나며 리뷰 본체에 비해 비용이 미미하다.
     """
+    from lib.runtime import evidence_block
     with open(VERDICT_PROMPT, encoding="utf-8") as f:
         tpl = f.read()
 
@@ -670,6 +672,7 @@ def judge(meta, payload, findings, allowed_events, model="sonnet", timeout=180,
         summaries=payload.get("summary") or "(요약 없음)", errors=errors,
         findings="\n".join(rows) or "(지적 없음)",
         ci=CI_LABEL.get(ci, ci),
+        execution_evidence=evidence_block(meta, for_judge=True),
         approve_max_severity=approve_max_severity,
         allowed_events=", ".join(allowed_events))
 

@@ -76,10 +76,9 @@ $ review-bot tick
    COMMENT 로 내립니다. "머지 전 처리가 권장되는 건" 을 달아 놓고 ✅ Approve 를
    찍은 리뷰가 실제로 나갔고, 그건 읽는 사람에게 무엇을 믿으라는 건지 알 수 없는
    신호입니다. head 커밋의 CI 상태(없음·통과·실패·진행 중)도 판정 자료에 실리고,
-   실패면 승인하지 않습니다(`post.approveNeedsGreenCi`). 봇은 테스트를 돌리지
-   않으므로 — 남의 PR 코드를 내 기계에서 실행하지 않는 것이 설계입니다 — 테스트가
-   통과했다는 증거는 CI 뿐이고, CI 가 없으면 "테스트가 충실하다" 는 리뷰어의 말은
-   테스트 **코드가 있다**는 뜻일 뿐입니다.
+   실패하거나 진행 중이면 승인하지 않습니다(`post.approveNeedsGreenCi`).
+   체크 이름·상태·결과 링크와 로컬 실행 결과를 함께 전달합니다. CI가 없어도 같은
+   head의 관련 로컬 테스트와 필요한 화면 검증을 완료하면 승인 근거가 됩니다.
 
    판정은 코드를 볼 수 없으므로, 지적마다 **4단계 반증이 코드를 읽고 남긴 근거**가
    함께 실립니다. 그것이 판정자가 접하는 유일한 '코드를 실제로 확인한' 자료입니다.
@@ -88,8 +87,7 @@ $ review-bot tick
    해야 합니다. 반증을 거치지 못한 지적은 그 사실이 표시되어 더 엄격하게 다뤄집니다.
 8. **게시** — 판정대로 리뷰 하나를 남깁니다. 산출은 `pr-review-rules` 를 따릅니다 —
    인라인 제목마다 `[P1]`~`[P3]`·`[altitude]` 라벨, 본문에는 총 건수와 판정 →
-   머지 전 처리가 필요한 상위 건 → 나머지 → **검증 범위**(코드 정독만 했고 테스트·
-   브라우저·실측은 안 했다는 사실). 게시 뒤 `reviewDecision` 과 인라인 앵커 유실을
+   머지 전 처리가 필요한 상위 건 → 나머지 → **검증 범위**(실행한 테스트·화면 확인·미확인 사항). 게시 뒤 `reviewDecision` 과 인라인 앵커 유실을
    확인해 로그에 남깁니다.
 
 ## 리뷰어를 가두는 이유
@@ -436,7 +434,7 @@ Apple Development. 그 뒤 `./build.sh` 를 다시 돌리면 그 신원을 알�
 | `review.model` | `{default: sonnet, security-reviewer: opus}` | 문자열이면 리뷰어 전부 그 모델, dict 면 에이전트별로 갈라 줍니다 (`default` 로 떨어짐). 에이전트 `.md` 의 `model` 은 어느 쪽이든 무시합니다 — 역할 본문만 가져옵니다. |
 | `post.judgeModel` | `opus` | 판정 단계 모델. PR 당 1회뿐이고 `APPROVE`·`REQUEST_CHANGES` 를 내 계정으로 내보내는 자리라 내리지 않았습니다. |
 | `post.approveMaxSeverity` | `nit` | 승인의 문턱. 게시될 지적에 이보다 높은 등급이 남으면 APPROVE 를 COMMENT 로 내립니다. `suggestion` 으로 올리면 P2 를 남기고도 승인합니다. |
-| `post.approveNeedsGreenCi` | `true` | head 커밋의 CI 가 실패면 승인하지 않습니다. 체크가 없는 저장소에는 영향이 없습니다. |
+| `post.approveNeedsGreenCi` | `true` | head 커밋의 CI가 실패하거나 진행 중이면 승인하지 않습니다. CI 없음은 로컬 검증과 함께 판단합니다. |
 | `review.strictScope` | `true` | diff 밖의 지적을 반증 전에 버립니다. `false` 면 예전처럼 본문으로 강등해 살립니다. |
 | `review.verify.enabled` | `true` | 반증 단계. `false` 면 리뷰어 말을 그대로 믿고 게시합니다. |
 | `review.verify.model` | `haiku` | 반증 검증자 모델. 지적 하나당 1콜입니다. 이제 diff 를 놓고 "옮겨진 코드인가" 까지 가려야 하므로, 이 저장소의 `config.json` 은 `sonnet` 으로 올려 두었습니다. |
@@ -450,6 +448,27 @@ Apple Development. 그 뒤 `./build.sh` 를 다시 돌리면 그 신원을 알�
 ## 요구사항
 
 macOS · `claude` CLI · `gh` (인증 완료) · `git` · Python 3.9+ (표준 라이브러리만).
+로컬 실행 검증에는 실행 중인 Docker와 이미지·의존성 다운로드가 필요합니다.
+
+### 대형 PR 리뷰
+
+전체 PR의 파일 수·줄 수 제한은 기본적으로 없습니다. 기존 설정에 양수인
+`maxChangedFiles` / `maxDiffLines`가 남아 있다면 둘 다 `0`으로 설정하세요.
+명시적으로 상한을 둔 경우 수동 `review --force-size`로만 우회할 수 있습니다.
+
+1. 변경 파일을 경로순으로 묶습니다. 기본 묶음 예산은 파일 20개, diff 120,000자입니다.
+   파일 하나가 크면 hunk를 나누고, hunk 하나도 크면 라인 단위로 나눕니다.
+   원래 파일의 라인 번호와 모든 변경 줄을 유지합니다.
+2. **등록된 모든 리뷰어가 모든 묶음**을 검토합니다. 주변 호출부·소비처는 전체
+   워크트리에서 읽고, 전체 diff도 워크트리 안의 임시 검토 자료에서 확인합니다.
+3. 묶음이 둘 이상이면 **통합 검토 한 번**을 수행합니다. `code-reviewer`가 있으면
+   그 리뷰어가, 없으면 첫 리뷰어가 모든 관점의 역할 정의와 결과를 받아 봅니다.
+   `integrationMode: "all"`로 설정하면 이전처럼 각 리뷰어가 독립 통합 검토합니다.
+   전체 변경 목록·묶음 결과·완전한 diff를 읽고 생산자/파서/소비자,
+   API/화면, 스키마/쿼리, 실제 형식/테스트 fixture의 연결을 확인합니다.
+4. 같은 경로·라인·제목의 중복 지적을 합치고 기존 범위 검사 → 반증 → 판정 →
+   게시 흐름으로 이어집니다. 큰 파일의 반증 입력도 해당 위치의 diff와 전체
+   diff 파일 참조로 나눠 입력 크기를 제한합니다.
 
 ```json
 "review": {
@@ -647,3 +666,35 @@ review-bot forget --all                              # 전부
   부담스러우면 `post.allowedEvents` 에서 `APPROVE` 를 빼세요 — 판정은 그대로 돌되
   승인만 `COMMENT` 로 내려갑니다.
 - **사람 리뷰를 대체하지 않습니다.** 봇 코멘트에는 그 사실을 꼬리말로 밝힙니다.
+
+## PR별 로컬 테스트와 화면 검증
+
+`review.runtime.enabled`는 기본 `true`입니다. 기존 PR별 리뷰 워크트리에서 검증 계획을
+읽고, 고정 head의 git archive를 일회용 Docker 컨테이너 `/work`에 복사합니다.
+관련 테스트, FE type-check, 필요한 브라우저 테스트를 실행하고, UI 변경은 앱 또는
+실제 컴포넌트를 사용하는 fixture에서 Playwright로 조작·assertion·스크린샷을 남깁니다.
+별도의 읽기 전용 검증자가 PNG를 실제로 열어 봅니다. 일반 리뷰어와 최종 판정자도
+동일한 실행 근거를 받습니다. mock/fixture의 결과는 실제 backend 통합 증거가 아닙니다.
+
+호스트 `.env`, 인증정보, 의존성 디렉터리, Docker 소켓을 마운트하지 않고 포트도
+공개하지 않습니다. 의존성 설치 단계만 네트워크를 사용하고 테스트·앱·브라우저 실행
+전에는 끊습니다. 컨테이너는 종료·실패·SIGTERM 시 제거합니다. 외부 서비스나 시크릿이
+필요한 경로를 실행하지 못하면 미확인으로 기록하고 승인하지 않습니다.
+
+`state/evidence/<repo>/<PR>/<head>/<실행>/`에 계획, 명령별 로그, PNG, 결과 JSON을
+남깁니다. `gc.evidenceDays`(기본 14일) 이후에는 자동 정리합니다. `screenshotArtifacts`는 워크트리가 제거된 뒤에도 남는 PNG 경로입니다.
+실패·시간 초과·스크린샷 누락·핵심 경로 미검증은 코드에서 승인을 막습니다.
+게시 직전과 초안 게시 때도 CI를 다시 확인합니다. 이미 끝난 PR을 새 방식으로 다시
+검토하려면 `review-bot review owner/repo#123`를 사용합니다.
+
+`review.runtime`의 `image`, `memory`, `cpus`, `setupTimeoutSec`, `testTimeoutSec`,
+`browserTimeoutSec`, `planTimeoutSec`, `model`로 실행 예산을 조절합니다.
+`repos["owner/repo"].runtime`으로 저장소별 덮어쓰기도 가능합니다.
+Python 검증에는 격리된 Python/pip 환경과 uv를 먼저 준비합니다. 사내 TLS 프록시를
+사용하면 `review.runtime.caBundle`에 공개 CA PEM 경로를 지정하세요. 기존 시스템 CA와
+합쳐 컨테이너의 curl·Python·Node에 전달하며 TLS 검증은 유지합니다.
+`enabled: false`이면 기존 코드 정독 리뷰만 수행합니다.
+
+게시 대기 초안은 앱 상태 갱신·틱·`review-bot drafts`에서 PR 상태를 확인합니다.
+머지되거나 닫힌 PR의 게시용 JSON은 `state/drafts/archived/`로 옮겨 대기 목록에서
+제외하고, 리뷰 본문과 이력은 보존합니다. 조회 실패 시에는 초안을 유지합니다.

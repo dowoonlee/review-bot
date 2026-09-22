@@ -6,6 +6,7 @@
 생긴다. PR 한 건이 수 MB 이므로 그냥 두면 조용히 쌓인다.
 """
 import os
+from pathlib import Path
 import re
 import shutil
 import time
@@ -165,3 +166,16 @@ def human(n):
             return "%.0f%s" % (n, unit)
         n /= 1024.0
     return "%.1fTB" % n
+
+
+def prune_evidence(keep_days=14):
+    """Remove completed evidence runs after retention; leave active directories alone."""
+    cutoff = time.time() - keep_days * 86400
+    removed = 0
+    root = Path(STATE_DIR, "evidence")
+    for result in root.glob("*/*/*/*/result.json"):
+        if result.is_symlink() or result.stat().st_mtime >= cutoff:
+            continue
+        shutil.rmtree(result.parent)
+        removed += 1
+    return removed

@@ -248,9 +248,8 @@ def pr_meta(repo, number, account=None):
 def ci_state(meta):
     """head 커밋의 CI 상태를 한 단어로 — none / success / failure / pending.
 
-    판정자는 코드를 못 보고 봇은 테스트를 돌리지 않는다. 그래서 "테스트가 돌았다는
-    증거" 는 저장소의 CI 뿐이고, 그 결과를 판정 자료에 싣는다. 체크가 하나도 없으면
-    `none` — 통과가 아니라 **아무도 안 돌렸다**는 뜻이다.
+    로컬 실행 결과와 구분해 저장소 CI 상태를 전달한다. 체크가 없거나 모두
+    skipped/neutral이면 `none`이고, EXPECTED는 아직 통과하지 않은 상태다.
     """
     checks = (meta or {}).get("statusCheckRollup") or []
     if not checks:
@@ -265,8 +264,10 @@ def ci_state(meta):
         if concl in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED",
                      "STARTUP_FAILURE"):
             states.add("failure")
-        elif concl in ("SUCCESS", "NEUTRAL", "SKIPPED", "EXPECTED"):
+        elif concl == "SUCCESS":
             states.add("success")
+        elif concl in ("NEUTRAL", "SKIPPED"):
+            states.add("skipped")
         elif status in ("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED") \
                 or concl in ("PENDING", ""):
             states.add("pending")
@@ -276,7 +277,20 @@ def ci_state(meta):
         return "failure"
     if "pending" in states:
         return "pending"
-    return "success"
+    return "success" if "success" in states else "none"
+
+
+def ci_evidence(meta):
+    """Keep individual check names and links, including skipped checks."""
+    checks = []
+    for check in (meta or {}).get("statusCheckRollup") or []:
+        if not isinstance(check, dict):
+            continue
+        checks.append({"name": check.get("name") or check.get("context") or "unnamed",
+                       "status": check.get("status") or check.get("state"),
+                       "conclusion": check.get("conclusion"),
+                       "url": check.get("detailsUrl") or check.get("targetUrl")})
+    return {"sha": (meta or {}).get("headRefOid"), "state": ci_state(meta), "checks": checks}
 
 
 def pr_files(repo, number, max_pages=30, account=None):

@@ -34,7 +34,19 @@
     "batchMaxChars": 120000,
     "workers": 2,
     "parallel": true,
-    "integrationMode": "single"
+    "integrationMode": "single",
+    "runtime": {
+      "enabled": true,
+      "model": "sonnet",
+      "maxTurns": 40,
+      "planTimeoutSec": 600,
+      "setupTimeoutSec": 900,
+      "testTimeoutSec": 900,
+      "browserTimeoutSec": 300,
+      "image": "mcr.microsoft.com/playwright:v1.58.2-noble",
+      "memory": "6g",
+      "cpus": 4
+    }
   },
   "post": {
     "dryRun": true,
