@@ -66,6 +66,10 @@ DEFAULTS = {
             "image": "mcr.microsoft.com/playwright:v1.58.2-noble",
             "memory": "6g",
             "cpus": 4,
+            # head 에서 실패한 명령을 base(merge-base)에서 한 번 더 돌려, 거기서도
+            # 실패하면 baseline 으로 표시한다 — 컨테이너에 없는 docker·.git 을 쓰는
+            # 테스트나 원래 깨진 테스트를 이 PR 탓으로 돌리지 않기 위해서다.
+            "baseline": True,
         },
         # 리뷰어가 낸 지적을 코드 근거로 반증해 보는 단계. 워크트리가 아직
         # 살아 있는 동안 돈다 — 판정 단계는 코드를 못 보므로 거기서는 불가능하다.

@@ -63,6 +63,91 @@ class EvidenceTests(unittest.TestCase):
         self.assertFalse(result['complete'])
 
 
+class BaselineTests(unittest.TestCase):
+    """head 에서 실패한 명령을 base 에서 다시 돌려, 그 실패가 PR 탓인지 가린다."""
+
+    def test_baseline_failures_do_not_block_but_need_a_passing_test(self):
+        both = dict(GOOD, tests=[{'status': 'passed'}, {'status': 'baseline'}])
+        self.assertEqual(runtime.approval_block(both), '')
+        only_baseline = dict(GOOD, tests=[{'status': 'baseline'}])
+        self.assertIn('통과 근거', runtime.approval_block(only_baseline))
+        regression = dict(GOOD, tests=[{'status': 'passed'}, {'status': 'failed', 'baseline': {'exitCode': 0}}])
+        self.assertIn('실패', runtime.approval_block(regression))
+
+    def _collect(self, base_fails, merge_base='base0'):
+        plan = dict(copy.deepcopy(PLAN), visualApplicable=False,
+                    tests=[{'name': 'unit', 'command': 'npm test'},
+                           {'name': 'broad', 'command': 'npm run all'}])
+        seen = []
+        def command(args, *a, **kw):
+            seen.append(args)
+            if args[0] == 'git':
+                Path(next(arg[9:] for arg in args if arg.startswith('--output='))).touch()
+            return {'status': 'passed', 'exitCode': 0, 'output': ''}
+        def shell(script, *a, **kw):
+            runs = sum(1 for s in seen if s == ('shell', script))
+            seen.append(('shell', script))
+            if script == 'npm run all':
+                fails = True if runs == 0 else base_fails       # 1회차 head, 2회차 기준선
+                return {'status': 'failed' if fails else 'passed', 'exitCode': 1 if fails else 0, 'log': 'x'}
+            return {'status': 'passed', 'exitCode': 0, 'log': 'x'}
+        meta = dict(META, baseRefOid='basetip')
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(reviewer, 'STATE_DIR', tmp), \
+                mock.patch.object(runtime, '_plan', return_value=plan), \
+                mock.patch.object(runtime, '_merge_base', **({'side_effect': merge_base} if isinstance(merge_base, Exception) else {'return_value': merge_base})) as mb, \
+                mock.patch.object(runtime.Container, 'command', side_effect=command), \
+                mock.patch.object(runtime.Container, 'shell', side_effect=shell):
+            result = runtime.collect(meta, [], tmp, {}, env={'GH_TOKEN': 't'})
+        runtime._LIVE_CONTAINERS.clear()
+        return result, seen, mb
+
+    def test_failure_on_base_too_is_baseline_and_approvable(self):
+        result, seen, mb = self._collect(base_fails=True)
+        broad = next(t for t in result['tests'] if t['name'] == 'broad')
+        self.assertEqual(broad['status'], 'baseline')
+        self.assertEqual(broad['baseline']['exitCode'], 1)
+        self.assertEqual(result['baseline']['status'], 'complete')
+        self.assertEqual(result['baseline']['sha'], 'base0')
+        self.assertEqual(runtime.approval_block(result), '')
+        # 기준선 컨테이너는 base 소스로 만들고, 실패한 명령만 다시 돌린다
+        archives = [c for c in seen if c[0] == 'git' and 'archive' in c]
+        self.assertEqual([c[-1] for c in archives], ['abc', 'base0'])
+        self.assertEqual([s for s in seen if s == ('shell', 'npm run all')].__len__(), 2)
+        self.assertEqual([s for s in seen if s == ('shell', 'npm test')].__len__(), 1)
+        self.assertEqual(sum(1 for c in seen if c[:2] == ['docker', 'rm']), 2)
+        self.assertEqual(mb.call_args.args[1:3], ('basetip', 'abc'))
+
+    def test_failure_only_on_head_is_a_regression(self):
+        result, seen, _ = self._collect(base_fails=False)
+        broad = next(t for t in result['tests'] if t['name'] == 'broad')
+        self.assertEqual(broad['status'], 'failed')
+        self.assertEqual(broad['baseline']['exitCode'], 0)
+        self.assertIn('실패', runtime.approval_block(result))
+
+    def test_unknown_baseline_keeps_the_failure(self):
+        """기준선을 못 잡으면 봐주지 않는다 — 증거 없는 면제는 회귀를 숨긴다."""
+        result, seen, _ = self._collect(base_fails=True, merge_base=runtime.ExecutionError('no base'))
+        broad = next(t for t in result['tests'] if t['name'] == 'broad')
+        self.assertEqual(broad['status'], 'failed')
+        self.assertEqual(result['baseline']['status'], 'error')
+        self.assertTrue(any('기준선' in n for n in result['notes']))
+        self.assertIn('실패', runtime.approval_block(result))
+        self.assertEqual(result['status'], 'complete')     # 기준선 실패가 검증 전체를 깨지 않는다
+
+    def test_summary_labels_baseline_for_the_reader(self):
+        body = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'review-bot'))['_summary_body']
+        evidence = dict(GOOD, tests=[
+            {'name': 'unit', 'command': 'npm test', 'status': 'passed'},
+            {'name': 'broad', 'command': 'npm run all', 'status': 'baseline', 'baseline': {'exitCode': 1}},
+            {'name': 'new', 'command': 'npm run new', 'status': 'failed', 'baseline': {'exitCode': 0}}],
+            baseline={'status': 'complete', 'sha': 'base0123456789', 'tests': [{}, {}]})
+        text = body({'findings': [], 'runtime': evidence, 'summary': ''}, [], [], None)
+        self.assertIn('이 PR 탓이 아님', text)
+        self.assertIn('이 PR 이 깨뜨림', text)
+        self.assertIn('base `base012345` 에서 실패한 명령 2개', text)
+
+
 class RetentionTests(unittest.TestCase):
     def test_only_finished_old_runs_are_removed(self):
         with tempfile.TemporaryDirectory() as tmp:

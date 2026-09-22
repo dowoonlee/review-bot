@@ -275,7 +275,19 @@ def _summary_body(payload, inline, demoted, verdict=None, note=None):
         evidence = payload["runtime"]
         parts.append("head `%s`의 워크트리 코드와 격리 실행 결과를 확인했습니다." % evidence.get("sha", "?"))
         for test in evidence.get("tests") or []:
-            parts.append("- 로컬 %s: **%s** (`%s`)" % (test["name"], test["status"], test["command"]))
+            label = test["status"]
+            base = test.get("baseline") or {}
+            if test["status"] == "baseline":
+                label = "baseline — base 에서도 실패, 이 PR 탓이 아님"
+            elif test["status"] == "failed" and base.get("exitCode") == 0:
+                label = "failed — base 에서는 통과, 이 PR 이 깨뜨림"
+            parts.append("- 로컬 %s: **%s** (`%s`)" % (test["name"], label, test["command"]))
+        baseline = evidence.get("baseline") or {}
+        if baseline.get("status") == "complete":
+            parts.append("- 기준선: base `%s` 에서 실패한 명령 %d개를 같은 절차로 재실행했습니다."
+                         % (str(baseline.get("sha"))[:10], len(baseline.get("tests") or [])))
+        elif baseline.get("status") == "error":
+            parts.append("- 기준선: 잡지 못했습니다 — 실패한 테스트를 그대로 둡니다 (%s)" % str(baseline.get("error"))[:120])
         visual = evidence.get("visual") or {}
         parts.append("- 화면 검증: %s — %s" % (visual.get("status", "미실행/해당 없음"), visual.get("summary", "")))
         for limitation in evidence.get("limitations") or []:
@@ -566,7 +578,7 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
 
         meta["_runtime"] = runtime.collect(
             meta, files, wt, cfg_mod._merge(rcfg.get("runtime") or {}, entry.get("runtime") or {}),
-            progress=runtime_progress)
+            progress=runtime_progress, env=genv)
         # CI may finish while the isolated execution is running.
         refreshed = gh.pr_meta(repo, number, account=acct)
         if refreshed.get("headRefOid") != sha or refreshed.get("baseRefOid") != meta.get("baseRefOid"):

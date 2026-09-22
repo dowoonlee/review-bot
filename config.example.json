@@ -45,7 +45,8 @@
       "browserTimeoutSec": 300,
       "image": "mcr.microsoft.com/playwright:v1.58.2-noble",
       "memory": "6g",
-      "cpus": 4
+      "cpus": 4,
+      "baseline": true
     }
   },
   "post": {
