@@ -44,6 +44,20 @@ TRUE_POSITIVE 입니다.
 
 리뷰어가 "새로 추가된" 이라고 썼다고 새로 추가된 것이 아닙니다. diff 로 확인하세요.
 
+## 영향의 등급을 따로 확인하세요
+
+코드·사용자·운영에서 **지금 발생하는 구체적인 실패 경로**가 있어야 P1/P2입니다.
+- `concrete`: 발생 조건과 실제 잘못된 결과를 파일·라인으로 확인했습니다. 잘못된 운영 지침,
+  API 계약 문서 때문에 실제 사용자가 실패하는 경로도 포함합니다.
+- `maintainability`: 설명 주석 삭제, 가독성, 장래 유지보수 우려뿐이며 현재 동작/계약의
+  실패는 없습니다. 사실이어도 최대 nit(P3)입니다. 과거 버그 번호가 있다는 이유만으로
+  P2로 올리지 마세요. 예: BIGINT 캐스트는 유지됐고 그 이유의 주석만 없어짐.
+- `none`: 현재 영향은 없거나 추측뿐입니다. FALSE_POSITIVE입니다.
+
+테스트가 없다는 것만으로 P2가 되지 않습니다. 그 빈틈 때문에 놓친 실제 잘못된
+동작을 확인해야 합니다. 반대로 일반 코드에서 설명 주석이 없어졌다는 이유로,
+잘못된 사용자 문서·배포 명령·권한 안내 같은 실제 계약 문제까지 낮추지는 마세요.
+
 ## 양쪽 모두 규율입니다
 
 없는 문제를 살리지 마세요. 동시에 **상상한 방어로 지적을 죽이지도 마세요.**
@@ -82,7 +96,8 @@ TRUE_POSITIVE 입니다.
   "verdict": "TRUE_POSITIVE|FALSE_POSITIVE",
   "confidence": 0,
   "reason": "결정적인 `파일:라인` 을 인용한 한국어 한두 문장",
-  "severity": "blocking|suggestion|nit|altitude"
+  "severity": "blocking|suggestion|nit|altitude",
+  "impact": "concrete|maintainability|none"
 }}
 ```
 

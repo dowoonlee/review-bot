@@ -5,6 +5,8 @@ base 에 그대로 있던 코드의 문제가 "이 PR 의 지적" 으로 게시�
 """
 import runpy
 import unittest
+import tempfile
+from unittest import mock
 from pathlib import Path
 
 from lib import github, reviewer
@@ -31,6 +33,18 @@ class ScopeTests(unittest.TestCase):
         self.assertEqual([f["_scope"] for f in kept], ["added"])
         self.assertEqual(dropped, [])
 
+    def test_hidden_paths_survive_scope_and_inline_validation(self):
+        bot = _bot()
+        for name in (".github/workflows/ci.yml", ".pre-commit-config.yaml"):
+            with self.subTest(name=name):
+                files = {name: FILES["a.py"]}
+                for supplied in (name, "./" + name):
+                    kept, dropped = self.scope([finding(path=supplied)], files)
+                    self.assertEqual(dropped, [])
+                    inline, demoted = bot["_validate"](kept, files, {})
+                    self.assertEqual(demoted, [])
+                    self.assertEqual(inline[0]["path"], name)
+
     def test_context_line_is_kept_but_marked(self):
         kept, _ = self.scope([finding(line=10)], FILES)
         self.assertEqual(kept[0]["_scope"], "context")
@@ -53,6 +67,16 @@ class ScopeTests(unittest.TestCase):
         kept, dropped = self.scope([finding(line=277)], FILES, strict=False)
         self.assertEqual(dropped, [])
         self.assertEqual(kept[0]["_scope"], "outside")
+
+
+class HiddenPathVerificationTests(unittest.TestCase):
+    def test_verifier_receives_hidden_file_diff(self):
+        with tempfile.TemporaryDirectory() as cwd, mock.patch.object(reviewer, "_run", return_value={
+                "verdict": "TRUE_POSITIVE", "impact": "concrete", "reason": "confirmed"}) as run:
+            reviewer.verify([finding(path="./.github/workflows/ci.yml")],
+                            {"_repo": "o/r", "_number": 1}, cwd,
+                            patches={".github/workflows/ci.yml": PATCH})
+            self.assertIn("+new1", run.call_args.args[0])
 
 
 class GuardTests(unittest.TestCase):

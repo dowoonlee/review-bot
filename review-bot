@@ -98,6 +98,13 @@ def _snap_line(line, postable, tolerance=3):
     return min(near, key=lambda p: (abs(p - line), p)) if near else None
 
 
+def _review_path(path):
+    path = (path or "").strip()
+    while path.startswith("./"):
+        path = path[2:]
+    return path
+
+
 def _scope_findings(findings, files_by_path, strict=True):
     """지적마다 그 좌표가 이 PR 의 변경 안인지 diff 로 가른다 — (남긴 것, 버린 것).
 
@@ -115,7 +122,7 @@ def _scope_findings(findings, files_by_path, strict=True):
         if not isinstance(f, dict):
             continue
         f = dict(f)
-        path = (f.get("path") or "").strip().lstrip("./")
+        path = _review_path(f.get("path"))
         entry = files_by_path.get(path)
         line = f.get("line")
         if not entry:
@@ -158,7 +165,7 @@ def _validate(findings, files_by_path, post_cfg):
             continue
         f = dict(f, severity=sev, title=title, body=body)
 
-        path = (f.get("path") or "").strip().lstrip("./")
+        path = _review_path(f.get("path"))
         entry = files_by_path.get(path)
         if not entry:
             f["_why"] = "변경 파일 목록에 없는 경로"
@@ -239,7 +246,8 @@ def _summary_body(payload, inline, demoted, verdict=None, note=None):
         parts += ["> ⚠️ %s" % verdict["guard"]]
 
     # 머지 전 처리가 필요한 건 — P1·P2 상위 3건. 작성자가 여기만 읽어도 순서가 선다.
-    must = [f for f in everything if f.get("severity") in ("blocking", "suggestion")][:3]
+    must = sorted((f for f in everything if f.get("severity") in ("blocking", "suggestion")),
+                  key=lambda f: -SEV[f["severity"]])[:3]
     if must:
         # P1 이 있으면 "필요", P2 뿐이면 "권장" — 판정(APPROVE)과 제목이 어긋나지 않게.
         has_p1 = any(f.get("severity") == "blocking" for f in must)

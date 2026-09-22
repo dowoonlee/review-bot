@@ -753,7 +753,7 @@ def verify(findings, meta, cwd, model="haiku", timeout=300,
     def one(idx_fd):
         i, fd = idx_fd
         line = fd.get("line")
-        path = (fd.get("path") or "").strip().lstrip("./")
+        path = re.sub(r"^(?:\./)+", "", (fd.get("path") or "").strip())
         patch = (patches or {}).get(path) or ""
         with verification_diff(patch, line, cwd) as diff_block:
             prompt = tpl.format(
@@ -799,6 +799,21 @@ def verify(findings, meta, cwd, model="haiku", timeout=300,
                 if SEVERITY_RANK[sev] < SEVERITY_RANK[fd["severity"]]:
                     fd["_verify"]["severity_was"] = fd["severity"]
                     fd["severity"] = sev
+
+            impact = out.get("impact")
+            fd["_verify"]["impact"] = impact
+            if verdict == "TRUE_POSITIVE":
+                if impact == "maintainability":
+                    if SEVERITY_RANK.get(fd.get("severity"), 2) > SEVERITY_RANK["nit"]:
+                        fd["_verify"].setdefault("severity_was", fd.get("severity"))
+                        fd["severity"] = "nit"
+                elif impact == "none":
+                    verdict = "FALSE_POSITIVE"
+                    fd["_verify"]["verdict"] = verdict
+                    fd["_verify"]["reason"] = "구체적인 현재 영향이 확인되지 않음 — " + reason
+                elif impact != "concrete":
+                    # A malformed response is a verification failure, not a refutation.
+                    fd["_verify"]["error"] = "검증 응답의 impact 필드 누락/오류"
 
             if verdict == "FALSE_POSITIVE":
                 rejected.append(fd)
