@@ -339,7 +339,7 @@ final class BotStore {
         if tail.restarted { sessionCache[url.path] = nil }
 
         var s = sessionCache[url.path] ?? LiveSession(
-            id: url.path, agent: "?", pr: pr.replacingOccurrences(of: "__", with: "/"),
+            id: url.path, agent: SessionLabel.pending, pr: pr.replacingOccurrences(of: "__", with: "/"),
             turns: 0, tools: [:], lastTool: "", lastDetail: "",
             updatedAt: Date(), deniedTools: 0)
 
@@ -348,8 +348,9 @@ final class BotStore {
             else { continue }
             s.turns += 1
             guard let message = obj["message"] as? [String: Any] else { continue }
-            if s.agent == "?", let content = message["content"] as? String,
-               let name = Self.agentName(in: content) { s.agent = name }
+            if s.agent == SessionLabel.pending, obj["type"] as? String == "user",
+               let content = message["content"] as? String,
+               let name = SessionLabel.parse(content) { s.agent = name }
             guard let blocks = message["content"] as? [[String: Any]] else { continue }
             for b in blocks {
                 switch b["type"] as? String {
@@ -363,24 +364,16 @@ final class BotStore {
                 default: break
                 }
             }
-            if s.agent == "?", let blocks = message["content"] as? [[String: Any]] {
+            if s.agent == SessionLabel.pending, obj["type"] as? String == "user",
+               let blocks = message["content"] as? [[String: Any]] {
                 for b in blocks where b["type"] as? String == "text" {
-                    if let name = Self.agentName(in: (b["text"] as? String) ?? "") { s.agent = name }
+                    if let name = SessionLabel.parse((b["text"] as? String) ?? "") { s.agent = name }
                 }
             }
         }
         s.updatedAt = (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date) ?? Date()
         sessionCache[url.path] = s
         return s
-    }
-
-    /// 프롬프트 첫머리의 "당신은 **code-reviewer** 입니다" 에서 이름을 집어낸다.
-    private static func agentName(in text: String) -> String? {
-        guard let open = text.range(of: "**"),
-              let close = text.range(of: "**", range: open.upperBound..<text.endIndex)
-        else { return nil }
-        let name = String(text[open.upperBound..<close.lowerBound])
-        return name.contains("reviewer") || name.contains("auditor") ? name : nil
     }
 
     private static func detail(of input: [String: Any]?) -> String {

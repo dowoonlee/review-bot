@@ -299,10 +299,16 @@ struct SettingsPaneView: View {
                 Text("\(confirmRemoveAgent ?? "") 를 리뷰에서 뺍니다. 정의 파일은 지우지 않습니다.")
             }
             if let c = store.config {
-                row("동시 실행", (c.parallel ?? true) ? "병렬" : "순차 (메모리 절약)")
+                row("동시 실행", (c.parallel ?? true) ? "병렬 (최대 \(c.workers ?? 2)개)" : "순차 (메모리 절약)")
+                row("묶음 간 통합", c.integrationMode == "all" ? "리뷰어별 독립 검토" : "모든 관점을 모아 1회 검토")
                 row("턴 상한", (c.maxTurns ?? 0) == 0 ? "없음" : "\(c.maxTurns ?? 0)턴")
-                row("리뷰어당 시간 상한", "\((c.timeoutSec ?? 0) / 60)분")
-                row("PR 크기 상한", "파일 \(c.maxChangedFiles ?? 0)개 · \(c.maxDiffLines ?? 0)줄")
+                row("검토 호출당 시간 상한", "\((c.timeoutSec ?? 0) / 60)분")
+                let fileLimit = (c.maxChangedFiles ?? 0) > 0 ? "파일 \(c.maxChangedFiles ?? 0)개" : "파일 제한 없음"
+                let lineLimit = (c.maxDiffLines ?? 0) > 0 ? "\(c.maxDiffLines ?? 0)줄" : "줄 제한 없음"
+                row("PR 크기 상한", "\(fileLimit) · \(lineLimit)")
+                if let files = c.batchMaxFiles, let chars = c.batchMaxChars {
+                    row("검토 묶음", "파일 \(files)개 · diff \(chars)자")
+                }
             }
         }
     }

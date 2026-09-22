@@ -354,6 +354,10 @@ struct BotConfig: Decodable, Sendable {
     var timeoutSec: Int?
     var maxChangedFiles: Int?
     var maxDiffLines: Int?
+    var batchMaxFiles: Int?
+    var batchMaxChars: Int?
+    var workers: Int?
+    var integrationMode: String?
     var minSeverity: String?
     var maxFindingsPerPR: Int?
     var allowedEvents: [String]?
@@ -387,12 +391,21 @@ struct DroppedFinding: Decodable, Sendable, Identifiable {
 
 
 /// 지금 리뷰 중인 PR. 봇이 리뷰를 시작할 때 state/current.json 에 남긴다.
+struct ReviewCoverage: Decodable, Sendable {
+    var batches: Int
+    var planned: Int
+    var completed: Int
+    var integrationPlanned: Int
+    var integrationCompleted: Int
+}
+
 struct CurrentRun: Decodable, Sendable {
     var repo: String
     var number: Int
     var title: String?
     var author: String?
     var requestedBy: String?
+    var coverage: ReviewCoverage?
     var sha: String?
     var account: String?
     var files: Int?

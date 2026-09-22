@@ -212,6 +212,10 @@ struct LiveDetailView: View {
                 }
             }
             .f(.caption).foregroundStyle(.secondary)
+            if let coverage = c.coverage {
+                Text("\(coverage.batches)묶음 · 묶음 검토 \(coverage.completed)/\(coverage.planned) · 통합 검토 \(coverage.integrationCompleted)/\(coverage.integrationPlanned)")
+                    .f(.caption, digits: true).foregroundStyle(.secondary)
+            }
             HStack(spacing: 14) {
                 if let started = c.started {
                     TimelineView(.periodic(from: .now, by: 1)) { _ in

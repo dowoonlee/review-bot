@@ -5,10 +5,35 @@ cd "$(dirname "$0")"
 
 CONFIG="${1:-release}"
 APP="ReviewBot.app"
-BIN="$(swift build -c "$CONFIG" --show-bin-path)/ReviewBotApp"
+# Swift 6.4's default swiftbuild engine stamped SDK 14.0 (the minimum OS)
+# into this app's LC_BUILD_VERSION. Keep the native build engine and explicitly
+# select the installed SDK so rebuilding does not change SDK-linked UI behavior.
+SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
+SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"
+BUILD_ARGS=(--build-system native --sdk "$SDK_PATH" -c "$CONFIG")
+BIN="$(xcrun swift build "${BUILD_ARGS[@]}" --show-bin-path)/ReviewBotApp"
 
-echo "▸ 빌드 ($CONFIG)"
-swift build -c "$CONFIG"
+echo "▸ 빌드 ($CONFIG, native, SDK $SDK_VERSION)"
+xcrun swift build "${BUILD_ARGS[@]}"
+
+# Check the linked artifact before replacing either the bundle or installed app.
+BUILT_SDK="$(xcrun otool -l "$BIN" | awk '/LC_BUILD_VERSION/ { found=1 } found && $1 == "sdk" { print $2; exit }')"
+python3 - "$SDK_VERSION" "$BUILT_SDK" <<'PYSDK'
+import sys
+
+def version(value):
+    parts = [int(part) for part in value.split(".")]
+    return tuple((parts + [0, 0])[:3])
+
+try:
+    matches = version(sys.argv[1]) == version(sys.argv[2])
+except ValueError:
+    matches = False
+if not matches:
+    sys.exit("빌드 SDK 불일치: 선택 %s / 실행 파일 %s — 기존 앱을 유지합니다."
+             % (sys.argv[1], sys.argv[2] or "확인 불가"))
+PYSDK
+echo "▸ 실행 파일 SDK 확인: $BUILT_SDK"
 
 echo "▸ 번들 조립"
 rm -rf "$APP"
