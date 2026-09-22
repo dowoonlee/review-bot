@@ -426,9 +426,23 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
         return dict(result, skipped="본인 PR")
     if rcfg.get("skipDrafts", True) and meta.get("isDraft"):
         return dict(result, skipped="draft")
+    # 나에게 온 마지막 리뷰 요청. 건너뛸지 가르는 데 쓰고, 리뷰하면 "이 요청에
+    # 답했다" 는 표시로 기록에 남긴다. 리뷰할 때마다 반드시 받아 둬야 한다 — 기록에
+    # 이 시각이 비어 있으면 다음 틱이 열려 있는 요청을 재요청으로 오인해 같은 커밋을
+    # 또 리뷰한다.
+    requested = None
+    try:
+        requested = gh.last_review_request(repo, number, me, account=acct)
+    except gh.GhError as e:
+        # 재요청을 못 보면 건너뛰게 된다. 돈이 드는 일이라 그쪽이 안전하지만, 왜
+        # 안 잡혔는지 모르면 사람이 봇을 의심하게 되므로 이유는 남긴다.
+        _log("  리뷰 요청 이력을 읽지 못했습니다 — 재요청은 다음 틱에서 봅니다: %s"
+             % str(e)[:80])
+    result["requestedAt"] = (requested or {}).get("at")
     if not force and store.already_done(state, repo, number, sha,
                                         rcfg.get("rereviewOnNewCommits", True),
-                                        pcfg.get("dryRun", True)):
+                                        pcfg.get("dryRun", True),
+                                        requested_at=result["requestedAt"]):
         return dict(result, skipped="이미 리뷰함")
 
     files = [f for f in gh.pr_files(repo, number, account=acct)
@@ -463,10 +477,12 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
 
     _log("  리뷰 시작 — 파일 %d · %d줄" % (len(files), churn))
     # 지금 무엇을 보고 있는지 남긴다 — 앱의 라이브 세션 화면이 이걸 읽는다.
-    try:
-        requester = gh.review_requester(repo, number, me, account=acct)
-    except gh.GhError:
-        requester = None
+    requester = (requested or {}).get("by")
+    if not requester:
+        try:
+            requester = gh.review_requester(repo, number, me, account=acct)
+        except gh.GhError:
+            requester = None
     store.set_current({
         "repo": repo, "number": number, "title": result.get("title") or meta.get("title") or "",
         "author": (meta.get("author") or {}).get("login") or "",
@@ -652,6 +668,7 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
                 "dropped": [{"severity": f.get("severity"), "title": f.get("title")}
                             for f in dropped],
                 "cost_usd": result.get("cost_usd"),
+                "requestedAt": result.get("requestedAt"),
                 "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }, fp, ensure_ascii=False, indent=2)
         result["draft"] = path
@@ -780,6 +797,7 @@ def _publish(repo, number, cfg, preview=False):
     store.mark(state, repo, number, head, inline=result.get("inline"),
                demoted=result.get("demoted"), posted=True,
                cost_usd=prev.get("cost_usd") or d.get("cost_usd"),
+               requestedAt=d.get("requestedAt"),
                event=result.get("event"))
     store.save(state)
     store.log_run(result)
@@ -1142,7 +1160,7 @@ def _tick(cfg):
         store.mark(state, r["repo"], r["number"], r["sha"],
                    inline=r.get("inline"), demoted=r.get("demoted"),
                    posted=r.get("posted"), cost_usd=r.get("cost_usd"),
-                   event=r.get("event"))
+                   requestedAt=r.get("requestedAt"), event=r.get("event"))
         store.save(state)
         store.log_run(r)
         where = "초안" if r.get("draft") else ("게시" if r.get("posted") else "-")
@@ -1224,7 +1242,8 @@ def cmd_review(args, cfg):
             return 0
         store.mark(state, repo, number, r["sha"], inline=r.get("inline"),
                    demoted=r.get("demoted"), posted=r.get("posted"),
-                   cost_usd=r.get("cost_usd"), event=r.get("event"))
+                   cost_usd=r.get("cost_usd"),
+                   requestedAt=r.get("requestedAt"), event=r.get("event"))
         store.save(state)
         store.log_run(r)
         print(json.dumps(r, ensure_ascii=False, indent=2))

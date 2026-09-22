@@ -469,24 +469,69 @@ def hunk_around(patch, line, context=4):
     return rows[max(0, idx - context):idx + context + 1]
 
 
-def review_requester(repo, number, login, account=None):
-    """나에게 리뷰를 요청한 사람. 타임라인에만 남는 사실이라 따로 물어본다."""
+_LAST_REQUEST_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      timelineItems(last: 50, itemTypes: [REVIEW_REQUESTED_EVENT]) {
+        nodes { ... on ReviewRequestedEvent {
+          createdAt
+          actor { login }
+          requestedReviewer {
+            ... on User { login }
+            ... on Team { slug }
+            ... on Mannequin { login }
+          }
+        } }
+      }
+    }
+  }
+}
+"""
+
+
+def last_review_request(repo, number, login, account=None):
+    """나에게 리뷰를 요청한 **마지막** 사건 — `{"at": ISO8601(UTC), "by": 로그인}`.
+
+    리뷰 요청은 PR 본문이 아니라 타임라인에만 남는다. 같은 커밋 그대로 리뷰를 다시
+    요청하는 일이 흔해서, 봇은 "이 요청에 이미 답했는가" 를 이 시각으로 가른다 —
+    커밋 지문만 보면 재요청이 영원히 보이지 않는다.
+
+    REST 타임라인이 아니라 GraphQL 로 묻는 것은 `last:` 로 최근 것부터 받기
+    때문이다. 코멘트가 많은 PR 에서 REST 첫 페이지만 읽으면 정작 최근 요청을
+    놓친다. 요청 이력이 없으면 `None`.
+    """
     if not login:
         return None
+    owner, _, name = (repo or "").partition("/")
+    if not owner or not name:
+        return None
+    payload = _gh_json(["api", "graphql",
+                        "-f", "query=" + _LAST_REQUEST_QUERY,
+                        "-f", "owner=" + owner, "-f", "name=" + name,
+                        "-F", "number=%d" % int(number)],
+                       timeout=60, account=account)
+    if payload.get("errors"):
+        raise GhError("리뷰 요청 이력 GraphQL 조회 실패 (%s#%s)" % (repo, number))
+    pr = (((payload.get("data") or {}).get("repository") or {}).get("pullRequest") or {})
+    last = None
+    for e in (pr.get("timelineItems") or {}).get("nodes") or []:
+        target = e.get("requestedReviewer") or {}
+        name_of = target.get("login") or target.get("slug") or ""
+        if name_of.lower() != login.lower():
+            continue
+        last = {"at": e.get("createdAt") or "",
+                "by": (e.get("actor") or {}).get("login") or ""}
+    return last
+
+
+def review_requester(repo, number, login, account=None):
+    """나에게 리뷰를 요청한 사람. 타임라인에만 남는 사실이라 따로 물어본다."""
     try:
-        events = _gh_json(["api", "repos/%s/issues/%s/timeline?per_page=100"
-                           % (repo, number)], timeout=60, account=account)
+        last = last_review_request(repo, number, login, account=account)
     except GhError:
         return None
-    who = None
-    for e in events or []:
-        if e.get("event") != "review_requested":
-            continue
-        target = ((e.get("requested_reviewer") or {}).get("login")
-                  or (e.get("requested_team") or {}).get("slug") or "")
-        if target.lower() == login.lower():
-            who = (e.get("actor") or {}).get("login") or who
-    return who
+    return (last or {}).get("by") or None
 
 
 ISSUE_REF_RE = re.compile(r"#(\d+)")

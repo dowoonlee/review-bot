@@ -61,12 +61,25 @@ def key(repo, number):
     return "%s#%s" % (repo, number)
 
 
-def already_done(data, repo, number, sha, rereview_on_new, dry_run=False):
+def already_done(data, repo, number, sha, rereview_on_new, dry_run=False,
+                 requested_at=None):
     """이 커밋을 이미 처리했는가.
 
     dry-run 으로 남긴 초안은 아직 아무에게도 닿지 않았다. 게시 모드로 바꾼 뒤에도
     "이미 리뷰함" 으로 건너뛰면 그 PR 은 새 커밋이 올라오기 전까지 영원히 게시되지
     않으므로, 초안뿐인 기록은 dry-run 이 켜져 있는 동안만 처리 완료로 친다.
+
+    `requested_at` 은 나에게 온 마지막 리뷰 요청의 시각이다. 커밋 지문만으로
+    가르면 **같은 커밋 그대로 온 재요청**이 보이지 않는다 — 리뷰를 게시하면
+    GitHub 이 요청을 걷어 가므로, 그 뒤 다시 요청이 들어왔다는 것은 사람이 한 번
+    더 봐 달라고 말한 것이다. 그런데도 봇은 새 커밋이 올라올 때까지 매 틱
+    "이미 리뷰함" 으로 건너뛰었다. 그래서 답한 요청의 시각을 기록에 남기고,
+    그것과 다른 요청이 와 있으면 다시 본다.
+
+    시각을 견주지 않고 "요청이 열려 있으면 재요청" 으로 가르지 않는 이유는, 그
+    판정이 답한 뒤에도 계속 참이면 매 틱 돈을 쓰는 되돌이가 되기 때문이다.
+    `requested_at` 이 `None` 이면(조회 실패·요청 이력 없음) 예전처럼 커밋만 본다 —
+    돈이 드는 쪽으로 기울지 않는 것이 안전하다.
     """
     rec = data.get(key(repo, number))
     if not rec:
@@ -81,6 +94,8 @@ def already_done(data, repo, number, sha, rereview_on_new, dry_run=False):
             return True
         if not dry_run:
             return False
+    if requested_at and requested_at != rec.get("requestedAt"):
+        return False
     return True
 
 
@@ -123,8 +138,14 @@ def has_pending_draft(repo, number, sha=None):
 
 
 def mark(data, repo, number, sha, **fields):
+    prev = data.get(key(repo, number)) or {}
     rec = {"sha": sha, "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
     rec.update(fields)
+    # 관측하지 못한 요청 시각(`None`)으로 기록을 덮으면, 다음 틱이 열려 있는 요청을
+    # 재요청으로 읽어 같은 커밋을 또 리뷰한다 — 리뷰 한 번이 몇 달러다. 모를 때는
+    # 지운 것이 아니라 모르는 것이므로 이전에 답한 요청을 그대로 지킨다.
+    if rec.get("requestedAt") is None and prev.get("requestedAt"):
+        rec["requestedAt"] = prev["requestedAt"]
     data[key(repo, number)] = rec
     return data
 
