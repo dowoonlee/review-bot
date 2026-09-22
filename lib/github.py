@@ -240,7 +240,7 @@ def sent_review_requests(account=None):
 def pr_meta(repo, number, account=None):
     return _gh_json([
         "pr", "view", str(number), "--repo", repo, "--json",
-        "headRefOid,headRefName,baseRefName,isDraft,additions,deletions,"
+        "headRefOid,headRefName,baseRefOid,baseRefName,isDraft,additions,deletions,"
         "changedFiles,title,body,author,url,mergeable,state,statusCheckRollup",
     ], account=account)
 
@@ -279,7 +279,7 @@ def ci_state(meta):
     return "success"
 
 
-def pr_files(repo, number, max_pages=10, account=None):
+def pr_files(repo, number, max_pages=30, account=None):
     """변경 파일 + patch. per_page 100 으로 페이지를 넘긴다."""
     files = []
     for page in range(1, max_pages + 1):

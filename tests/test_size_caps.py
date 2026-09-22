@@ -35,8 +35,11 @@ class DiffBudgetTests(unittest.TestCase):
     def test_ceiling_protects_the_context_window(self):
         self.assertEqual(reviewer.diff_char_cap(10**6), reviewer.DIFF_CHAR_CEILING)
 
-    def test_zero_falls_back(self):
-        self.assertEqual(reviewer.diff_char_cap(0), reviewer.DIFF_CHAR_CAP)
+    def test_unlimited_uses_full_context_budget(self):
+        self.assertEqual(reviewer.diff_char_cap(0), reviewer.DIFF_CHAR_CEILING)
+
+    def test_missing_cap_falls_back(self):
+        self.assertEqual(reviewer.diff_char_cap(None), reviewer.DIFF_CHAR_CAP)
 
     def test_oversized_diff_names_what_it_dropped(self):
         files = [{"filename": "a.py", "patch": "+x" * 50000},
@@ -44,6 +47,31 @@ class DiffBudgetTests(unittest.TestCase):
         block = reviewer._diff_block(files, cap=1000)
         self.assertIn("워크트리에서 직접 읽으세요", block)
         self.assertIn("a.py", block)
+
+
+class SizeGateTests(unittest.TestCase):
+    def test_limits_can_be_disabled_independently(self):
+        bot = _bot()
+        gh = bot["gh"]
+        files = [{"filename": "f%d.py" % i, "additions": 87} for i in range(136)]
+        for file_cap, line_cap, reason in ((0, 0, None), (80, 0, "파일"),
+                                           (0, 3000, "줄")):
+            with self.subTest(file_cap=file_cap, line_cap=line_cap):
+                cfg = {"repos": {"o/r": {"enabled": True}}, "post": {},
+                       "review": {"maxChangedFiles": file_cap, "maxDiffLines": line_cap}}
+                with mock.patch.object(gh, "active_account", return_value="me"), \
+                        mock.patch.object(gh, "env_for", return_value={}), \
+                        mock.patch.object(gh, "pr_meta", return_value={"state": "OPEN", "headRefOid": "s"}), \
+                        mock.patch.object(gh, "pr_files", return_value=files), \
+                        mock.patch.object(gh, "last_review_request", return_value=None), \
+                        mock.patch.object(gh, "ci_state", side_effect=RuntimeError("passed size gate")):
+                    if reason is None:
+                        with self.assertRaisesRegex(RuntimeError, "passed size gate"):
+                            bot["process_pr"]({"repo": "o/r", "number": 6156}, cfg, {})
+                    else:
+                        result = bot["process_pr"]({"repo": "o/r", "number": 6156}, cfg, {})
+                        self.assertEqual(result["skipKind"], "size")
+                        self.assertIn(reason, result["skipped"])
 
 
 class SkipAnnouncementTests(unittest.TestCase):

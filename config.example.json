@@ -12,8 +12,8 @@
     "model": "sonnet",
     "maxTurns": 0,
     "timeoutSec": 3600,
-    "maxDiffLines": 1500,
-    "maxChangedFiles": 40,
+    "maxDiffLines": 0,
+    "maxChangedFiles": 0,
     "skipDrafts": true,
     "rereviewOnNewCommits": true,
     "includeExts": [],
@@ -29,7 +29,12 @@
       "timeoutSec": 300,
       "maxTurns": 15,
       "workers": 4
-    }
+    },
+    "batchMaxFiles": 20,
+    "batchMaxChars": 120000,
+    "workers": 2,
+    "parallel": true,
+    "integrationMode": "single"
   },
   "post": {
     "dryRun": true,

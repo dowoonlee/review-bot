@@ -34,18 +34,14 @@ DEFAULTS = {
         "maxTurns": 0,
         # 상한이 없을 때 폭주를 막는 유일한 끈. 리뷰어 하나당 벽시계 시간.
         "timeoutSec": 3600,
-        # 리뷰를 아예 시작하지 않는 크기.
-        #
-        # 처음의 40개/1500줄은 "설정 없이 돌려도 사고가 안 날 값" 으로 어림잡은
-        # 것이었다. skcc-ai/c2 의 PR 351건(develop·기능 브랜치 대상, 릴리스 승격
-        # 제외)을 재 보니 중앙값 10개/483줄, p90 이 44개/2469줄이었고, 40/1500 은
-        # 그 모집단의 77% 만 통과시켰다 — 남의 PR 네 건 중 하나가 말없이 버려졌다.
-        # p90 을 덮도록 올린다. 릴리스·승격 PR(중앙값 192개/14524줄)은 여전히
-        # 걸리는데, 그것이 이 상한이 실제로 하는 일이다.
-        #
-        # 저장소마다 분포가 다르다. 옮길 때는 어림잡지 말고 다시 재라.
-        "maxDiffLines": 3000,
-        "maxChangedFiles": 80,
+        # PR 전체 크기로 건너뛰지 않는다. 양수면 명시적인 거절 상한이다.
+        "maxDiffLines": 0,
+        "maxChangedFiles": 0,
+        # 한 세션의 diff 예산. 큰 파일은 hunk/라인 경계에서 나눈다.
+        "batchMaxFiles": 20,
+        "batchMaxChars": 120000,
+        "workers": 2,
+        "integrationMode": "single",  # all 이면 모든 리뷰어가 통합 검토
         "skipDrafts": True,
         # head 가 바뀌면(=새 커밋 push) 다시 리뷰한다.
         "rereviewOnNewCommits": True,

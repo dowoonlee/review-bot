@@ -261,6 +261,14 @@ def _summary_body(payload, inline, demoted, verdict=None, note=None):
         parts.append("- 그 외 %d건은 인라인 코멘트를 참고하세요." % len(inline_rest))
 
     parts += ["", "### 검증 범위", "", VERIFY_SCOPE]
+    coverage = payload.get("coverage") or {}
+    if coverage:
+        parts.append("- 변경 파일 %d개 · %d묶음 · 묶음 검토 완료 %d/%d · 통합 검토 완료 %d/%d" % (
+            coverage["files"], coverage["batches"], coverage["completed"], coverage["planned"],
+            coverage["integrationCompleted"], coverage["integrationPlanned"]))
+        parts.append("- 위 수치는 실행 완료 범위입니다. 실제 추적한 코드와 미확인 사항은 리뷰어 요약을 참고하세요.")
+        for missing in coverage.get("unavailable") or []:
+            parts.append("- 확인하지 못한 diff: `%s` — %s" % (missing["path"], missing["reason"]))
     for e in payload.get("errors") or []:
         parts.append("- ⚠️ %s — 이 관점은 리뷰에서 빠져 있습니다." % e.split(":")[0])
 
@@ -314,6 +322,8 @@ def _guard_event(event, findings, payload, pcfg, ci=None):
         return "COMMENT", "알 수 없는 판정 '%s' 이라 COMMENT 로 게시합니다." % event
     if event not in allowed:
         return "COMMENT", "설정상 %s 는 허용되지 않아 COMMENT 로 게시합니다." % event
+    if event == "APPROVE" and payload.get("coverage") and not payload["coverage"].get("complete"):
+        return "COMMENT", "미완료 묶음 또는 확인하지 못한 diff가 있어 승인하지 않습니다."
     if event == "APPROVE" and payload.get("errors"):
         return "COMMENT", "리뷰어 일부가 실패해 절반만 본 리뷰라 승인하지 않습니다."
     if event == "APPROVE" and has_blocking:
@@ -445,17 +455,20 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
                                         requested_at=result["requestedAt"]):
         return dict(result, skipped="이미 리뷰함")
 
-    files = [f for f in gh.pr_files(repo, number, account=acct)
-             if not _skip_file(f.get("filename") or "", rcfg)]
+    all_files = gh.pr_files(repo, number, account=acct)
+    if meta.get("changedFiles") is not None and len(all_files) != meta["changedFiles"]:
+        raise reviewer.ReviewError("변경 파일 목록이 불완전합니다 (%d/%d). 리뷰를 게시하지 않습니다."
+                                   % (len(all_files), meta["changedFiles"]))
+    files = [f for f in all_files if not _skip_file(f.get("filename") or "", rcfg)]
     if not files:
         return dict(result, skipped="리뷰할 파일 없음")
     churn = sum((f.get("additions") or 0) + (f.get("deletions") or 0) for f in files)
-    cap_f = rcfg.get("maxChangedFiles") or 80
-    cap_l = rcfg.get("maxDiffLines") or 3000
+    cap_f = rcfg.get("maxChangedFiles", 0)
+    cap_l = rcfg.get("maxDiffLines", 0)
     over = []
-    if len(files) > cap_f:
+    if cap_f > 0 and len(files) > cap_f:
         over.append("파일 %d개(상한 %d)" % (len(files), cap_f))
-    if churn > cap_l:
+    if cap_l > 0 and churn > cap_l:
         over.append("%d줄(상한 %d)" % (churn, cap_l))
     if over and not force_size:
         # 두 축을 한 번에 알려 준다. 하나씩 걸리면 상한을 올려도 다음 틱에서 다른
@@ -467,12 +480,6 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
     if over and force_size:
         _log("  상한 초과(%s) — --force-size 로 그대로 진행합니다" % " · ".join(over))
 
-    files_by_path = {f["filename"]: {"postable": gh.postable_lines(f.get("patch")),
-                                     "added": gh.added_lines(f.get("patch")),
-                                     "patch": f.get("patch") or ""}
-                     for f in files}
-    # 봇은 테스트를 돌리지 않는다. 테스트가 돌았다는 증거는 저장소의 CI 뿐이라
-    # 판정 자료에 싣고, 실패했으면 승인을 막는다.
     meta["_ci"] = gh.ci_state(meta)
 
     _log("  리뷰 시작 — 파일 %d · %d줄" % (len(files), churn))
@@ -496,6 +503,21 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
     try:
         wt, wsha, base, ref = worktree.prepare(repo, number, entry.get("localPath"),
                                                env=genv)
+        if wsha != sha:
+            raise reviewer.ReviewError("리뷰 준비 중 PR head가 바뀌었습니다. 다음 실행에서 다시 확인합니다.")
+        files = worktree.complete_patches(base, sha, meta.get("baseRefOid"), files, env=genv)
+        files_by_path = {f["filename"]: {"postable": gh.postable_lines(f.get("patch")),
+                                         "added": gh.added_lines(f.get("patch")),
+                                         "patch": f.get("patch") or ""}
+                         for f in files}
+        def progress(tag, coverage):
+            _log("  %s — 묶음 검토 %d/%d · 통합 %d/%d" % (
+                tag, coverage["completed"], coverage["planned"],
+                coverage["integrationCompleted"], coverage["integrationPlanned"]))
+            current = store.read_current() or {}
+            current.update(phase=tag, coverage=coverage)
+            store.set_current(current)
+
         # 리뷰어는 Bash 가 없어 이력을 스스로 캐지 못한다. 워크트리에 남의 PR 코드가
         # 펼쳐져 있는 이상 거기서 명령이 돌게 할 수는 없으므로, 신뢰되는 이쪽에서
         # 읽어 프롬프트에 실어 준다. 실패해도 리뷰는 그대로 진행한다.
@@ -510,9 +532,10 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
                                   max_turns=rcfg.get("maxTurns", 0),
                                   timeout=rcfg.get("timeoutSec") or 3600,
                                   parallel=rcfg.get("parallel", True), ctx=ctx,
-                                  mcp=mcp,
+                                  mcp=mcp, batching=rcfg, progress=progress,
                                   diff_cap=reviewer.diff_char_cap(
                                       rcfg.get("maxDiffLines")))
+        result["review_execution"] = dict(payload.get("_meta") or {})
         # 반증 — 워크트리가 살아 있는 이 안에서만 가능하다. 판정 단계는 코드를
         # 볼 수 없으므로 근거의 문체로만 판단한다. 여기서는 코드를 다시 읽는다.
         # 범위 — 반증보다 먼저다. diff 밖의 지적은 검증할 가치도 비용도 없다.
@@ -568,6 +591,7 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
             janitor.drop_session(wt)
         store.clear_current()
 
+    result["coverage"] = payload.get("coverage")
     result["cost_usd"] = (payload.get("_meta") or {}).get("cost_usd")
     if payload.get("errors"):
         result["agent_errors"] = payload["errors"]
@@ -619,17 +643,18 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
 
     # 게시 직전 문장 다듬기. 마크다운 전체가 아니라 **구성 요소**만 넘긴다 —
     # 제목·라벨·문서 구조는 코드가 조립하므로 편집자가 건드릴 일이 없다.
+    # 리뷰어별 긴 검토 기록은 다시 생성하지 않는다. 지적 본문과 판정만 다듬는다.
     polcfg = pcfg.get("polish") or {}
     targets = ([f.get("body") or "" for f in inline]
-               + [payload.get("summary") or "", verdict.get("reason") or ""])
+               + [verdict.get("reason") or ""])
     if polcfg.get("enabled", True) and any(t.strip() for t in targets):
         polished, changed, reverted, pcost = reviewer.polish(
             targets, model=polcfg.get("model") or "sonnet",
             timeout=polcfg.get("timeoutSec") or 300)
         for f, t in zip(inline, polished):
             f["body"] = t
-        payload["summary"] = polished[len(inline)]
-        verdict["reason"] = polished[len(inline) + 1]
+        verdict["reason"] = polished[len(inline)]
+        result["reason"] = verdict["reason"]
         result["polished"] = {"changed": changed, "reverted": reverted,
                               "of": len(targets), "cost_usd": round(pcost, 4)}
         if pcost:
@@ -1321,6 +1346,10 @@ def _config_info(cfg):
         "timeoutSec": rcfg.get("timeoutSec"),
         "maxChangedFiles": rcfg.get("maxChangedFiles"),
         "maxDiffLines": rcfg.get("maxDiffLines"),
+        "batchMaxFiles": rcfg.get("batchMaxFiles"),
+        "batchMaxChars": rcfg.get("batchMaxChars"),
+        "workers": rcfg.get("workers"),
+        "integrationMode": rcfg.get("integrationMode", "single"),
         # url 만 싣는다 — 토큰은 어떤 형태로도 이 dict 에 들어오지 않는다.
         "repomind": ((cfg.get("repomind") or {}).get("url") or "(url 없음)"
                      if (cfg.get("repomind") or {}).get("enabled") else None),
@@ -2044,6 +2073,7 @@ def _install_signal_handlers():
     """
     def bye(signum, _frame):
         killed = reviewer.kill_children()
+        runtime.kill_containers()
         _log("신호 %d 를 받아 정리하고 종료합니다%s"
              % (signum, " — 리뷰어 %d개 종료" % killed if killed else ""))
         try:

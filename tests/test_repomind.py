@@ -111,11 +111,18 @@ class CommandLineTests(unittest.TestCase):
         def fake_invoke(cmd, prompt, cwd, timeout, env_extra=None):
             self.seen["cmd"] = cmd
             self.seen["env"] = env_extra
+            self.seen["prompt"] = prompt
             return json.dumps({"result": '{"findings": []}', "total_cost_usd": 0}), "", 0
 
         patcher = mock.patch.object(reviewer, "_invoke", fake_invoke)
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def test_task_identity_is_preserved_in_the_session_prompt(self):
+        reviewer._run("review contents", str(self.dir), "haiku", 0, 10,
+                      "batch-002-silent-failure-hunter")
+        self.assertEqual(self.seen["prompt"],
+                         "<!-- review-bot-task: batch-002-silent-failure-hunter -->\nreview contents")
 
     def test_mcp_goes_to_config_flag_and_token_to_env(self):
         rm = _connected(self.dir)

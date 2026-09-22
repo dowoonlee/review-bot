@@ -147,3 +147,53 @@ def file_history(base, sha, paths, per_file=5, max_files=10):
             # 커밋 제목은 길이 제한이 없다. 한 줄이 프롬프트를 잡아먹지 않게 자른다.
             out[p] = [l[:200] for l in log.splitlines()[:per_file]]
     return out
+
+
+def complete_patches(base, head_sha, base_sha, files, env=None):
+    """Recover missing/truncated API patches from the pinned PR merge base.
+
+    git's textconv/external diff drivers are disabled: PR configuration must not
+    execute programs while the bot prepares review data.
+    """
+    from lib.batches import HEADER
+
+    def complete(item):
+        patch = item.get('patch') or ''
+        added = deleted = 0
+        in_hunk = False
+        for line in patch.splitlines():
+            if HEADER.match(line):
+                in_hunk = True
+            elif in_hunk:
+                added += line.startswith('+')
+                deleted += line.startswith('-')
+        return bool(patch) and added == (item.get('additions') or 0) and deleted == (item.get('deletions') or 0)
+
+    missing = [item for item in files if not complete(item)]
+    if not missing:
+        return files
+    if not base_sha:
+        raise WorktreeError('완전한 diff 복원에 필요한 base SHA가 없습니다')
+    known = _git(base, ['rev-parse', '--verify', base_sha + '^{commit}'], check=False)
+    if known != base_sha:
+        _git(base, _cred(env) + ['fetch', '--quiet', '--no-write-fetch-head', 'origin', base_sha], env=env)
+    merge_base = _git(base, ['merge-base', base_sha, head_sha])
+    result = []
+    for item in files:
+        if complete(item):
+            result.append(item)
+            continue
+        paths = [item['filename']]
+        if item.get('previous_filename'):
+            paths.append(item['previous_filename'])
+        raw = _git(base, ['--literal-pathspecs', 'diff', '--no-ext-diff', '--no-textconv',
+                          '--find-renames', '--unified=3', merge_base, head_sha, '--'] + paths)
+        lines = raw.splitlines(keepends=True)
+        start = next((i for i, line in enumerate(lines) if HEADER.match(line)), None)
+        recovered = dict(item, patch=''.join(lines[start:]) if start is not None else '')
+        if start is None:
+            recovered['_patch_error'] = ('바이너리 diff' if 'Binary files ' in raw else '텍스트 hunk 없음 (이름·모드 변경 등)')
+        elif not complete(recovered):
+            raise WorktreeError('API 파일 통계와 고정 커밋 diff가 다릅니다: ' + item['filename'])
+        result.append(recovered)
+    return result
