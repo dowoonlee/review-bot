@@ -151,6 +151,7 @@ $ review-bot tick
 | `review.workers` | 리뷰 프로세스 동시 실행 상한(기본 2). `parallel=false`면 항상 1개씩 실행합니다. |
 | `review-bot pause` | 즉시 정지. `state/PAUSED` 가 있으면 tick 이 아무 일도 하지 않습니다. |
 | 본인 PR 제외 | 작성자가 활성 gh 계정이면 건너뜁니다. 본인 PR 의 지적은 수정 커밋으로 반영하는 것이 규칙입니다. |
+| Draft PR 제외 | `review.skipDrafts`(기본 `true`) 면 draft PR 은 리뷰 요청이 와 있어도 Ready for review 로 바뀔 때까지 건너뜁니다. 건너뛰는 이유는 `status` 와 앱의 받은 요청에 **자동 리뷰 보류** 로 표시됩니다. |
 | `post.allowedEvents` | 판정이 낼 수 있는 이벤트. 여기서 `APPROVE` 를 빼면 봇은 승인하지 않습니다. |
 | 판정 모순 차단 | 수정·확인 필요 지적, 필수 검토 공백, 핵심 실행 미검증, 실패/진행 중 CI가 남으면 승인하지 않습니다. 선택적 개선의 등급만으로 승인을 막지 않습니다. |
 | `review.strictScope` | diff 밖의 좌표를 가리키는 지적은 반증 전에 버립니다. 기존 코드의 문제를 이 PR 작성자에게 묻지 않습니다. |

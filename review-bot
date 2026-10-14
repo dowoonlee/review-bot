@@ -1693,6 +1693,17 @@ def _paused_info():
     return {"at": (lines[0] if lines else ""), "reason": (lines[1] if len(lines) > 1 else "")}
 
 
+def hold_reason(cfg, pr, me=None):
+    """틱이 이 PR 을 리뷰하지 않고 넘기는 이유. process_pr 의 건너뜀 규칙과 같은 사실을
+    앱·status 에 미리 보여 준다 — '대기' 로만 떠 있으면 왜 안 오는지 알 길이 없다."""
+    author = ((pr.get("prAuthor") or pr.get("author") or "")).lower()
+    if me and author == me.lower():
+        return "본인 PR — 자동 리뷰하지 않습니다"
+    if pr.get("isDraft") and (cfg.get("review") or {}).get("skipDrafts", True):
+        return "초안(draft) PR — Ready for review 로 바뀌면 리뷰합니다 (review.skipDrafts)"
+    return None
+
+
 def status_payload(cfg, skip_details=False):
     """앱·스크립트가 읽는 상태 스냅샷. 사람이 읽는 cmd_status 와 같은 사실을 낸다.
 
@@ -1750,6 +1761,7 @@ def status_payload(cfg, skip_details=False):
             st = "posted"
         item = dict(p, watched=p["repo"] in known, status=st,
                     event=rec.get("event"), lastSha=rec.get("sha"))
+        me = None
         if p["repo"] in known and not skip_details:
             acct = (cfg_mod.repo_entry(cfg, p["repo"]) or {}).get("account") or cfg.get("account")
             try:
@@ -1768,6 +1780,7 @@ def status_payload(cfg, skip_details=False):
                 item["changedFiles"] = meta.get("changedFiles")
             except gh.GhError:
                 item["issues"] = []
+        item["holdReason"] = hold_reason(cfg, item, me) if p["repo"] in known and not rec else None
         item["insight"] = insights.view(insight_cache, cfg, p.get("account"), p, "incoming", rec, credential_state=credential_state)
         item["insight"]["selection"] = selection.view(selection_cache, selection_settings, p.get("account"), p, "incoming", cfg)
         pending.append(item)
@@ -1846,8 +1859,9 @@ def cmd_status(args, cfg):
     print("\n대기 중인 리뷰 요청 %d건:" % len(prs))
     for p in prs:
         rec = state.get(store.key(p["repo"], p["number"]))
+        hold = hold_reason(cfg, p) if p["repo"] in known and not rec else None
         if not rec:
-            mark = "· 대기" if p["repo"] in known else "  (감시 대상 아님)"
+            mark = ("◌ 보류" if hold else "· 대기") if p["repo"] in known else "  (감시 대상 아님)"
         elif rec.get("pending"):
             mark = "⏳ 검증 대기"
         elif rec.get('discarded'):
@@ -1858,6 +1872,8 @@ def cmd_status(args, cfg):
         else:
             mark = "✓ 리뷰함"
         print("  %-10s %s#%-6s %s" % (mark, p["repo"], p["number"], p["title"][:52]))
+        if hold:
+            print("  %-10s   └ %s" % ("", hold))
     print("\n처리 이력 %d건" % len(state))
     return 0
 

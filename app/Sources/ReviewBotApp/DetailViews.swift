@@ -381,7 +381,8 @@ struct PendingDetailView: View {
     }
 
     private var statusText: String {
-        switch pr.status {
+        if pr.status == "new", let hold = pr.holdReason { return "자동 리뷰 보류 · " + hold }
+        return switch pr.status {
         case "posted": "리뷰 게시함"
         case "pending": "검증 대기"
         case "discarded": "로컬 자료 정리됨"

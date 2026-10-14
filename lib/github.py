@@ -111,7 +111,7 @@ def review_requests(limit=30, account=None, attempts=3):
             data = _gh_json([
                 "search", "prs", "--review-requested=@me", "--state=open",
                 "--limit", str(limit),
-                "--json", "repository,number,title,url,author,updatedAt",
+                "--json", "repository,number,title,url,author,updatedAt,isDraft",
             ], timeout=45, account=account)
             break
         except GhError:
@@ -127,6 +127,7 @@ def review_requests(limit=30, account=None, attempts=3):
             "url": r.get("url") or "",
             "author": (r.get("author") or {}).get("login") or "",
             "updatedAt": r.get("updatedAt") or "",
+            "isDraft": bool(r.get("isDraft")),
         })
     return [r for r in out if r["repo"] and r["number"]]
 

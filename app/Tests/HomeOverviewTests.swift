@@ -16,6 +16,17 @@ final class HomeOverviewTests: XCTestCase {
         ["nextAction": "reply", "status": state, "summary": "A question", "items": [
             ["kind": "question", "text": "Explain retry", "sources": [], "replyDraft": ""]]]
     }
+    func testReceivedDraftIsHeldWithReason() throws {
+        let data = try JSONSerialization.data(withJSONObject: ["at": "now", "accounts": [], "repos": [],
+            "dryRun": true, "maxPerTick": 2, "outgoing": [], "reviewed": [:], "errors": [],
+            "pending": [["repo": "org/repo", "number": 7, "title": "Draft", "url": "https://github.com/org/repo/pull/7",
+                         "author": "them", "updatedAt": "now", "watched": true, "status": "new", "isDraft": true,
+                         "holdReason": "초안(draft) PR — Ready for review 로 바뀌면 리뷰합니다 (review.skipDrafts)"]]])
+        let value = HomeOverview(try JSONDecoder().decode(StatusSnapshot.self, from: data))
+        XCTAssertTrue(value.actions.isEmpty)
+        XCTAssertEqual(value.waiting.first?.action, "초안 PR — 자동 리뷰 보류")
+        XCTAssertEqual(value.waiting.first?.reason, "초안(draft) PR — Ready for review 로 바뀌면 리뷰합니다 (review.skipDrafts)")
+    }
     func testOnlyCurrentAIContributesActions() throws {
         let ready = HomeOverview(try snapshot([["insight": insight("ready")]]))
         XCTAssertEqual(ready.actions.first?.action, "질문 답변")

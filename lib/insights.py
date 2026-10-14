@@ -76,7 +76,7 @@ def key(account, pr, direction):
 
 def next_action(pr, direction, reviewed=None):
     if pr.get('isDraft'):
-        return '초안 작성 중'
+        return '초안 PR — 자동 리뷰 보류' if direction == 'incoming' else '초안 작성 중'
     if direction == 'incoming':
         rec = reviewed or {}
         if rec.get('pending'): return '실행 검증 대기'

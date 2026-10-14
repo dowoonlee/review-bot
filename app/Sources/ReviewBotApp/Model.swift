@@ -207,6 +207,7 @@ struct PendingPR: Decodable, Sendable, Identifiable {
     var requestedBy: String?    // 나에게 리뷰를 요청한 사람
     var prAuthor: String?
     var isDraft: Bool?
+    var holdReason: String?    // 틱이 리뷰하지 않고 넘기는 이유 (draft · 본인 PR)
     var changedFiles: Int?
     var issues: [LinkedIssue]?
 

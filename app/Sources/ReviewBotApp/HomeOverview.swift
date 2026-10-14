@@ -94,10 +94,10 @@ struct HomeOverview {
         for pr in status?.pending ?? [] {
             let ai = pr.insight?.status == "ready" ? pr.insight : nil
             let waiting = pr.status == "pending" || pr.status == "discarded" || pr.isDraft == true
-            let action = pr.isDraft == true ? "초안 작성 중" : pr.status == "pending" ? "실행 검증 대기" : pr.status == "discarded" ? "로컬 자료 정리됨" : pr.status == "draft" ? "봇 리뷰 초안 확인" : pr.status == "posted" ? "재요청·후속 대화 확인" : "요청받은 리뷰 진행"
+            let action = pr.isDraft == true ? "초안 PR — 자동 리뷰 보류" : pr.status == "pending" ? "실행 검증 대기" : pr.status == "discarded" ? "로컬 자료 정리됨" : pr.status == "draft" ? "봇 리뷰 초안 확인" : pr.status == "posted" ? "재요청·후속 대화 확인" : "요청받은 리뷰 진행"
             rows.append(HomeRequest(id: "incoming:" + (pr.account ?? "global") + ":" + pr.id,
                 repo: pr.repo, number: pr.number, title: pr.title, action: action,
-                reason: ai?.items?.first?.text ?? (pr.status == "draft" ? "게시 전 봇의 리뷰 초안을 확인하세요." : "받은 리뷰 요청의 변경 내용과 대화를 확인하세요."),
+                reason: pr.holdReason ?? ai?.items?.first?.text ?? (pr.status == "draft" ? "게시 전 봇의 리뷰 초안을 확인하세요." : "받은 리뷰 요청의 변경 내용과 대화를 확인하세요."),
                 priority: 3, waiting: waiting, direction: "받은 요청", selection: .pending(pr.id), insight: pr.insight,
                 stamp: HomeStamp(state: pr.status, checks: "", conflict: false, revision: pr.updatedAt,
                     analysis: ai.map { ($0.summary ?? "") + ($0.items ?? []).map(\.text).joined(separator: "\n") } ?? ""), account: pr.account))
@@ -108,7 +108,7 @@ struct HomeOverview {
         if status?.selectionSettings?.enabled == true {
             for i in rows.indices {
                 guard let decision = rows[i].insight?.selection, decision.usable,
-                      rows[i].priority > 0, rows[i].action != "초안 작성 중",
+                      rows[i].priority > 0, rows[i].action != "초안 작성 중", rows[i].action != "초안 PR — 자동 리뷰 보류",
                       rows[i].action != "실행 검증 대기", rows[i].action != "로컬 자료 정리됨",
                       rows[i].action != "봇 리뷰 초안 확인" else { continue }
                 if decision.actor == "self" {

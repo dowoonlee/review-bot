@@ -78,6 +78,27 @@ class SentRequestsTests(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
         self.assertIsNone(rows[0]["checksState"])
 
+    def test_status_explains_why_a_received_pr_is_held(self):
+        bot = runpy.run_path(str(Path(__file__).resolve().parents[1] / "review-bot"))
+        status, hold = bot["status_payload"], bot["hold_reason"]
+        cfg = {"repos": {"org/a": {"account": "a"}}, "post": {}, "limits": {}, "review": {}}
+        draft = {"repo": "org/a", "number": 1, "author": "them", "isDraft": True}
+        replacements = {"_config_info": lambda _: {}, "_paused_info": lambda: None,
+                        "_lock_info": lambda: None}
+        with patch.dict(status.__globals__, replacements), \
+             patch.object(github, "whoami", side_effect=lambda account: account), \
+             patch.object(github, "review_requests", return_value=[draft]), \
+             patch.object(github, "sent_review_requests", return_value=([], [])), \
+             patch.object(bot["store"], "load", return_value={}), \
+             patch.object(bot["store"], "pending_drafts", return_value=[]):
+            result = status(cfg, skip_details=True)
+        self.assertEqual(result["pending"][0]["status"], "new")
+        self.assertIn("draft", result["pending"][0]["holdReason"])
+        # skipDrafts 를 끄면 보류 사유가 없다. 본인 PR 은 draft 여부와 무관하게 보류.
+        self.assertIsNone(hold({"review": {"skipDrafts": False}}, draft))
+        self.assertIn("본인", hold(cfg, dict(draft, author="Me"), me="me"))
+        self.assertIsNone(hold(cfg, dict(draft, isDraft=False)))
+
     def test_status_isolates_sent_failure_from_received_and_other_accounts(self):
         bot = runpy.run_path(str(Path(__file__).resolve().parents[1] / "review-bot"))
         status = bot["status_payload"]

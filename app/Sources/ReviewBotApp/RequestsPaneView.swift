@@ -372,12 +372,14 @@ struct RequestsPaneView: View {
             Text("\(pr.repo) · \(pr.author) 작성").f(.caption).foregroundStyle(.secondary)
             if let insight = pr.insight { Text(insight.nextAction).f(.caption).foregroundStyle(.tint) }
             if let by = pr.requestedBy { Text("\(by) 님이 리뷰 요청").f(.caption) }
+            if let hold = pr.holdReason { Text(hold).f(.caption).foregroundStyle(.orange) }
         }
         .padding(.vertical, 13).frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
     }
     private func receivedStatus(_ pr: PendingPR) -> String {
-        switch pr.status {
+        if pr.status == "new", pr.holdReason != nil { return "자동 리뷰 보류" }
+        return switch pr.status {
         case "posted": "봇 리뷰 게시됨"
         case "draft": "봇 초안 검토"
         case "pending": "검증 대기"
