@@ -243,6 +243,24 @@ struct DiffHunkView: View {
 }
 
 /// 제목 속 이슈 번호와 구분되도록 실제 PR 번호를 독립적으로 표시한다.
+/// GitHub 의 Draft 표시. 글로 "초안" 이라 적는 대신 번호 옆에 회색 캡슐로 붙인다.
+/// 왜 봇이 멈춰 있는지는 마우스를 올렸을 때(툴팁)만 보여 준다.
+struct DraftBadge: View {
+    var reason: String? = nil
+
+    var body: some View {
+        Label("Draft", systemImage: "pencil.line")
+            .f(.caption2, .semibold)
+            .labelStyle(.titleAndIcon)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 7).padding(.vertical, 3)
+            .overlay(Capsule().strokeBorder(.secondary.opacity(0.5), lineWidth: 1))
+            .fixedSize()
+            .help(reason ?? "초안(draft) PR")
+            .accessibilityLabel(reason ?? "초안 PR")
+    }
+}
+
 struct PRNumberBadge: View {
     let number: Int
 

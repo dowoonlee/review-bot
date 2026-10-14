@@ -282,6 +282,7 @@ struct PendingDetailView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 10) {
                         PRNumberBadge(number: pr.number)
+                        if pr.isDraft == true { DraftBadge(reason: pr.holdReason) }
                         Text(pr.repo).f(.callout).foregroundStyle(.secondary)
                     }
                     Text(pr.title).f(.callout).foregroundStyle(.secondary)
@@ -290,7 +291,11 @@ struct PendingDetailView: View {
                         if let n = pr.changedFiles { Label("파일 \(n)", systemImage: "doc") }
                         Label(shortTime(pr.updatedAt.replacingOccurrences(of: "Z", with: "")),
                               systemImage: "clock")
-                        Text(statusText).foregroundStyle(.orange)
+                        if pr.status == "new", let hold = pr.holdReason {
+                            Label(statusText, systemImage: "pause.circle").foregroundStyle(.orange).help(hold)
+                        } else {
+                            Text(statusText).foregroundStyle(.orange)
+                        }
                     }
                     .f(.caption).foregroundStyle(.secondary)
                 }
@@ -381,7 +386,7 @@ struct PendingDetailView: View {
     }
 
     private var statusText: String {
-        if pr.status == "new", let hold = pr.holdReason { return "자동 리뷰 보류 · " + hold }
+        if pr.status == "new", pr.holdReason != nil { return "자동 리뷰 보류" }
         return switch pr.status {
         case "posted": "리뷰 게시함"
         case "pending": "검증 대기"

@@ -328,6 +328,7 @@ struct RequestsPaneView: View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .top) {
                 PRNumberBadge(number: pr.number)
+                if pr.isDraft { DraftBadge() }
                 Text(pr.title).f(.body, .medium).lineLimit(2)
                 Spacer()
                 SentReviewBadge(pr: pr)
@@ -347,7 +348,6 @@ struct RequestsPaneView: View {
                 .padding(.vertical, 3)
             }
             HStack(spacing: 12) {
-                if pr.isDraft { Text("초안 PR") }
                 Text(pr.checksLabel)
                 if pr.mergeable == "CONFLICTING" { Text("충돌 있음").foregroundStyle(.orange) }
                 if let date = pr.requestedAt.flatMap({ ISO8601DateFormatter().date(from: $0) }) {
@@ -361,18 +361,26 @@ struct RequestsPaneView: View {
     }
 
     private func receivedRow(_ pr: PendingPR) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
+        let held = pr.status == "new" && pr.holdReason != nil
+        return VStack(alignment: .leading, spacing: 7) {
             HStack {
                 PRNumberBadge(number: pr.number)
+                if pr.isDraft == true { DraftBadge(reason: pr.holdReason) }
                 Text(pr.title).f(.body, .medium).lineLimit(2)
+                    .foregroundStyle(held ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
                 Spacer()
-                Text(receivedStatus(pr)).f(.caption).foregroundStyle(.secondary)
+                if held {
+                    Label(receivedStatus(pr), systemImage: "pause.circle")
+                        .f(.caption).foregroundStyle(.secondary).help(pr.holdReason ?? "")
+                } else {
+                    Text(receivedStatus(pr)).f(.caption).foregroundStyle(.secondary)
+                }
                 Image(systemName: "chevron.right").foregroundStyle(.tertiary)
             }
             Text("\(pr.repo) · \(pr.author) 작성").f(.caption).foregroundStyle(.secondary)
-            if let insight = pr.insight { Text(insight.nextAction).f(.caption).foregroundStyle(.tint) }
+            // 보류 중이면 '다음 행동' 줄은 배지·상태와 같은 말이라 접는다.
+            if !held, let insight = pr.insight { Text(insight.nextAction).f(.caption).foregroundStyle(.tint) }
             if let by = pr.requestedBy { Text("\(by) 님이 리뷰 요청").f(.caption) }
-            if let hold = pr.holdReason { Text(hold).f(.caption).foregroundStyle(.orange) }
         }
         .padding(.vertical, 13).frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
@@ -402,12 +410,12 @@ struct SentPRDetailView: View {
                 }
                 HStack(spacing: 10) {
                     PRNumberBadge(number: pr.number)
+                    if pr.isDraft { DraftBadge() }
                     Text(pr.repo).f(.callout).foregroundStyle(.secondary)
                 }
                 Text(pr.title).f(.title2, .semibold).textSelection(.enabled)
                 HStack {
                     SentReviewBadge(pr: pr)
-                    if pr.isDraft { Text("초안 PR").f(.caption) }
                     Text("\(pr.author) 작성").f(.caption).foregroundStyle(.secondary)
                 }
                 RequestsSyncStatus()
