@@ -33,7 +33,16 @@ from lib import repomind as repomind_mod
 from lib import secrets
 from lib import reviewer
 from lib import runtime
+from lib import policy
+from lib import checkpoints
+from lib import preflight
+from lib import cleanup
+from lib import resources
 from lib import replies
+from lib import insights
+from lib import insight_api
+from lib import selection
+from lib import home_tasks
 from lib import store
 from lib import worktree
 
@@ -216,10 +225,11 @@ def _comment_body(f):
     body = f["body"]
     if f.get("severity") == "altitude":
         body = "_설계 대안 제시이며, 되돌리자는 제안이 아닙니다._\n\n" + body
-    return "%s\n**[%s]** %s\n\n%s" % (MARKER, _label(f), f["title"], body)
+    action = {"required": "머지 전 수정 필요", "optional": "선택적 개선", "uncertain": "확인 필요"}[policy.disposition(f)]
+    return "%s\n**[%s]** %s · %s\n\n%s" % (MARKER, _label(f), f["title"], action, body)
 
 
-EVENT_LABEL = {"APPROVE": "✅ Approve", "REQUEST_CHANGES": "🛑 Request changes",
+EVENT_LABEL = {"PENDING": "⏳ 검증 대기", "APPROVE": "✅ Approve", "REQUEST_CHANGES": "🛑 Request changes",
                "COMMENT": "💬 Comment"}
 
 
@@ -245,14 +255,17 @@ def _summary_body(payload, inline, demoted, verdict=None, note=None):
         # 판정이 안전장치에 걸려 내려갔으면 그 사실도 PR 작성자에게 보인다.
         parts += ["> ⚠️ %s" % verdict["guard"]]
 
-    # 머지 전 처리가 필요한 건 — P1·P2 상위 3건. 작성자가 여기만 읽어도 순서가 선다.
-    must = sorted((f for f in everything if f.get("severity") in ("blocking", "suggestion")),
-                  key=lambda f: -SEV[f["severity"]])[:3]
-    if must:
-        # P1 이 있으면 "필요", P2 뿐이면 "권장" — 판정(APPROVE)과 제목이 어긋나지 않게.
-        has_p1 = any(f.get("severity") == "blocking" for f in must)
-        parts += ["", "### 머지 전 처리가 %s 건" % ("필요한" if has_p1 else "권장되는"), ""]
-        for f in must:
+    # Priority and action are separate: optional P2 feedback can accompany approval.
+    must = []
+    for action, heading in (("required", "머지 전 수정 필요"),
+                            ("uncertain", "사람 확인 필요"),
+                            ("optional", "선택적 개선 — 승인에 영향 없음")):
+        group = [f for f in everything if policy.disposition(f) == action]
+        if not group:
+            continue
+        must.extend(group)
+        parts += ["", "### " + heading, ""]
+        for f in group:
             where = "인라인 참고" if f in inline else f["body"].replace("\n", "\n  ")
             parts.append("- **[%s]** `%s` — %s\n  %s" % (_label(f), _loc(f), f["title"], where))
 
@@ -278,10 +291,16 @@ def _summary_body(payload, inline, demoted, verdict=None, note=None):
             label = test["status"]
             base = test.get("baseline") or {}
             if test["status"] == "baseline":
-                label = "baseline — base 에서도 실패, 이 PR 탓이 아님"
+                label = "baseline — 같은 테스트·같은 원인으로 base 에서도 실패, 이 PR 탓이 아님"
             elif test["status"] == "failed" and base.get("exitCode") == 0:
                 label = "failed — base 에서는 통과, 이 PR 이 깨뜨림"
-            parts.append("- 로컬 %s: **%s** (`%s`)" % (test["name"], label, test["command"]))
+            counts = {}
+            for case in test.get('cases', []):
+                counts[case['status']] = counts.get(case['status'], 0) + 1
+            if counts:
+                label += " · " + ", ".join("%s %d" % item for item in sorted(counts.items()))
+            source = "CI 대체" if test.get('source') == 'ci' else "로컬"
+            parts.append("- %s %s: **%s** (`%s`)" % (source, test["name"], label, test["command"]))
         baseline = evidence.get("baseline") or {}
         if baseline.get("status") == "complete":
             parts.append("- 기준선: base `%s` 에서 실패한 명령 %d개를 같은 절차로 재실행했습니다."
@@ -307,6 +326,10 @@ def _summary_body(payload, inline, demoted, verdict=None, note=None):
         parts.append("- 위 수치는 실행 완료 범위입니다. 실제 추적한 코드와 미확인 사항은 리뷰어 요약을 참고하세요.")
         for missing in coverage.get("unavailable") or []:
             parts.append("- 확인하지 못한 diff: `%s` — %s" % (missing["path"], missing["reason"]))
+    for task, replacement in (payload.get('coverageExceptions') or {}).items():
+        if isinstance(replacement, dict):
+            parts.append("- 보완 검토 %s: %s — %s" % (task, ", ".join(replacement.get('coveredBy') or []),
+                                                         replacement.get('reason') or ''))
     for e in payload.get("errors") or []:
         parts.append("- ⚠️ %s — 이 관점은 리뷰에서 빠져 있습니다." % e.split(":")[0])
 
@@ -344,43 +367,25 @@ def _apply_placements(candidates, inline, placements):
 
 
 def _guard_event(event, findings, payload, pcfg, ci=None):
-    """판정이 넘을 수 없는 선. 넘으면 COMMENT 로 내리고 그 이유를 돌려준다.
-
-    판정은 자율이지만, 승인·변경요청은 봇 소유자의 이름으로 나가는 상태 변경이라
-    스스로 모순되는 판정만은 코드에서 막는다.
-
-    승인의 문턱은 `post.approveMaxSeverity`(기본 nit) 다 — 그보다 높은 등급이
-    게시될 지적에 하나라도 남으면 승인하지 않는다. "머지 전 처리가 권장되는 건" 을
-    달아 놓고 ✅ Approve 를 찍은 리뷰가 실제로 나갔고, 그건 읽는 사람에게 둘 중
-    무엇을 믿으라는 건지 알 수 없는 신호다.
-    """
+    """조치 필요성, 핵심 검토 범위, 실행 근거를 확인한 뒤 이벤트를 제한한다."""
     allowed = pcfg.get("allowedEvents") or ["COMMENT"]
-    has_blocking = any(f.get("severity") == "blocking" for f in findings)
     if event not in gh.EVENTS:
         return "COMMENT", "알 수 없는 판정 '%s' 이라 COMMENT 로 게시합니다." % event
     if event not in allowed:
         return "COMMENT", "설정상 %s 는 허용되지 않아 COMMENT 로 게시합니다." % event
-    if event == "APPROVE" and payload.get("coverage") and not payload["coverage"].get("complete"):
-        return "COMMENT", "미완료 묶음 또는 확인하지 못한 diff가 있어 승인하지 않습니다."
-    if event == "APPROVE" and payload.get("errors"):
-        return "COMMENT", "리뷰어 일부가 실패해 절반만 본 리뷰라 승인하지 않습니다."
-    if event == "APPROVE" and has_blocking:
-        return "COMMENT", "blocking 지적이 남아 있어 승인과 모순되므로 COMMENT 로 게시합니다."
+    blocked = policy.finding_block(event, findings)
+    if blocked:
+        return "COMMENT", blocked
     if event == "APPROVE":
-        cap = SEV.get(pcfg.get("approveMaxSeverity") or "nit", 1)
-        above = [f for f in findings if SEV.get(f.get("severity"), 2) > cap]
-        if above:
-            return "COMMENT", ("%s 등급 지적이 %d건 남아 있어 승인하지 않습니다 — 머지 전 "
-                               "처리를 권하면서 승인하는 것은 모순입니다."
-                               % (SEV_LABEL.get(above[0].get("severity"), "P2"), len(above)))
+        blocked = policy.coverage_block(payload)
+        if blocked:
+            return "COMMENT", blocked
     if event == "APPROVE" and pcfg.get("approveNeedsGreenCi", True) and ci in ("failure", "pending"):
         return "COMMENT", "CI가 실패했거나 진행 중인 커밋이라 승인하지 않습니다."
     if event == "APPROVE":
         blocked = runtime.approval_block(payload.get("runtime"))
         if blocked:
             return "COMMENT", blocked
-    if event == "REQUEST_CHANGES" and not has_blocking:
-        return "COMMENT", "blocking 지적 없이 변경 요청을 낼 수 없어 COMMENT 로 게시합니다."
     return event, ""
 
 
@@ -447,7 +452,22 @@ def _announce_skip(r, cfg, state):
     return True
 
 
-def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
+def _cleanup_worktree(base, path, ref, result):
+    errors = list(worktree.cleanup(base, path, ref) or [])
+    if errors:
+        result.setdefault('cleanup_errors', []).extend(errors)
+        for error in errors:
+            _log('워크트리 정리 미완료 — ' + error)
+
+
+def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge=False):
+    try:
+        return _process_pr(pr, cfg, state, force, mcp, force_size, rejudge)
+    finally:
+        store.clear_current()
+
+
+def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge=False):
     """PR 하나를 리뷰하고 게시까지. 결과 dict 를 돌려준다."""
     repo, number = pr["repo"], pr["number"]
     rcfg, pcfg = cfg["review"], cfg["post"]
@@ -472,6 +492,7 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
     result["sha"] = sha
 
     if meta.get("state") != "OPEN":
+        checkpoints.stop(repo, number)
         return dict(result, skipped="열려 있지 않음")
     # 본인 PR 에는 인라인을 달지 않는다 — 지적은 수정 커밋으로 반영하는 것이 규칙이다.
     if me and ((meta.get("author") or {}).get("login") or "").lower() == me.lower():
@@ -491,7 +512,17 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
         _log("  리뷰 요청 이력을 읽지 못했습니다 — 재요청은 다음 틱에서 봅니다: %s"
              % str(e)[:80])
     result["requestedAt"] = (requested or {}).get("at")
-    if not force and store.already_done(state, repo, number, sha,
+    identity = checkpoints.identity(meta, cfg, me)
+    cached = checkpoints.load(repo, number, identity) if (rejudge or pr.get('_rejudge')) else None
+    if pr.get('_rejudge') and not cached:
+        checkpoints.stop(repo, number)
+        return dict(result, skipped="base/head 또는 정책 변경 — 새 리뷰 요청에서 다시 검토")
+    if (cached and result['requestedAt'] and cached.get('requestedAt')
+            and result['requestedAt'] != cached['requestedAt']):
+        cached = None
+    if cached and not force and checkpoints.unchanged_wait(cached, gh.ci_evidence(meta)):
+        return dict(result, skipped="검증 대기 — CI 상태 변화 없음")
+    if not force and not cached and store.already_done(state, repo, number, sha,
                                         rcfg.get("rereviewOnNewCommits", True),
                                         pcfg.get("dryRun", True),
                                         requested_at=result["requestedAt"]):
@@ -525,6 +556,23 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
     meta["_ci"] = gh.ci_state(meta)
     meta["_ci_evidence"] = gh.ci_evidence(meta)
 
+    reuse = (cached or {}).get('_reuse') or {}
+    reuse_review = bool(cached and reuse.get('review'))
+    reuse_runtime = bool(cached and reuse.get('runtime'))
+    saved_runtime = runtime.refresh_ci(cached['payload'].get('runtime') or {}, meta) if reuse_runtime else None
+    execution_ready = bool(saved_runtime) and not runtime.approval_block(saved_runtime)
+    needs_execution = not execution_ready and (not cached or rejudge or not reuse_runtime)
+    result['cache'] = {'review': False, 'runtime': execution_ready, 'decision': False}
+    runtime_ran = False
+    if needs_execution:
+        environment = preflight.check(
+            cfg_mod._merge(rcfg.get('runtime') or {}, entry.get('runtime') or {}), store.STATE_DIR)
+        if not environment['ok']:
+            _log('  실행 환경 대기 — ' + environment['reason'])
+            return dict(result, event='PENDING', pending=True, deferred=True, posted=False,
+                        reason=environment['reason'], preflight=environment,
+                        decision=policy.decision(None, 'PENDING', [], {}, environment=environment))
+
     _log("  리뷰 시작 — 파일 %d · %d줄" % (len(files), churn))
     # 지금 무엇을 보고 있는지 남긴다 — 앱의 라이브 세션 화면이 이걸 읽는다.
     requester = (requested or {}).get("by")
@@ -541,121 +589,164 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
         "startedAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "url": "https://github.com/%s/pull/%s" % (repo, number),
     })
-    wt = base = ref = None
-    ok = False
-    try:
-        wt, wsha, base, ref = worktree.prepare(repo, number, entry.get("localPath"),
-                                               env=genv)
-        if wsha != sha:
-            raise reviewer.ReviewError("리뷰 준비 중 PR head가 바뀌었습니다. 다음 실행에서 다시 확인합니다.")
-        files = worktree.complete_patches(base, sha, meta.get("baseRefOid"), files, env=genv)
-        files_by_path = {f["filename"]: {"postable": gh.postable_lines(f.get("patch")),
-                                         "added": gh.added_lines(f.get("patch")),
-                                         "patch": f.get("patch") or ""}
-                         for f in files}
-        def progress(tag, coverage):
-            _log("  %s — 묶음 검토 %d/%d · 통합 %d/%d" % (
-                tag, coverage["completed"], coverage["planned"],
-                coverage["integrationCompleted"], coverage["integrationPlanned"]))
-            current = store.read_current() or {}
-            current.update(phase=tag, coverage=coverage)
-            store.set_current(current)
-
-        # 리뷰어는 Bash 가 없어 이력을 스스로 캐지 못한다. 워크트리에 남의 PR 코드가
-        # 펼쳐져 있는 이상 거기서 명령이 돌게 할 수는 없으므로, 신뢰되는 이쪽에서
-        # 읽어 프롬프트에 실어 준다. 실패해도 리뷰는 그대로 진행한다.
-        ctx = {"history": worktree.file_history(base, wsha, list(files_by_path)),
-               "comments": gh.file_review_comments(repo, list(files_by_path),
-                                                   account=acct)}
-        _log("  맥락: 커밋이력 %d파일 · 과거 코멘트 %d파일 · 정찰 %s"
-             % (len(ctx["history"]), len(ctx["comments"]),
-                "RepoMind" if mcp else "없음"))
-        def runtime_progress(message):
-            _log("  " + message)
-            current = store.read_current() or {}
-            current.update(phase=message)
-            store.set_current(current)
-
-        meta["_runtime"] = runtime.collect(
-            meta, files, wt, cfg_mod._merge(rcfg.get("runtime") or {}, entry.get("runtime") or {}),
-            progress=runtime_progress, env=genv)
-        # CI may finish while the isolated execution is running.
-        refreshed = gh.pr_meta(repo, number, account=acct)
-        if refreshed.get("headRefOid") != sha or refreshed.get("baseRefOid") != meta.get("baseRefOid"):
-            raise reviewer.ReviewError("실행 검증 중 base/head가 바뀌어 다시 리뷰해야 합니다.",
-                                       cost=meta["_runtime"].get("cost_usd"))
-        meta["_ci"] = gh.ci_state(refreshed)
-        meta["_ci_evidence"] = gh.ci_evidence(refreshed)
-        payload = reviewer.review(meta, files, rcfg["agents"], cwd=wt,
-                                  model=rcfg.get("model"),
-                                  max_turns=rcfg.get("maxTurns", 0),
-                                  timeout=rcfg.get("timeoutSec") or 3600,
-                                  parallel=rcfg.get("parallel", True), ctx=ctx,
-                                  mcp=mcp, batching=rcfg, progress=progress,
-                                  diff_cap=reviewer.diff_char_cap(
-                                      rcfg.get("maxDiffLines")))
-        payload["runtime"] = meta["_runtime"]
-        payload["ci_evidence"] = meta["_ci_evidence"]
-        payload.setdefault("_meta", {})["cost_usd"] = (
-            (payload.get("_meta", {}).get("cost_usd") or 0) + meta["_runtime"].get("cost_usd", 0))
-        result["runtime"] = meta["_runtime"]
-        result["ci_evidence"] = meta["_ci_evidence"]
-        result["review_execution"] = dict(payload.get("_meta") or {})
-        # 반증 — 워크트리가 살아 있는 이 안에서만 가능하다. 판정 단계는 코드를
-        # 볼 수 없으므로 근거의 문체로만 판단한다. 여기서는 코드를 다시 읽는다.
-        # 범위 — 반증보다 먼저다. diff 밖의 지적은 검증할 가치도 비용도 없다.
-        payload["findings"], out_of_scope = _scope_findings(
-            payload.get("findings") or [], files_by_path,
-            strict=rcfg.get("strictScope", True))
-        if out_of_scope:
-            result["out_of_scope"] = len(out_of_scope)
-            _log("  범위 밖 %d건 버림" % len(out_of_scope))
-            for f in out_of_scope:
-                _log("    %s — %s:%s (%s)" % ((f.get("title") or "")[:50],
-                                             f.get("path"), f.get("line") or "?",
-                                             f.get("_why") or "diff 밖"))
-        vcfg = rcfg.get("verify") or {}
-        verify_rows = []
-        if vcfg.get("enabled", True) and payload.get("findings"):
+    verify_rows = []
+    wt = None
+    if reuse_review and (not cached['payload'].get('errors') or not rejudge):
+        _log("  저장된 코드 검토 재사용 — 실행 근거와 최종 판정만 갱신")
+        payload = cached['payload']
+        files = cached['files']
+        files_by_path = {f['filename']: {'postable': gh.postable_lines(f.get('patch')),
+                                        'added': gh.added_lines(f.get('patch')),
+                                        'patch': f.get('patch') or ''} for f in files}
+        result['cache']['review'] = True
+        payload['runtime'] = saved_runtime or {}
+        if needs_execution:
+            wt = base = ref = None
             try:
-                kept, rejected, vcost = reviewer.verify(
-                    payload["findings"], meta, cwd=wt,
-                    model=vcfg.get("model") or "haiku",
-                    timeout=vcfg.get("timeoutSec") or 300,
-                    max_turns=vcfg.get("maxTurns", 15),
-                    workers=vcfg.get("workers", 4),
-                    patches={p: e["patch"] for p, e in files_by_path.items()})
-            except (reviewer.ReviewError, OSError) as e:
-                # 검증이 통째로 실패하면 검증 이전 상태로 돌아간다 — 리뷰를
-                # 버리지는 않는다.
-                _log("  반증 단계 실패 → 지적을 그대로 둡니다: %s" % str(e)[:120])
-            else:
-                payload["findings"] = kept
-                payload["_meta"]["cost_usd"] = round(
-                    (payload["_meta"].get("cost_usd") or 0) + vcost, 4)
-                result["verified"] = {"kept": len(kept), "rejected": len(rejected),
-                                      "cost_usd": vcost}
-                for i, f in enumerate(kept):
-                    f["_vid"] = i          # _validate 의 사본에도 딸려 간다
-                verify_rows = list(kept) + [dict(f, _fate="rejected")
-                                            for f in rejected]
-                _log("  반증 %d건 통과 · %d건 반증됨" % (len(kept), len(rejected)))
-                for f in rejected:
-                    v = f.get("_verify") or {}
-                    _log("    반증됨 (진짜일 가능성 %s/100) %s — %s"
-                         % (v.get("confidence", "?"),
-                            (f.get("title") or "")[:50], (v.get("reason") or "")[:90]))
-        ok = True
-    finally:
-        if wt and base:
-            worktree.cleanup(base, wt, ref)
-        # 모든 리뷰어가 성공했을 때만 세션 기록을 버린다. 하나라도 실패했으면 그
-        # transcript 가 원인을 볼 유일한 단서라 남겨 두고, gc 가 보존 기간 뒤 치운다.
-        if (wt and ok and not payload.get("errors")
-                and (cfg.get("gc") or {}).get("dropSessionOnSuccess", True)):
-            janitor.drop_session(wt)
-        store.clear_current()
+                wt, wsha, base, ref = worktree.prepare(repo, number, entry.get('localPath'), env=genv)
+                if wsha != sha:
+                    raise reviewer.ReviewError("재검증 준비 중 head가 바뀌었습니다")
+                payload['runtime'] = runtime.collect(
+                    meta, files, wt, cfg_mod._merge(rcfg.get('runtime') or {}, entry.get('runtime') or {}),
+                    progress=lambda message: _log('  ' + message), env=genv,
+                    previous=saved_runtime)
+                runtime_ran = True
+            finally:
+                if wt and base:
+                    _cleanup_worktree(base, wt, ref, result)
+        meta['_runtime'] = payload['runtime']
+        payload['ci_evidence'] = meta['_ci_evidence']
+        payload.setdefault('_meta', {})['cost_usd'] = (
+            payload['runtime'].get('cost_usd', 0) if runtime_ran else 0)
+        result.update(runtime=payload['runtime'], ci_evidence=meta['_ci_evidence'], reusedReview=True)
+    else:
+        wt = base = ref = None
+        ok = False
+        try:
+            wt, wsha, base, ref = worktree.prepare(repo, number, entry.get("localPath"),
+                                                   env=genv)
+            if wsha != sha:
+                raise reviewer.ReviewError("리뷰 준비 중 PR head가 바뀌었습니다. 다음 실행에서 다시 확인합니다.")
+            files = worktree.complete_patches(base, sha, meta.get("baseRefOid"), files, env=genv)
+            files_by_path = {f["filename"]: {"postable": gh.postable_lines(f.get("patch")),
+                                             "added": gh.added_lines(f.get("patch")),
+                                             "patch": f.get("patch") or ""}
+                             for f in files}
+            def progress(tag, coverage):
+                _log("  %s — 묶음 검토 %d/%d · 통합 %d/%d" % (
+                    tag, coverage["completed"], coverage["planned"],
+                    coverage["integrationCompleted"], coverage["integrationPlanned"]))
+                current = store.read_current() or {}
+                current.update(phase=tag, coverage=coverage)
+                store.set_current(current)
 
+            # 리뷰어는 Bash 가 없어 이력을 스스로 캐지 못한다. 워크트리에 남의 PR 코드가
+            # 펼쳐져 있는 이상 거기서 명령이 돌게 할 수는 없으므로, 신뢰되는 이쪽에서
+            # 읽어 프롬프트에 실어 준다. 실패해도 리뷰는 그대로 진행한다.
+            ctx = {"history": worktree.file_history(base, wsha, list(files_by_path)),
+                   "comments": gh.file_review_comments(repo, list(files_by_path),
+                                                       account=acct)}
+            _log("  맥락: 커밋이력 %d파일 · 과거 코멘트 %d파일 · 정찰 %s"
+                 % (len(ctx["history"]), len(ctx["comments"]),
+                    "RepoMind" if mcp else "없음"))
+            def runtime_progress(message):
+                _log("  " + message)
+                current = store.read_current() or {}
+                current.update(phase=message)
+                store.set_current(current)
+
+            if needs_execution:
+                meta['_runtime'] = runtime.collect(
+                    meta, files, wt, cfg_mod._merge(rcfg.get('runtime') or {}, entry.get('runtime') or {}),
+                    progress=runtime_progress, env=genv, previous=saved_runtime)
+                runtime_ran = True
+            else:
+                meta['_runtime'] = saved_runtime
+            # CI may finish while the isolated execution is running.
+            refreshed = gh.pr_meta(repo, number, account=acct)
+            if refreshed.get("headRefOid") != sha or refreshed.get("baseRefOid") != meta.get("baseRefOid"):
+                raise reviewer.ReviewError("실행 검증 중 base/head가 바뀌어 다시 리뷰해야 합니다.",
+                                           cost=meta["_runtime"].get("cost_usd"))
+            meta["_ci"] = gh.ci_state(refreshed)
+            meta["_ci_evidence"] = gh.ci_evidence(refreshed)
+            try:
+                payload = reviewer.review(meta, files, rcfg["agents"], cwd=wt,
+                                          model=rcfg.get("model"),
+                                          max_turns=rcfg.get("maxTurns", 0),
+                                          timeout=rcfg.get("timeoutSec") or 3600,
+                                          parallel=rcfg.get("parallel", True), ctx=ctx,
+                                          mcp=mcp, batching=rcfg, progress=progress,
+                                          previous_tasks=cached["payload"].get("_tasks") if reuse_review else None,
+                                          diff_cap=reviewer.diff_char_cap(
+                                              rcfg.get("maxDiffLines")))
+            except reviewer.ReviewError as exc:
+                payload = {'findings': [], 'summary': '코드 검토를 완료하지 못했습니다. 실패 원인 해결 후 검토가 필요합니다.',
+                           'errors': ['review: ' + str(exc)[:300]],
+                           'coverage': {},
+                           '_meta': {'cost_usd': exc.cost or 0, 'agents': {}}}
+            payload["runtime"] = meta["_runtime"]
+            payload["ci_evidence"] = meta["_ci_evidence"]
+            payload.setdefault("_meta", {})["cost_usd"] = (
+                (payload.get("_meta", {}).get("cost_usd") or 0) + (meta["_runtime"].get("cost_usd", 0) if runtime_ran else 0))
+            result["runtime"] = meta["_runtime"]
+            result["ci_evidence"] = meta["_ci_evidence"]
+            result["review_execution"] = dict(payload.get("_meta") or {})
+            # 반증 — 워크트리가 살아 있는 이 안에서만 가능하다. 판정 단계는 코드를
+            # 볼 수 없으므로 근거의 문체로만 판단한다. 여기서는 코드를 다시 읽는다.
+            # 범위 — 반증보다 먼저다. diff 밖의 지적은 검증할 가치도 비용도 없다.
+            payload["findings"], out_of_scope = _scope_findings(
+                payload.get("findings") or [], files_by_path,
+                strict=rcfg.get("strictScope", True))
+            if out_of_scope:
+                result["out_of_scope"] = len(out_of_scope)
+                _log("  범위 밖 %d건 버림" % len(out_of_scope))
+                for f in out_of_scope:
+                    _log("    %s — %s:%s (%s)" % ((f.get("title") or "")[:50],
+                                                 f.get("path"), f.get("line") or "?",
+                                                 f.get("_why") or "diff 밖"))
+            vcfg = rcfg.get("verify") or {}
+            verify_rows = []
+            if vcfg.get("enabled", True) and payload.get("findings"):
+                try:
+                    kept, rejected, vcost = reviewer.verify(
+                        payload["findings"], meta, cwd=wt,
+                        model=vcfg.get("model") or "haiku",
+                        timeout=vcfg.get("timeoutSec") or 300,
+                        max_turns=vcfg.get("maxTurns", 15),
+                        workers=vcfg.get("workers", 4),
+                        patches={p: e["patch"] for p, e in files_by_path.items()})
+                except (reviewer.ReviewError, OSError) as e:
+                    # 검증이 통째로 실패하면 검증 이전 상태로 돌아간다 — 리뷰를
+                    # 버리지는 않는다.
+                    _log("  반증 단계 실패 → 지적을 그대로 둡니다: %s" % str(e)[:120])
+                else:
+                    payload["findings"] = kept
+                    payload["_meta"]["cost_usd"] = round(
+                        (payload["_meta"].get("cost_usd") or 0) + vcost, 4)
+                    result["verified"] = {"kept": len(kept), "rejected": len(rejected),
+                                          "cost_usd": vcost}
+                    for i, f in enumerate(kept):
+                        f["_vid"] = i          # _validate 의 사본에도 딸려 간다
+                    verify_rows = list(kept) + [dict(f, _fate="rejected")
+                                                for f in rejected]
+                    _log("  반증 %d건 통과 · %d건 반증됨" % (len(kept), len(rejected)))
+                    for f in rejected:
+                        v = f.get("_verify") or {}
+                        _log("    반증됨 (진짜일 가능성 %s/100) %s — %s"
+                             % (v.get("confidence", "?"),
+                                (f.get("title") or "")[:50], (v.get("reason") or "")[:90]))
+            ok = True
+        finally:
+            if wt and base:
+                _cleanup_worktree(base, wt, ref, result)
+            # 모든 리뷰어가 성공했을 때만 세션 기록을 버린다. 하나라도 실패했으면 그
+            # transcript 가 원인을 볼 유일한 단서라 남겨 두고, gc 가 보존 기간 뒤 치운다.
+            if (wt and ok and not payload.get("errors")
+                    and (cfg.get("gc") or {}).get("dropSessionOnSuccess", True)):
+                janitor.drop_session(wt)
+            store.clear_current()
+
+    store.clear_current()
     result["coverage"] = payload.get("coverage")
     result["cost_usd"] = (payload.get("_meta") or {}).get("cost_usd")
     if payload.get("errors"):
@@ -664,20 +755,39 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
             _log("  에이전트 실패: %s" % e[:150])
     inline, demoted = _validate(payload.get("findings") or [], files_by_path, pcfg)
 
+    snapshot = {'identity': identity, 'payload': payload, 'files': files,
+                'title': result.get('title') or meta.get('title') or '',
+                'requestedAt': result.get('requestedAt'),
+                'created': (cached or {}).get('created', time.time()),
+                'ci': meta['_ci_evidence'], 'watchCI': False,
+                'waitingSince': (cached or {}).get('waitingSince', time.time())}
     # 판정 — 리뷰어들의 결과를 놓고 event 와 지적별 게시 형태를 정한다.
     candidates = inline + demoted          # 이 순서가 판정에 넘기는 id 다
     verdict = {"event": "COMMENT", "reason": "", "guard": "", "placements": {}}
-    if pcfg.get("autonomous", True):
+    judgment_key = checkpoints.judgment_key(identity, payload, candidates, meta['_ci_evidence'])
+    saved_verdict = checkpoints.saved_judgment(cached, judgment_key)
+    if saved_verdict and pcfg.get('autonomous', True):
+        verdict.update(saved_verdict)
+        result['cache']['decision'] = True
+        _log('  최종 판정 재사용 — 같은 검토·실행 근거·CI')
+    elif pcfg.get("autonomous", True):
         try:
             verdict.update(reviewer.judge(
                 meta, payload, candidates,
                 pcfg.get("allowedEvents") or ["COMMENT"],
-                model=pcfg.get("judgeModel") or "sonnet",
-                approve_max_severity=pcfg.get("approveMaxSeverity") or "nit"))
+                model=pcfg.get("judgeModel") or "sonnet"))
             _log("  판정 %s — %s" % (verdict["event"], verdict["reason"][:80]))
         except reviewer.ReviewError as e:
             _log("  판정 실패 → COMMENT: %s" % str(e)[:120])
             verdict["guard"] = "판정 단계가 실패해 COMMENT 로 게시합니다."
+            verdict["failed"] = True
+            result["cost_usd"] = (result.get("cost_usd") or 0) + (e.cost or 0)
+    if pcfg.get('autonomous', True) and not verdict.get('failed'):
+        snapshot['judgment'] = {'key': judgment_key, 'verdict': json.loads(json.dumps(verdict))}
+    judge_event = verdict["event"] if pcfg.get("autonomous", True) and not verdict.get("failed") else None
+    for index, finding in enumerate(candidates):
+        finding.update((verdict.get("dispositions") or {}).get(index) or {})
+    payload["coverageExceptions"] = verdict.get("coverageExceptions") or {}
     inline, demoted, dropped = _apply_placements(candidates, inline,
                                                  verdict.get("placements") or {})
     verdict["event"], guard = _guard_event(verdict["event"], inline + demoted,
@@ -706,6 +816,27 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
                   event=verdict["event"], reason=verdict["reason"],
                   summary=payload.get("summary") or "")
 
+    def record_decision(event, ci):
+        result['decision'] = policy.decision(
+            judge_event, event, inline + demoted, payload, reason=verdict['reason'],
+            guard=verdict.get('guard', ''), ci=ci, judge_failed=verdict.get('failed', False))
+        result.update(event=event, reason=result['decision']['summary'])
+
+    waiting = (meta.get('_ci') == 'pending' and verdict['event'] == 'COMMENT'
+               and not any(policy.disposition(f) == 'required' for f in inline + demoted)
+               and time.time() - snapshot['waitingSince'] < 86400)
+    snapshot.update(waiting=waiting, watchCI=meta.get('_ci') in ('pending', 'failure'))
+    checkpoints.save(repo, number, snapshot)
+    record_decision("PENDING" if waiting else verdict["event"], meta.get("_ci"))
+    if waiting:
+        _log("  검증 대기 — CI 완료 후 저장된 검토로 재판정합니다")
+        return dict(result, event="PENDING", pending=True, posted=False)
+    if (cached and cached.get('posted') and cached.get('event') == verdict['event']
+            and not rejudge):
+        snapshot.update(posted=True, event=verdict['event'])
+        checkpoints.save(repo, number, snapshot)
+        return dict(result, skipped="재판정 결과 동일 — 중복 게시하지 않음")
+
     # 게시 직전 문장 다듬기. 마크다운 전체가 아니라 **구성 요소**만 넘긴다 —
     # 제목·라벨·문서 구조는 코드가 조립하므로 편집자가 건드릴 일이 없다.
     # 리뷰어별 긴 검토 기록은 다시 생성하지 않는다. 지적 본문과 판정만 다듬는다.
@@ -728,6 +859,7 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
              % (changed, len(targets),
                 " · %d건은 내용이 바뀌어 원문 유지" % reverted if reverted else ""))
 
+    record_decision(verdict["event"], meta.get("_ci"))
     body = _summary_body(payload, inline, demoted, verdict, note=pcfg.get("note"))
     comments = [{"path": f["path"], "line": f["line"], "side": "RIGHT",
                  "body": _comment_body(f)} for f in inline]
@@ -750,8 +882,8 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
         with open(payload_path, "w", encoding="utf-8") as fp:
             json.dump({
                 "repo": repo, "number": number, "title": result.get("title") or "",
-                "sha": sha, "account": me, "event": verdict["event"],
-                "reason": verdict.get("reason") or "", "body": body,
+                "sha": sha, "baseSha": meta.get("baseRefOid"), "account": me, "event": verdict["event"],
+                "reason": result["reason"], "decision": result["decision"], "body": body,
                 "comments": [dict(c, hunk=gh.hunk_around(patches.get(c["path"]), c["line"]))
                              for c in comments],
                 "inline": len(inline), "demoted": len(demoted),
@@ -771,14 +903,26 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
         raise reviewer.ReviewError("리뷰 중 base/head가 바뀌어 게시하지 않았습니다.", cost=result.get("cost_usd"))
 
     latest_ci = gh.ci_evidence(latest)
+    snapshot.update(ci=latest_ci, watchCI=latest_ci['state'] in ('pending', 'failure'))
+    if (latest_ci['state'] == 'pending' and verdict['event'] != 'REQUEST_CHANGES'
+            and time.time() - snapshot['waitingSince'] < 86400):
+        snapshot['waiting'] = True
+        verdict['guard'] = 'CI 완료를 기다립니다.'
+        record_decision('PENDING', latest_ci['state'])
+        result['ci_evidence'] = latest_ci
+        checkpoints.save(repo, number, snapshot)
+        return dict(result, event="PENDING", pending=True, posted=False)
+    snapshot['waiting'] = False
+    checkpoints.save(repo, number, snapshot)
     ci_changed = latest_ci != payload.get("ci_evidence")
     payload["ci_evidence"] = latest_ci
     result["ci_evidence"] = latest_ci
-    event, guard = _guard_event(verdict["event"], inline + demoted, payload, pcfg, latest_ci["state"])
-    if event != verdict["event"]:
+    event, guard = _guard_event(judge_event or verdict["event"], inline + demoted, payload, pcfg, latest_ci["state"])
+    guard_changed = guard != verdict.get("guard", "")
+    if not verdict.get("failed"):
         verdict.update(event=event, guard=guard)
-        result.update(event=event, reason=guard)
-    if ci_changed or guard:
+    record_decision(verdict["event"], latest_ci["state"])
+    if ci_changed or guard or guard_changed:
         body = _summary_body(payload, inline, demoted, verdict, note=pcfg.get("note"))
 
     # 게시는 단계적으로 내려간다. 자기 PR 에 APPROVE 를 내면 422 이므로 이벤트만
@@ -787,6 +931,8 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
         gh.post_review(repo, number, sha, body, comments, event=verdict["event"],
                        account=acct)
         result["posted"] = True
+        snapshot.update(posted=True, event=verdict["event"])
+        checkpoints.save(repo, number, snapshot)
         _verify_posted(repo, number, result, acct, me)
         return result
     except gh.GhError as e:
@@ -801,6 +947,10 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
                                          note=pcfg.get("note")),
                            comments, event="COMMENT", account=acct)
             result.update(posted=True, event="COMMENT", degraded=True, post_error=first)
+            result["decision"] = policy.revise_decision(result.get("decision"), "COMMENT", "PUBLISH_FAILED", first, "github")
+            result["reason"] = result["decision"]["summary"]
+            snapshot.update(posted=True, event="COMMENT")
+            checkpoints.save(repo, number, snapshot)
             _verify_posted(repo, number, result, acct, me)
             return result
         except gh.GhError as e:
@@ -812,6 +962,10 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False):
                                         note=pcfg.get("note")),
                           account=acct)
     result.update(posted=True, event="COMMENT", degraded=True, post_error=first)
+    result["decision"] = policy.revise_decision(result.get("decision"), "COMMENT", "PUBLISH_FAILED", first, "github")
+    result["reason"] = result["decision"]["summary"]
+    snapshot.update(posted=True, event="COMMENT")
+    checkpoints.save(repo, number, snapshot)
     return result
 
 
@@ -849,7 +1003,7 @@ def _publish(repo, number, cfg, preview=False):
         _log("PR 이 열려 있지 않습니다 — 게시하지 않습니다")
         return 1
     head = meta.get("headRefOid")
-    if head != d.get("sha"):
+    if head != d.get("sha") or (d.get("baseSha") and meta.get("baseRefOid") != d["baseSha"]):
         _log("초안을 만든 뒤 새 커밋이 올라왔습니다 (초안 %s → 현재 %s)."
              % (str(d.get("sha"))[:12], str(head)[:12]))
         _log("  인라인 좌표가 어긋나므로 게시하지 않습니다 — `review-bot review %s#%s` 로 다시 리뷰하세요."
@@ -859,9 +1013,12 @@ def _publish(repo, number, cfg, preview=False):
     comments = d.get("comments") or []
     event = d.get("event") or "COMMENT"
     body = d.get("body") or ""
+    decision = d.get("decision") or {"judgeEvent": event, "finalEvent": event, "summary": d.get("reason") or "", "reasons": []}
     if event == "APPROVE" and cfg["post"].get("approveNeedsGreenCi", True) and gh.ci_state(meta) in ("failure", "pending"):
         event = "COMMENT"
-        body += "\n\nCI가 실패했거나 진행 중이어서 승인 대신 코멘트로 게시합니다."
+        message = "CI가 실패했거나 진행 중이어서 승인 대신 코멘트로 게시합니다."
+        body += "\n\n" + message
+        decision = policy.revise_decision(decision, event, "CI_PENDING" if gh.ci_state(meta) == "pending" else "CI_FAILED", message, "ci")
     if preview:
         print("게시 예정 — %s#%s · %s · 인라인 %d · 본문 %d"
               % (repo, number, event, len(comments), d.get("demoted") or 0))
@@ -876,7 +1033,7 @@ def _publish(repo, number, cfg, preview=False):
               "account": me, "sha": head, "event": event, "published": True,
               "inline": len(comments), "demoted": d.get("demoted") or 0,
               "dropped": len(d.get("dropped") or []), "cost_usd": 0.0,
-              "reason": d.get("reason") or ""}
+              "reason": decision.get("summary") or "", "decision": decision}
     first = None
     try:
         gh.post_review(repo, number, head, body, comments, event=event, account=acct)
@@ -899,6 +1056,9 @@ def _publish(repo, number, cfg, preview=False):
             result.update(posted=True, event="COMMENT", degraded=True,
                           inline=0, post_error=first)
 
+    if result.get("degraded"):
+        result["decision"] = policy.revise_decision(result.get("decision"), result["event"], "PUBLISH_FAILED", first, "github")
+        result["reason"] = result["decision"]["summary"]
     _verify_posted(repo, number, result, acct, me)
     state = store.load()
     prev = state.get(store.key(repo, number)) or {}
@@ -906,7 +1066,7 @@ def _publish(repo, number, cfg, preview=False):
                demoted=result.get("demoted"), posted=True,
                cost_usd=prev.get("cost_usd") or d.get("cost_usd"),
                requestedAt=d.get("requestedAt"),
-               event=result.get("event"))
+               event=result.get("event"), decision=result.get("decision"))
     store.save(state)
     store.log_run(result)
     try:
@@ -951,6 +1111,12 @@ def cmd_forget(args, cfg):
     runs.jsonl 은 덧붙이기만 하는 파일이라 부분 삭제는 통째로 다시 쓰는 수밖에 없다.
     리뷰가 도는 중에 겹치면 그 사이 덧붙은 기록을 잃으므로 틱과 같은 lock 을 잡는다.
     """
+    if getattr(args, 'artifacts', False) and (not args.target or args.all or args.at or args.older_than):
+        print('--artifacts 는 PR 하나를 지정할 때만 사용할 수 있습니다.')
+        return 2
+    if getattr(args, 'dry_run', False) and not getattr(args, 'artifacts', False):
+        print('--dry-run 은 --artifacts 와 함께 사용하세요.')
+        return 2
     if not (args.target or args.all or args.older_than):
         print("무엇을 지울지 정하세요 — <owner/repo#123> 또는 --all 또는 --older-than <일>")
         return 1
@@ -958,6 +1124,11 @@ def cmd_forget(args, cfg):
         _log("틱이 돌고 있습니다 — 끝난 뒤 다시 부르세요.")
         return 1
     try:
+        if getattr(args, 'artifacts', False):
+            repo, number = _parse_target(args.target)
+            report = cleanup.clean_pr(repo, number, reset=args.reset, preview=args.dry_run)
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return 1 if report.get('errors') else 0
         rows = store.read_runs()
         before = len(rows)
         repo = number = None
@@ -1145,17 +1316,29 @@ def cmd_tick(args, cfg):
         store.release_lock()
 
 
+def _recover_resources(cfg):
+    containers = resources.sweep_containers()
+    trees = worktree.sweep(cfg.get('repos'), blocked=containers['blocked'])
+    errors = containers['errors'] + trees['errors']
+    for error in errors:
+        _log('리소스 정리 미완료 — ' + error)
+    return containers, trees, errors
+
+
 def _gc(cfg, verbose=False):
     """부산물을 치운다. 틱마다 조용히 돌고, gc 커맨드로 직접 부를 수도 있다."""
     g = cfg.get("gc") or {}
     out = []
-    swept = worktree.sweep(cfg.get("repos"))
+    containers, trees, errors = _recover_resources(cfg)
+    swept = trees['removed']
+    if containers['removed']:
+        out.append('고아 컨테이너 %d개' % len(containers['removed']))
     if swept:
-        out.append("워크트리 %d개" % swept)
+        out.append('워크트리·ref %d건' % swept)
     ns, freed = janitor.sweep_sessions(g.get("sessionDays", 3))
     if ns:
         out.append("claude 세션 %d개 (%s)" % (ns, janitor.human(freed)))
-    ne = janitor.prune_evidence(g.get("evidenceDays", 14))
+    ne = janitor.prune_evidence(g.get("evidenceDays", 14), blocked=containers["blocked"])
     if ne:
         out.append("실행 검증 자료 %d개" % ne)
     nd = janitor.prune_drafts(g.get("draftDays", 14))
@@ -1182,14 +1365,22 @@ def _gc(cfg, verbose=False):
         out.append("오래된 기록 %d건" % npr)
     if out and (verbose or swept):
         _log("정리: " + " · ".join(out))
-    elif verbose:
+    elif verbose and not errors:
         _log("정리할 것 없음")
-    return out
+    if errors:
+        _log('정리 미완료 %d건 — 다음 실행에서 다시 회수합니다.' % len(errors))
+    return {'cleaned': out, 'errors': errors}
 
 
 def cmd_gc(args, cfg):
-    _gc(cfg, verbose=True)
-    return 0
+    if not store.acquire_lock():
+        _log('리뷰가 실행 중이라 정리하지 않습니다. 완료 후 다시 실행하세요.')
+        return 1
+    try:
+        report = _gc(cfg, verbose=True)
+        return 1 if report['errors'] else 0
+    finally:
+        store.release_lock()
 
 
 def _accounts(cfg):
@@ -1211,6 +1402,7 @@ def _tick(cfg):
 
     # 계정마다 따로 조회한다. 리뷰 요청은 @me 기준이라 계정이 다르면 목록이 다르다.
     targets, total = [], 0
+    insight_targets = []
     for acct, repos in _accounts(cfg).items():
         try:
             me = gh.whoami(acct)
@@ -1232,6 +1424,7 @@ def _tick(cfg):
                 prs = received.result()
                 total += len(prs)
                 targets += [p for p in prs if p["repo"] in repos]
+                insight_targets.extend((acct, p, "incoming") for p in prs if p["repo"] in repos)
             except gh.GhError as e:
                 _log("리뷰 요청 조회 실패 (%s): %s" % (acct or "전역 gh", e))
             try:
@@ -1240,8 +1433,21 @@ def _tick(cfg):
                 for warning in warnings:
                     _log("리뷰 답변 조회 주의: " + warning)
                 replies.check(outgoing, me, cfg.get("notify") or {}, _log)
+                insight_targets.extend((acct, p, "outgoing") for p in outgoing if p["repo"] in repos)
             except (gh.GhError, OSError, ValueError) as e:
                 _log("리뷰 답변 확인 실패 (%s): %s" % (acct or "전역 gh", e))
+    try:
+        insights.refresh(insight_targets, cfg, _log)
+    except Exception:
+        _log("요청 분석 실패 — 기존 리뷰를 계속합니다")
+    try:
+        selection.refresh(insight_targets, cfg, _log)
+    except Exception:
+        _log("Jev 분류 실패 — 기존 리뷰를 계속합니다")
+    by_pr = {(p['repo'], p['number']): p for p in targets}
+    for pending in checkpoints.watching(cfg):
+        by_pr[(pending['repo'], pending['number'])] = pending
+    targets = list(by_pr.values())
     _log("리뷰 요청 %d건 (감시 대상 %d건)" % (total, len(targets)))
 
     cap = cfg["limits"].get("maxPerTick") or 2
@@ -1275,14 +1481,15 @@ def _tick(cfg):
         store.mark(state, r["repo"], r["number"], r["sha"],
                    inline=r.get("inline"), demoted=r.get("demoted"),
                    posted=r.get("posted"), cost_usd=r.get("cost_usd"),
-                   requestedAt=r.get("requestedAt"), event=r.get("event"))
+                   requestedAt=r.get("requestedAt"), event=r.get("event"), pending=r.get("pending", False), decision=r.get("decision"))
         store.save(state)
         store.log_run(r)
-        where = "초안" if r.get("draft") else ("게시" if r.get("posted") else "-")
+        where = "검증 대기" if r.get("pending") else "초안" if r.get("draft") else ("게시" if r.get("posted") else "-")
         _log("  %s — %s · inline %d · 요약 %d"
              % (where, EVENT_LABEL.get(r.get("event"), r.get("event") or "-"),
                 r.get("inline") or 0, r.get("demoted") or 0))
 
+    done = [r for r in done if not r.get("pending")]
     if done and cfg["notify"].get("enabled", True):
         head = done[0]
         title = "리뷰 %d건 %s" % (len(done), "초안" if head.get("draft") else "게시")
@@ -1337,7 +1544,7 @@ def cmd_review(args, cfg):
         _log("틱이 돌고 있습니다 — 끝난 뒤 다시 부르거나 `review-bot pause` 로 멈추세요.")
         return 1
     try:
-        worktree.sweep(cfg.get("repos"))
+        _recover_resources(cfg)
         state = store.load()
         pr = {"repo": repo, "number": number, "title": ""}
         mcp, blocked = _connect_repomind(cfg)
@@ -1345,7 +1552,8 @@ def cmd_review(args, cfg):
             return 1
         try:
             r = process_pr(pr, cfg, state, force=True, mcp=mcp,
-                           force_size=getattr(args, "force_size", False))
+                           force_size=getattr(args, "force_size", False),
+                           rejudge=getattr(args, "rejudge", False))
         except (gh.GhError, worktree.WorktreeError, reviewer.ReviewError) as e:
             _log("실패: %s" % str(e)[:300])
             store.log_run({"repo": repo, "number": number, "error": str(e)[:300]})
@@ -1358,7 +1566,7 @@ def cmd_review(args, cfg):
         store.mark(state, repo, number, r["sha"], inline=r.get("inline"),
                    demoted=r.get("demoted"), posted=r.get("posted"),
                    cost_usd=r.get("cost_usd"),
-                   requestedAt=r.get("requestedAt"), event=r.get("event"))
+                   requestedAt=r.get("requestedAt"), event=r.get("event"), pending=r.get("pending", False), decision=r.get("decision"))
         store.save(state)
         store.log_run(r)
         print(json.dumps(r, ensure_ascii=False, indent=2))
@@ -1494,6 +1702,9 @@ def status_payload(cfg, skip_details=False):
     groups = _accounts(cfg)
     state = store.load()
     accounts, errors, prs = [], drafts_mod.reconcile(cfg), []
+    insight_cache = insights.load()
+    selection_cache = selection.load()
+    selection_settings = selection.registration()
     outgoing, outgoing_errors, outgoing_failed_accounts = [], [], []
     for acct, repos in groups.items():
         info = {"account": acct, "repos": sorted(repos), "tokenOwner": None, "ok": False}
@@ -1505,7 +1716,7 @@ def status_payload(cfg, skip_details=False):
             info["error"] = str(e)[:200]
         accounts.append(info)
         try:
-            prs += gh.review_requests(account=acct)
+            prs += [dict(p, account=acct or "global") for p in gh.review_requests(account=acct)]
         except gh.GhError as e:
             errors.append("리뷰 요청 조회 실패 (%s): %s" % (acct or "전역 gh", str(e)[:200]))
         try:
@@ -1515,6 +1726,12 @@ def status_payload(cfg, skip_details=False):
         except gh.GhError as e:
             outgoing_failed_accounts.append(acct or "global")
             outgoing_errors.append("보낸 요청 조회 실패 (%s): %s" % (acct or "전역 gh", str(e)[:200]))
+    credential_state = None
+    if insights.settings(cfg)['enabled'] and any(
+        insights.keychain_failure(insight_cache.get(insights.key(p.get('account'), p, direction)))
+        for direction, rows in (('incoming', prs), ('outgoing', outgoing)) for p in rows
+    ):
+        credential_state = insight_api.key_state()
     known = set(cfg.get("repos") or {})
     pending = []
     for p in prs:
@@ -1523,6 +1740,10 @@ def status_payload(cfg, skip_details=False):
             st = "unwatched"
         elif not rec:
             st = "new"
+        elif rec.get("pending"):
+            st = "pending"
+        elif rec.get('discarded'):
+            st = 'discarded'
         elif rec.get("posted") is False:
             st = "draft"
         else:
@@ -1547,7 +1768,18 @@ def status_payload(cfg, skip_details=False):
                 item["changedFiles"] = meta.get("changedFiles")
             except gh.GhError:
                 item["issues"] = []
+        item["insight"] = insights.view(insight_cache, cfg, p.get("account"), p, "incoming", rec, credential_state=credential_state)
+        item["insight"]["selection"] = selection.view(selection_cache, selection_settings, p.get("account"), p, "incoming", cfg)
         pending.append(item)
+    for p in outgoing:
+        p["insight"] = insights.view(insight_cache, cfg, p.get("account"), p, "outgoing", credential_state=credential_state)
+        p["insight"]["selection"] = selection.view(selection_cache, selection_settings, p.get("account"), p, "outgoing", cfg)
+    visible_tasks = {home_tasks.identity(p["repo"], p["number"], p.get("account"), direction)
+                     for direction, rows in (("incoming", pending), ("outgoing", outgoing)) for p in rows}
+    try:
+        home_tasks.reconcile(visible_tasks)
+    except (home_tasks.TaskError, OSError):
+        errors.append("완료한 할 일의 새 요청 여부를 확인하지 못했습니다")
     return {
         "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "accounts": accounts,
@@ -1570,6 +1802,8 @@ def status_payload(cfg, skip_details=False):
         "pending": pending,
         "outgoing": list({(p["account"], p["repo"], p["number"]): p for p in outgoing}.values()),
         "outgoingErrors": outgoing_errors,
+        "insightSettings": insights.settings(cfg),
+        "selectionSettings": selection_settings,
         "outgoingFailedAccounts": outgoing_failed_accounts,
         "drafts": [{"repo": d.get("repo"), "number": d.get("number"),
                     "title": d.get("title"), "event": d.get("event"),
@@ -1605,7 +1839,7 @@ def cmd_status(args, cfg):
     prs = []
     for acct in groups:
         try:
-            prs += gh.review_requests(account=acct)
+            prs += [dict(p, account=acct or "global") for p in gh.review_requests(account=acct)]
         except gh.GhError as e:
             print("리뷰 요청 조회 실패 (%s): %s" % (acct or "전역 gh", e))
     known = set(cfg.get("repos") or {})
@@ -1614,6 +1848,10 @@ def cmd_status(args, cfg):
         rec = state.get(store.key(p["repo"], p["number"]))
         if not rec:
             mark = "· 대기" if p["repo"] in known else "  (감시 대상 아님)"
+        elif rec.get("pending"):
+            mark = "⏳ 검증 대기"
+        elif rec.get('discarded'):
+            mark = '정리됨'
         elif rec.get("posted") is False:
             # 초안만 있는 기록. 게시 모드에서는 다음 틱이 다시 리뷰해서 게시한다.
             mark = "◦ 초안만" if cfg["post"].get("dryRun", True) else "◦ 초안만 → 재리뷰"
@@ -2078,6 +2316,10 @@ def cmd_doctor(args, cfg):
         p = shutil.which(tool)
         print("%-8s %s" % (tool, p or "없음 ❌"))
         ok = ok and bool(p)
+    environment = preflight.check(cfg['review'].get('runtime') or {}, store.STATE_DIR)
+    for check in environment['checks']:
+        print('%-8s %s %s' % ('실행 환경', '✓' if check['ok'] else '❌', check['message']))
+    ok = ok and environment['ok']
     print("%-8s %s (전역 활성)" % ("gh 계정", gh.active_account() or "미인증 ❌"))
     for acct, repos in _accounts(cfg).items():
         if not acct:
@@ -2163,7 +2405,8 @@ def _install_signal_handlers():
     """
     def bye(signum, _frame):
         killed = reviewer.kill_children()
-        runtime.kill_containers()
+        for error in runtime.kill_containers():
+            _log("리소스 정리 미완료 — " + error)
         _log("신호 %d 를 받아 정리하고 종료합니다%s"
              % (signum, " — 리뷰어 %d개 종료" % killed if killed else ""))
         try:
@@ -2182,6 +2425,56 @@ def _install_signal_handlers():
             pass                 # 메인 스레드가 아니면 걸 수 없다 — 그냥 넘어간다
 
 
+def cmd_task(args, cfg):
+    try:
+        if args.action == 'start':
+            repo, number = _parse_target(args.target)
+            row = home_tasks.start(repo, number, args.account, args.direction, args.title or '', args.label or '', args.agent)
+        elif args.action == 'complete':
+            row = home_tasks.complete(args.target)
+        elif args.action == 'reopen':
+            row = home_tasks.change(args.target, 'reopened')
+        elif args.action == 'stop':
+            row = home_tasks.change(args.target, 'stopped')
+        else:
+            row = home_tasks.change(args.target, 'cancelled')
+        print(json.dumps({k: v for k, v in row.items() if k != "baseline"}, ensure_ascii=False))
+        return 0
+    except (home_tasks.TaskError, OSError) as exc:
+        print(str(exc))
+        return 1
+
+
+def cmd_insights(args, cfg):
+    if args.action == 'check':
+        try:
+            insights.check_connection(cfg)
+        except insights.InsightError as exc:
+            print(str(exc))
+            return 1
+        print('Claude API 인증 성공 — 모델 목록 조회로 확인했습니다.')
+        return 0
+    if args.action == 'status':
+        print(json.dumps(dict(insights.settings(cfg), keyState=insight_api.key_state()), ensure_ascii=False))
+        return 0
+    raw = cfg_mod.load_raw(args.config)
+    options = raw.setdefault('insights', {})
+    if args.action in ('enable', 'disable'):
+        options['enabled'] = args.action == 'enable'
+    elif args.action == 'workspace':
+        value = args.value or ''
+        if not insights.valid_workspace(value):
+            raise SystemExit('wrkspc_로 시작하는 Workspace ID를 입력하세요')
+        options['workspaceID'] = value
+    elif args.action == 'model':
+        if not args.value or insights.settings({'insights': {'model': args.value}})['model'] != args.value:
+            raise SystemExit('claude-로 시작하는 API 모델 ID를 입력하세요')
+        options['model'] = args.value
+    cfg_mod.save_raw(raw, args.config)
+    print('요청 분석 설정을 저장했습니다. 다음 틱부터 적용됩니다.')
+    return 0
+
+
 def main():
     _install_signal_handlers()
     ap = argparse.ArgumentParser(prog="review-bot", description=__doc__,
@@ -2189,8 +2482,22 @@ def main():
     ap.add_argument("--config", help="설정 파일 경로")
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser("tick").set_defaults(fn=cmd_tick)
+    task = sub.add_parser("task", help="홈 할 일의 작업 시작·완료·다시 열기")
+    task.add_argument("action", choices=["start", "complete", "reopen", "cancel", "stop"])
+    task.add_argument("target")
+    task.add_argument("--account")
+    task.add_argument("--direction", choices=["incoming", "outgoing"], default="outgoing")
+    task.add_argument("--title")
+    task.add_argument("--label")
+    task.add_argument("--agent", choices=["codex", "claude", "manual"], default="manual")
+    task.set_defaults(fn=cmd_task)
+    ai = sub.add_parser("insights", help="Claude 요청 분석 설정 (키는 앱 설정에서 등록)")
+    ai.add_argument("action", choices=["status", "enable", "disable", "model", "workspace", "check"])
+    ai.add_argument("value", nargs="?")
+    ai.set_defaults(fn=cmd_insights)
     r = sub.add_parser("review")
     r.add_argument("target")
+    r.add_argument("--rejudge", action="store_true", help="동일 base/head의 코드 검토를 재사용하고 누락 검증·판정만 갱신")
     r.add_argument("--agents", help="이번만 이 리뷰어들로 (쉼표 구분). 빠진 관점만 보완할 때")
     r.add_argument("--note", help="요약 본문 맨 위에 실을 안내 — 왜 또 리뷰가 올라왔는지")
     r.add_argument("--force-size", action="store_true",
@@ -2251,6 +2558,8 @@ def main():
     fg.add_argument("target", nargs="?", help="owner/repo#123 — 그 PR 의 이력")
     fg.add_argument("--at", help="그 PR 의 특정 기록 하나 (runs 의 at 값)")
     fg.add_argument("--all", action="store_true", help="이력 전체")
+    fg.add_argument('--artifacts', action='store_true', help='이 PR의 초안·검증 자료·재판정 기록까지 정리')
+    fg.add_argument('--dry-run', action='store_true', help='--artifacts 정리 대상만 미리 확인')
     fg.add_argument("--older-than", type=float, metavar="일", help="N일 지난 기록")
     fg.add_argument("--reset", action="store_true",
                     help="처리 지문까지 지워 다시 리뷰하게 한다 (비용 발생)")

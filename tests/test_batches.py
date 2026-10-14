@@ -99,11 +99,11 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(result['coverage']['completed'], 3)
         self.assertEqual(result['coverage']['integrationCompleted'], 0)
         self.assertFalse(result['coverage']['complete'])
-        self.assertEqual(result['_meta']['cost_usd'], 7)
+        self.assertEqual(result['_meta']['cost_usd'], 15)
         bot = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'review-bot'))
         event, reason = bot['_guard_event']('APPROVE', [], result, {'allowedEvents': ['APPROVE']})
         self.assertEqual(event, 'COMMENT')
-        self.assertIn('미완료', reason)
+        self.assertIn('보완', reason)
         self.assertIn('3/4', bot['_summary_body'](result, [], []))
 
     def test_small_pr_has_no_integration_and_binary_cannot_be_approved(self):
@@ -116,7 +116,7 @@ class ReviewTests(unittest.TestCase):
             raise reviewer.ReviewError('bad', cost=3)
         with self.assertRaises(reviewer.ReviewError) as caught:
             self.review([changed('a.py')], fail)
-        self.assertEqual(caught.exception.cost, 6)
+        self.assertEqual(caught.exception.cost, 18)
 
     def test_large_verification_includes_anchor_and_full_diff(self):
         patch = changed('large.py', 30000)['patch']

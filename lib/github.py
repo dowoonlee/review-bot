@@ -237,12 +237,12 @@ def sent_review_requests(account=None):
     return out, warnings
 
 
-def pr_meta(repo, number, account=None):
+def pr_meta(repo, number, account=None, timeout=120):
     return _gh_json([
         "pr", "view", str(number), "--repo", repo, "--json",
         "headRefOid,headRefName,baseRefOid,baseRefName,isDraft,additions,deletions,"
-        "changedFiles,title,body,author,url,mergeable,state,statusCheckRollup",
-    ], account=account)
+        "changedFiles,title,body,author,url,mergeable,state,updatedAt,statusCheckRollup",
+    ], account=account, timeout=timeout)
 
 
 def ci_state(meta):
@@ -504,7 +504,7 @@ query($owner: String!, $name: String!, $number: Int!) {
 """
 
 
-def last_review_request(repo, number, login, account=None):
+def last_review_request(repo, number, login, account=None, timeout=60):
     """나에게 리뷰를 요청한 **마지막** 사건 — `{"at": ISO8601(UTC), "by": 로그인}`.
 
     리뷰 요청은 PR 본문이 아니라 타임라인에만 남는다. 같은 커밋 그대로 리뷰를 다시
@@ -524,7 +524,7 @@ def last_review_request(repo, number, login, account=None):
                         "-f", "query=" + _LAST_REQUEST_QUERY,
                         "-f", "owner=" + owner, "-f", "name=" + name,
                         "-F", "number=%d" % int(number)],
-                       timeout=60, account=account)
+                       timeout=timeout, account=account)
     if payload.get("errors"):
         raise GhError("리뷰 요청 이력 GraphQL 조회 실패 (%s#%s)" % (repo, number))
     pr = (((payload.get("data") or {}).get("repository") or {}).get("pullRequest") or {})
@@ -608,3 +608,88 @@ def file_review_comments(repo, paths, account=None, per_file=3, max_files=10):
         out.setdefault(path, []).append(
             "%s (PR #%s): %s" % (who, pr or "?", body))
     return out
+
+
+_REQUEST_CONTEXT = '''
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      title body url headRefOid baseRefOid isDraft reviewDecision mergeable
+      author { login }
+      commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+      reviews(last: 50) {
+        pageInfo { hasPreviousPage }
+        nodes { id body url state submittedAt author { login } commit { oid } }
+      }
+      comments(last: 30) {
+        pageInfo { hasPreviousPage }
+        nodes { id body url updatedAt author { login } }
+      }
+      reviewThreads(last: 50) {
+        pageInfo { hasPreviousPage }
+        nodes { id isResolved isOutdated path line comments(last: 20) {
+          pageInfo { hasPreviousPage }
+          nodes { id body url updatedAt author { login } originalCommit { oid } }
+        } }
+      }
+    }
+  }
+}
+'''
+
+
+def request_context(repo, number, account=None, bounded=True):
+    """Bounded conversation snapshot, including edits/replies/resolution in the digest.
+
+    Incomplete connections/text are explicitly marked; no inference that unseen feedback is done.
+    """
+    owner, name = repo.split('/', 1)
+    payload = _gh_json(['api', 'graphql', '-f', 'query=' + _REQUEST_CONTEXT,
+                       '-f', 'owner=' + owner, '-f', 'name=' + name,
+                       '-F', 'number=%d' % number], timeout=30, account=account)
+    if payload.get('errors'):
+        raise GhError('리뷰 대화 조회 실패')
+    pr = ((payload.get('data') or {}).get('repository') or {}).get('pullRequest')
+    if not pr:
+        raise GhError('PR 대화를 읽지 못했습니다')
+    incomplete = False
+    remaining = 45000
+    def clip(text):
+        nonlocal incomplete, remaining
+        text = text or ''
+        clipped = text[:min(4000, remaining)]
+        if len(clipped) != len(text): incomplete = True
+        remaining -= len(clipped)
+        return clipped
+    sources = []
+    sources.append({'id': 'pr', 'url': pr['url'], 'body': pr.get('body'),
+                    'author': (pr.get('author') or {}).get('login')})
+    for field in ('reviews', 'comments', 'reviewThreads'):
+        connection = pr.get(field) or {}
+        if (connection.get('pageInfo') or {}).get('hasPreviousPage'): incomplete = True
+        for node in connection.get('nodes') or []:
+            if field == 'reviewThreads':
+                comments = node.get('comments') or {}
+                if (comments.get('pageInfo') or {}).get('hasPreviousPage'): incomplete = True
+                rows = comments.get('nodes') or []
+            else:
+                rows = [node]
+            for comment in rows:
+                sources.append({'id': comment['id'], 'url': comment['url'],
+                    'body': comment.get('body'), 'author': (comment.get('author') or {}).get('login'),
+                    'state': comment.get('state'), 'at': comment.get('updatedAt') or comment.get('submittedAt'),
+                    'commit': (comment.get('commit') or comment.get('originalCommit') or {}).get('oid'),
+                    'thread': node['id'] if field == 'reviewThreads' else None,
+                    'resolved': bool(node.get('isResolved')), 'outdated': bool(node.get('isOutdated')),
+                    'path': node.get('path'), 'line': node.get('line')})
+    if bounded and len(sources) > 100:
+        incomplete = True
+        sources = sources[:1] + sources[-99:]
+    for source in sources:
+        source['body'] = clip(source.get('body')) if bounded else (source.get('body') or '')
+    commits = (pr.get('commits') or {}).get('nodes') or []
+    checks = ((commits[-1].get('commit') or {}).get('statusCheckRollup') or {}).get('state') if commits else None
+    return {'repo': repo, 'number': number, 'title': pr['title'], 'head': pr['headRefOid'],
+            'base': pr['baseRefOid'], 'isDraft': pr['isDraft'], 'reviewDecision': pr.get('reviewDecision'),
+            'mergeable': pr.get('mergeable'), 'checksState': checks,
+            'sources': sources, 'incomplete': incomplete}

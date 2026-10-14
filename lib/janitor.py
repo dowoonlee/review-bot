@@ -11,6 +11,8 @@ import re
 import shutil
 import time
 
+from lib import resources
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE_DIR = os.path.join(ROOT, "state")
 WT_DIR = os.path.join(STATE_DIR, "wt")
@@ -168,14 +170,40 @@ def human(n):
     return "%.1fTB" % n
 
 
-def prune_evidence(keep_days=14):
-    """Remove completed evidence runs after retention; leave active directories alone."""
+def prune_evidence(keep_days=14, blocked=()):
+    """Reap old interrupted runs too; preserve live/unknown Docker owners."""
+    if '*' in blocked:
+        return 0
     cutoff = time.time() - keep_days * 86400
     removed = 0
     root = Path(STATE_DIR, "evidence")
-    for result in root.glob("*/*/*/*/result.json"):
-        if result.is_symlink() or result.stat().st_mtime >= cutoff:
+    for run in root.glob('*/*/*/*'):
+        if not run.is_dir() or any(p.is_symlink() for p in (run, *run.parents) if p.is_relative_to(root)):
             continue
-        shutil.rmtree(result.parent)
+        owner = resources.read_owner(run / 'owner.json')
+        if owner.get('instance') and (owner['instance'] != resources.instance_id() or
+                                     resources.alive(owner) or resources.owner_key(owner) in blocked):
+            continue
+        result = run / 'result.json'
+        if result.is_symlink():
+            continue
+        latest = result.stat().st_mtime if result.exists() else max(
+            [run.stat().st_mtime] + [p.stat().st_mtime for p in run.rglob('*') if not p.is_symlink()])
+        # Archives are transport temporaries, never review evidence.
+        if owner.get('instance') == resources.instance_id():
+            for name in ('source.tar', 'screenshots.tar', 'baseline/source.tar'):
+                temporary = run / name
+                if not temporary.parent.is_symlink():
+                    temporary.unlink(missing_ok=True)
+        if latest >= cutoff:
+            continue
+        shutil.rmtree(run)
         removed += 1
+        parent = run.parent
+        while parent != root and parent.is_relative_to(root):
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
     return removed

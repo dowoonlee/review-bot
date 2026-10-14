@@ -1,5 +1,6 @@
 """처리 이력 — 같은 PR 을 같은 커밋으로 두 번 리뷰하지 않기 위한 지문."""
 import json
+import fcntl
 import os
 import time
 
@@ -84,8 +85,14 @@ def already_done(data, repo, number, sha, rereview_on_new, dry_run=False,
     rec = data.get(key(repo, number))
     if not rec:
         return False
+    if rec.get('pending'):
+        return False  # Environment/CI waiting is not a completed review.
     if rereview_on_new and rec.get("sha") != sha:
         return False
+    if requested_at and requested_at != rec.get('requestedAt'):
+        return False
+    if rec.get('discarded'):
+        return True
     if rec.get("posted") is False:
         # 그 커밋 그대로 게시를 기다리는 초안이 있으면 다시 리뷰하지 않는다 — 사람이
         # 읽고 게시하면 될 일이라 돈을 두 번 쓸 이유가 없다. 초안이 사라졌거나(게시함)
@@ -94,8 +101,6 @@ def already_done(data, repo, number, sha, rereview_on_new, dry_run=False,
             return True
         if not dry_run:
             return False
-    if requested_at and requested_at != rec.get("requestedAt"):
-        return False
     return True
 
 
@@ -356,6 +361,9 @@ def read_current():
 
 
 LOCK = os.path.join(STATE_DIR, "tick.lock")
+_LOCK_HANDLE = None
+_LOCK_OWNER = None
+_LOCK_MARKER = None
 
 
 def acquire_lock():
@@ -364,22 +372,57 @@ def acquire_lock():
     launchd 는 이전 실행이 끝났는지 보지 않고 StartInterval 마다 새로 띄운다.
     리뷰 한 건이 15분을 넘길 수 있으므로 겹침은 예외가 아니라 일상이다.
     """
+    global _LOCK_HANDLE, _LOCK_OWNER, _LOCK_MARKER
+    if _LOCK_HANDLE is not None:
+        return False
     _ensure()
-    if os.path.exists(LOCK):
-        try:
-            with open(LOCK, encoding="utf-8") as f:
-                pid = int((f.read().split() or ["0"])[0])
-            os.kill(pid, 0)          # 살아 있으면 예외가 나지 않는다
-            return False
-        except (ValueError, OSError):
-            pass                     # 죽은 주인이 남긴 lock — 빼앗는다
-    with open(LOCK, "w", encoding="utf-8") as f:
-        f.write("%d %s\n" % (os.getpid(), time.strftime("%Y-%m-%dT%H:%M:%S")))
+    # The guard inode is persistent. Unlinking a flock file creates a race where
+    # contenders can lock different inodes. tick.lock remains the UI's PID marker.
+    guard = open(LOCK + '.guard', 'a+')
+    try:
+        fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        guard.close()
+        return False
+    try:
+        # Respect an older bot that does not yet hold the advisory lock.
+        if os.path.exists(LOCK):
+            with open(LOCK, encoding='utf-8') as f:
+                parts = f.read().split()
+            if len(parts) < 3 or parts[2] != 'v2':
+                try:
+                    pid = int(parts[0]) if parts else 0
+                except ValueError:
+                    pid = 0
+                if pid > 0:
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        pass
+                    except PermissionError:
+                        guard.close()
+                        return False
+                    else:
+                        guard.close()
+                        return False
+        with open(LOCK, 'w', encoding='utf-8') as f:
+            f.write('%d %s v2\n' % (os.getpid(), time.strftime('%Y-%m-%dT%H:%M:%S')))
+    except BaseException:
+        guard.close()
+        raise
+    _LOCK_HANDLE, _LOCK_OWNER, _LOCK_MARKER = guard, os.getpid(), LOCK
     return True
 
 
 def release_lock():
+    global _LOCK_HANDLE, _LOCK_OWNER, _LOCK_MARKER
+    if _LOCK_HANDLE is None or _LOCK_OWNER != os.getpid():
+        return
     try:
-        os.remove(LOCK)
-    except OSError:
-        pass
+        try:
+            os.remove(_LOCK_MARKER)
+        except FileNotFoundError:
+            pass
+    finally:
+        _LOCK_HANDLE.close()
+        _LOCK_HANDLE = _LOCK_OWNER = _LOCK_MARKER = None

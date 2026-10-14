@@ -46,8 +46,12 @@
       "image": "mcr.microsoft.com/playwright:v1.58.2-noble",
       "memory": "6g",
       "cpus": 4,
-      "baseline": true
-    }
+      "baseline": true,
+      "recoveryAttempts": 2,
+      "browserLocale": "ko-KR",
+      "minFreeDiskGiB": 3
+    },
+    "recoveryAttempts": 2
   },
   "post": {
     "dryRun": true,
@@ -83,5 +87,13 @@
   "notify": {
     "enabled": true,
     "sound": "Glass"
+  },
+  "insights": {
+    "enabled": false,
+    "model": "claude-sonnet-5-5",
+    "maxPerTick": 3,
+    "timeoutSec": 90,
+    "maxTokens": 8192,
+    "workspaceID": ""
   }
 }

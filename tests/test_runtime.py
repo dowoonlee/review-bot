@@ -5,6 +5,7 @@ import os
 import time
 from pathlib import Path
 import runpy
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -23,6 +24,41 @@ GOOD = {'status': 'complete', 'testsApplicable': True, 'visualApplicable': True,
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_junit_work_path_is_normalized_but_paths_outside_work_are_rejected(self):
+        for supplied, expected in [('/work/results/test.xml', 'results/test.xml'),
+                                   ('/tmp/test.xml', None), ('/work/../test.xml', None)]:
+            plan = copy.deepcopy(PLAN)
+            plan['tests'][0]['report'] = supplied
+            with self.subTest(path=supplied), mock.patch.object(reviewer, '_run', return_value=plan), \
+                    mock.patch.object(runtime, 'repository_context', return_value={}):
+                if expected:
+                    parsed = runtime._plan(META, [], '/tmp', {})
+                    self.assertEqual(parsed['tests'][0]['report'], expected)
+                else:
+                    with self.assertRaises(runtime.ExecutionError):
+                        runtime._plan(META, [], '/tmp', {})
+
+    def test_planner_inventory_names_existing_mock_server_and_project_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, content in {
+                'web/package.json': '{"packageManager":"pnpm@10.0.0"}',
+                'web/mock-e2e/mockApi.mjs': '// mock server',
+                'web/src/main.tsx': '// application entry',
+                'web/src/Picker.tsx': '// changed component',
+                'web/src/.env': 'not part of runtime context',
+            }.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            subprocess.run(['git', 'init', '-q', tmp], check=True)
+            subprocess.run(['git', '-C', tmp, 'add', '.'], check=True)
+            context = runtime.repository_context([{'filename': 'web/src/Picker.tsx'}], tmp)
+        self.assertIn('web/mock-e2e/mockApi.mjs', context['browserAssets'])
+        self.assertIn('web/src/main.tsx', context['browserAssets'])
+        self.assertIn('pnpm@10.0.0', context['projectFiles']['web/package.json'])
+        self.assertNotIn('not part of runtime context', json.dumps(context))
+
     def test_no_ci_can_approve_with_real_local_evidence_but_missing_evidence_cannot(self):
         guard = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'review-bot'))['_guard_event']
         cfg = {'allowedEvents': ['COMMENT', 'APPROVE']}
@@ -67,9 +103,9 @@ class BaselineTests(unittest.TestCase):
     """head 에서 실패한 명령을 base 에서 다시 돌려, 그 실패가 PR 탓인지 가린다."""
 
     def test_baseline_failures_do_not_block_but_need_a_passing_test(self):
-        both = dict(GOOD, tests=[{'status': 'passed'}, {'status': 'baseline'}])
+        both = dict(GOOD, tests=[{'status': 'passed'}, {'status': 'baseline', 'required': False}])
         self.assertEqual(runtime.approval_block(both), '')
-        only_baseline = dict(GOOD, tests=[{'status': 'baseline'}])
+        only_baseline = dict(GOOD, tests=[{'status': 'baseline', 'required': False}])
         self.assertIn('통과 근거', runtime.approval_block(only_baseline))
         regression = dict(GOOD, tests=[{'status': 'passed'}, {'status': 'failed', 'baseline': {'exitCode': 0}}])
         self.assertIn('실패', runtime.approval_block(regression))
@@ -102,14 +138,14 @@ class BaselineTests(unittest.TestCase):
         runtime._LIVE_CONTAINERS.clear()
         return result, seen, mb
 
-    def test_failure_on_base_too_is_baseline_and_approvable(self):
+    def test_command_failure_on_both_revisions_is_not_enough_to_exempt_it(self):
         result, seen, mb = self._collect(base_fails=True)
         broad = next(t for t in result['tests'] if t['name'] == 'broad')
-        self.assertEqual(broad['status'], 'baseline')
+        self.assertEqual(broad['status'], 'failed')
         self.assertEqual(broad['baseline']['exitCode'], 1)
         self.assertEqual(result['baseline']['status'], 'complete')
         self.assertEqual(result['baseline']['sha'], 'base0')
-        self.assertEqual(runtime.approval_block(result), '')
+        self.assertTrue(runtime.approval_block(result))
         # 기준선 컨테이너는 base 소스로 만들고, 실패한 명령만 다시 돌린다
         archives = [c for c in seen if c[0] == 'git' and 'archive' in c]
         self.assertEqual([c[-1] for c in archives], ['abc', 'base0'])
@@ -190,6 +226,47 @@ class CollectionTests(unittest.TestCase):
             result = runtime.collect(META, [], self.temp.name, {})
         container.assert_not_called()
         self.assertEqual(runtime.approval_block(result), '')
+
+    def test_ui_plan_cannot_skip_browser_even_with_backend_unavailable(self):
+        files = [{'filename': 'web/src/Picker.tsx', 'patch': '@@ -1 +1 @@\n-old\n+new'},
+                 {'filename': 'web/src/Picker.css', 'patch': '@@ -1 +1 @@\n-a\n+b'}]
+        for applicable, browser in ((False, ''), (True, '')):
+            plan = dict(copy.deepcopy(PLAN), visualApplicable=applicable, browser=browser,
+                        limitations=['authentication/backend unavailable'])
+            with self.subTest(applicable=applicable), \
+                    mock.patch.object(runtime, '_plan', return_value=plan) as planner, \
+                    mock.patch.object(runtime, 'Container') as container:
+                result = runtime.collect(META, files, self.temp.name, {})
+            self.assertEqual(result['status'], 'incomplete')
+            self.assertEqual(result['visualRequiredBy'], ['web/src/Picker.tsx', 'web/src/Picker.css'])
+            self.assertEqual(planner.call_count, 3)
+            container.assert_not_called()
+            self.assertTrue(runtime.approval_block(result))
+            # A later status refresh cannot make the planner's false flag waive the requirement.
+            forged = dict(result, status='complete', limitations=[], tests=GOOD['tests'])
+            self.assertIn('화면', runtime.approval_block(forged))
+            self.assertFalse(runtime.approval_block(dict(forged, screenshots=['screen.png'],
+                                                       visual={'status': 'passed', 'complete': True})))
+
+    def test_test_only_and_documentation_changes_do_not_require_browser(self):
+        files = [{'filename': 'web/src/__tests__/Picker.test.tsx'},
+                 {'filename': 'docs/example.html'}, {'filename': 'README.md'},
+                 {'filename': 'web/Picker.stories.tsx'}]
+        plan = dict(PLAN, testsApplicable=False, visualApplicable=False, tests=[])
+        with mock.patch.object(runtime, '_plan', return_value=plan), \
+                mock.patch.object(runtime, 'Container') as container:
+            result = runtime.collect(META, files, self.temp.name, {})
+        container.assert_not_called()
+        self.assertEqual(runtime.approval_block(result), '')
+
+    def test_browser_repair_preserves_previous_scenarios(self):
+        previous = {'plan': dict(PLAN, scenarios=['select user', 'first Escape keeps modal'])}
+        plan = dict(copy.deepcopy(PLAN), scenarios=['select user'])
+        with mock.patch.object(runtime, '_plan', return_value=plan), \
+                mock.patch.object(runtime.Container, 'command', side_effect=OSError('offline')):
+            result = runtime._collect_once(META, [], self.temp.name, {}, previous=previous)
+        self.assertEqual(result['plan']['scenarios'], ['select user', 'first Escape keeps modal'])
+        runtime._LIVE_CONTAINERS.clear()
 
     def test_failed_test_is_not_hidden_by_successful_browser_and_cleanup_runs(self):
         commands = []

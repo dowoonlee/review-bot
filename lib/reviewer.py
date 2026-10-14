@@ -20,6 +20,7 @@ import time
 from lib import batches as batch_mod
 from lib import agents as agents_mod
 from lib import config as cfg_mod
+from lib import policy
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROMPT_PATH = os.path.join(ROOT, "prompts", "review.md")
@@ -272,7 +273,8 @@ def _compact_summary(text, limit):
 
 
 def review(meta, files, agent_names, cwd, model=None, max_turns=60, timeout=900,
-           parallel=True, ctx=None, mcp=None, diff_cap=None, batching=None, progress=None):
+           parallel=True, ctx=None, mcp=None, diff_cap=None, batching=None, progress=None,
+           previous_tasks=None):
     """Review bounded batches, then trace contracts across the whole PR.
 
     Every role reviews every batch. Concurrency is global, not multiplied by the
@@ -300,6 +302,7 @@ def review(meta, files, agent_names, cwd, model=None, max_turns=60, timeout=900,
     durations = {}
     findings, summaries, errors, cost = [], [], [], 0.0
     per_task = {}
+    completed_tasks = {}
     coverage = {"files": len(files), "batches": len(batches),
                 "planned": len(batches) * len(agent_names), "completed": 0,
                 "integrationPlanned": len(integrators) if len(batches) > 1 else 0,
@@ -311,9 +314,33 @@ def review(meta, files, agent_names, cwd, model=None, max_turns=60, timeout=900,
 
         def one(task):
             tag = task[0]
+            saved = (previous_tasks or {}).get(tag)
+            if saved and not saved.get('_meta', {}).get('salvaged'):
+                # Integration results depend on every batch result, including failed ones.
+                can_reuse = not tag.startswith('integration-') or all(
+                    'batch-%03d-%s' % (i, name) in (previous_tasks or {})
+                    for i in range(1, len(batches) + 1) for name in agent_names)
+                if can_reuse:
+                    saved = json.loads(json.dumps(saved))
+                    saved.setdefault('_meta', {}).update(cost_usd=0, reused=True)
+                    return saved
             task_started = time.monotonic()
+            retry_cost = 0.0
             try:
-                return run_task(task)
+                for attempt in range(max(0, min(2, options.get('recoveryAttempts', 2))) + 1):
+                    try:
+                        payload = run_task(task)
+                        if payload.get('_meta', {}).get('salvaged'):
+                            raise ReviewError('턴 예산 소진 후 부분 결과',
+                                              cost=payload['_meta'].get('cost_usd') or 0)
+                        metadata = payload.setdefault('_meta', {})
+                        metadata['cost_usd'] = (metadata.get('cost_usd') or 0) + retry_cost
+                        metadata['retries'] = attempt
+                        return payload
+                    except (ReviewError, agents_mod.AgentError, OSError) as exc:
+                        retry_cost += getattr(exc, 'cost', 0) or 0
+                        if attempt >= max(0, min(2, options.get('recoveryAttempts', 2))):
+                            raise ReviewError(str(exc), cost=retry_cost) from exc
             finally:
                 durations[tag] = round(time.monotonic() - task_started, 3)
 
@@ -344,10 +371,12 @@ def review(meta, files, agent_names, cwd, model=None, max_turns=60, timeout=900,
                         per_task[tag] = {"error": str(exc)[:200], "cost_usd": spent}
                     else:
                         outputs[tag] = payload
+                        completed_tasks[tag] = payload
                         meta_out = payload.get("_meta") or {}
                         cost += meta_out.get("cost_usd") or 0.0
                         per_task[tag] = {"findings": len(payload["findings"]),
                                          "cost_usd": meta_out.get("cost_usd"),
+                                         "retries": meta_out.get("retries", 0),
                                          "salvaged": bool(meta_out.get("salvaged"))}
                         if meta_out.get("salvaged"):
                             errors.append("%s: 턴 예산 소진 후 부분 결과" % tag)
@@ -427,6 +456,7 @@ def review(meta, files, agent_names, cwd, model=None, max_turns=60, timeout=900,
     allowance = max(20, 20000 // max(1, len(summaries)))
     compact = [_compact_summary(s, allowance) for s in summaries]
     return {"summary": "\n\n".join(compact), "findings": list(unique.values()),
+            "_tasks": completed_tasks,
             "errors": errors, "coverage": coverage,
             "_meta": {"cost_usd": round(cost, 4), "agents": per_task,
                       "duration_sec": round(time.monotonic() - started, 3),
@@ -627,8 +657,7 @@ CI_LABEL = {
 }
 
 
-def judge(meta, payload, findings, allowed_events, model="sonnet", timeout=180,
-          approve_max_severity="nit"):
+def judge(meta, payload, findings, allowed_events, model="sonnet", timeout=180):
     """리뷰 결과를 놓고 event 와 지적별 게시 형태를 정한다.
 
     코드를 다시 읽지 않는다. 리뷰어들이 남긴 근거의 질을 보고 판단하는 메타
@@ -673,19 +702,33 @@ def judge(meta, payload, findings, allowed_events, model="sonnet", timeout=180,
         findings="\n".join(rows) or "(지적 없음)",
         ci=CI_LABEL.get(ci, ci),
         execution_evidence=evidence_block(meta, for_judge=True),
-        approve_max_severity=approve_max_severity,
         allowed_events=", ".join(allowed_events))
 
-    out = _run(prompt, ROOT, model, 1, timeout, "verdict", tools="", key="event")
-    places = {}
+    retry_cost = 0
+    for attempt in range(3):
+        try:
+            out = _run(prompt, ROOT, model, 1, timeout, "verdict", tools="", key="event")
+            metadata = out.setdefault('_meta', {})
+            metadata['cost_usd'] = (metadata.get('cost_usd') or 0) + retry_cost
+            break
+        except ReviewError as exc:
+            retry_cost += exc.cost or 0
+            if attempt == 2:
+                raise ReviewError(str(exc), cost=retry_cost) from exc
+    places, dispositions = {}, {}
     for p in out.get("findings") or []:
         if isinstance(p, dict) and isinstance(p.get("id"), int):
             pl = str(p.get("placement") or "").lower()
             if pl in PLACEMENTS:
                 places[p["id"]] = pl
+            if p.get('disposition') in policy.DISPOSITIONS and p.get('why'):
+                dispositions[p['id']] = {'disposition': p['disposition'],
+                                         'dispositionReason': str(p['why'])}
     return {"event": str(out.get("event") or "COMMENT").upper(),
             "reason": (out.get("reason") or "").strip(),
             "placements": places,
+            "dispositions": dispositions,
+            "coverageExceptions": out.get('coverageExceptions') if isinstance(out.get('coverageExceptions'), dict) else {},
             "cost_usd": (out.get("_meta") or {}).get("cost_usd")}
 
 

@@ -5,8 +5,13 @@
 사용자의 브랜치·FETCH_HEAD 와 부딪히지 않는다.
 """
 import os
+import json
+import re
+from pathlib import Path
 import shutil
 import subprocess
+
+from lib import resources
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WT_DIR = os.path.join(ROOT, "state", "wt")
@@ -58,72 +63,133 @@ def _base_repo(repo, local_path, env=None):
     return dest
 
 
+def _owner_path(path):
+    return Path(WT_DIR).parent / 'wt-owners' / (Path(path).name + '.json')
+
+
+def _ref_prefix():
+    return 'refs/review-bot/' + resources.instance_id() + '/'
+
+
+def _safe_path(path):
+    root = Path(WT_DIR).resolve()
+    candidate = Path(path)
+    return not candidate.is_symlink() and candidate.resolve().parent == root
+
+
 def prepare(repo, number, local_path=None, env=None):
-    """(worktree 경로, head sha, base, ref) 를 준다. 끝나면 cleanup 해야 한다.
-
-    env 는 gh.env_for(account) — 계정이 고정됐을 때 fetch 인증에 쓴다.
-    """
+    """Persist ownership before acquisition so failures and process death can be recovered."""
     base = _base_repo(repo, local_path, env)
-    ref = "refs/review-bot/pr-%s" % number
-    _git(base, _cred(env) + ["fetch", "--quiet", "origin",
-                             "+refs/pull/%s/head:%s" % (number, ref)], env=env)
-    sha = _git(base, ["rev-parse", ref])
-    if not sha:
-        raise WorktreeError("PR #%s 의 head 를 찾지 못했습니다" % number)
-
+    ref = _ref_prefix() + 'pr-%s' % number
     os.makedirs(WT_DIR, exist_ok=True)
-    path = os.path.join(WT_DIR, "%s-%s" % (_slug(repo), number))
-    _remove(base, path)
-    _git(base, ["worktree", "add", "--detach", "--force", path, sha])
-    return path, sha, base, ref
+    path = os.path.join(WT_DIR, '%s-%s' % (_slug(repo), number))
+    owner_path = _owner_path(path)
+    old = resources.read_owner(owner_path)
+    if old and (old.get('instance') != resources.instance_id() or resources.alive(old)):
+        raise WorktreeError('아직 실행 중인 워크트리 소유자가 있습니다: ' + path)
+    owner_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = owner_path.with_suffix('.tmp')
+    try:
+        temporary.write_text(json.dumps(dict(resources.owner(), repo=repo, number=number,
+                                              base=os.path.abspath(base), path=os.path.abspath(path), ref=ref)))
+        temporary.replace(owner_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    try:
+        _git(base, _cred(env) + ['fetch', '--quiet', '--no-write-fetch-head', 'origin',
+                                 '+refs/pull/%s/head:%s' % (number, ref)], env=env)
+        sha = _git(base, ['rev-parse', ref])
+        if not sha:
+            raise WorktreeError('PR #%s 의 head 를 찾지 못했습니다' % number)
+        _remove(base, path)
+        _git(base, ['worktree', 'add', '--detach', '--force', path, sha])
+        return path, sha, base, ref
+    except BaseException as exc:
+        errors = cleanup(base, path, ref)
+        if errors and isinstance(exc, Exception):
+            raise WorktreeError(str(exc) + ' / 정리 미완료: ' + '; '.join(errors)) from exc
+        raise
 
 
 def _remove(base, path):
-    if os.path.exists(path):
-        subprocess.run(["git", "-C", base, "worktree", "remove", "--force", path],
-                       capture_output=True, text=True, timeout=120)
-    if os.path.exists(path):
-        shutil.rmtree(path, ignore_errors=True)
+    if not _safe_path(path):
+        raise WorktreeError('봇 전용 경로 밖의 워크트리는 정리하지 않습니다: ' + str(path))
+    entries = _git(base, ['worktree', 'list', '--porcelain', '-z'])
+    registered = [part[len('worktree '):] for part in entries.split('\0') if part.startswith('worktree ')]
+    if any(Path(p).resolve() == Path(path).resolve() for p in registered):
+        _git(base, ['worktree', 'remove', '--force', path])
+    elif os.path.exists(path):
+        shutil.rmtree(path)
 
 
 def cleanup(base, path, ref=None):
-    """워크트리와 봇 전용 ref 를 지운다. 실패해도 예외를 올리지 않는다."""
+    """Return failures explicitly and keep the ownership journal until cleanup succeeds."""
     try:
-        _remove(base, path)
-        _git(base, ["worktree", "prune"], check=False)
         if ref:
-            _git(base, ["update-ref", "-d", ref], check=False)
-    except (WorktreeError, OSError, subprocess.SubprocessError):
-        pass
+            if not ref.startswith(_ref_prefix()) and not re.fullmatch(r'refs/review-bot/pr-\d+', ref):
+                raise WorktreeError('다른 소유자의 ref는 정리하지 않습니다: ' + ref)
+        record = resources.read_owner(_owner_path(path))
+        if record and (record.get('instance') != resources.instance_id() or
+                       (resources.alive(record) and record.get('pid') != os.getpid())):
+            raise WorktreeError('실행 중이거나 다른 소유자의 워크트리는 정리하지 않습니다: ' + path)
+        _remove(base, path)
+        if ref:
+            _git(base, ['update-ref', '-d', ref])
+        _owner_path(path).unlink(missing_ok=True)
+        return []
+    except (WorktreeError, OSError, subprocess.SubprocessError) as exc:
+        return [str(exc)[:400]]
 
 
-def sweep(repos_cfg):
-    """이전 실행이 비정상 종료되며 남긴 워크트리와 ref 를 치운다.
-
-    OOM·강제 종료·재부팅으로 프로세스가 SIGKILL 되면 cleanup 이 돌지 못해
-    워크트리가 남는다. 남은 워크트리는 디스크만 먹는 게 아니라 다음 실행의
-    `worktree add` 를 막으므로, 틱을 시작할 때 먼저 쓸어낸다.
-    """
-    if not os.path.isdir(WT_DIR):
-        return 0
-    swept = 0
-    for name in sorted(os.listdir(WT_DIR)):
-        path = os.path.join(WT_DIR, name)
-        if not os.path.isdir(path):
+def sweep(repos_cfg, blocked=()):
+    """Caller holds the bot lock. Recover dead owners, including ref-only acquisitions."""
+    report = {'removed': 0, 'errors': [], 'kept': []}
+    if '*' in blocked:
+        return report
+    jobs, bases, protected_refs = {}, set(), set()
+    owner_dir = Path(WT_DIR).parent / 'wt-owners'
+    for owner_file in owner_dir.glob('*.json'):
+        record = resources.read_owner(owner_file)
+        if record.get('instance') != resources.instance_id():
             continue
-        slug, _, num = name.rpartition("-")
-        repo = slug.replace("__", "/")
-        entry = (repos_cfg or {}).get(repo) or {}
-        lp = os.path.expanduser(entry.get("localPath") or "")
-        base = (lp if lp and os.path.isdir(os.path.join(lp, ".git"))
-                else os.path.join(CACHE_DIR, slug))
-        if not os.path.isdir(os.path.join(base, ".git")):
-            shutil.rmtree(path, ignore_errors=True)
-            swept += 1
+        if not all(isinstance(record.get(k), str) and record[k] for k in ('path', 'base', 'ref')) or not _safe_path(record['path']):
+            report['errors'].append('워크트리 소유 기록을 확인할 수 없습니다: ' + str(owner_file))
             continue
-        cleanup(base, path, "refs/review-bot/pr-%s" % num if num.isdigit() else None)
-        swept += 1
-    return swept
+        if resources.alive(record) or resources.owner_key(record) in blocked:
+            protected_refs.add(record.get('ref'))
+            report['kept'].append(record['path'])
+            continue
+        jobs[record['path']] = (record['base'], record.get('ref'))
+        bases.add(record['base'])
+    for repo, entry in (repos_cfg or {}).items():
+        local = os.path.expanduser((entry or {}).get('localPath') or '')
+        base = local if local and os.path.isdir(os.path.join(local, '.git')) else os.path.join(CACHE_DIR, _slug(repo))
+        if not os.path.isdir(os.path.join(base, '.git')):
+            continue
+        bases.add(base)
+        for path in Path(WT_DIR).glob(_slug(repo) + '-*'):
+            number = path.name.rpartition('-')[2]
+            if not number.isdigit() or not _safe_path(path): continue
+            owner_file = _owner_path(path)
+            if owner_file.exists(): continue  # Journal above determines liveness/ownership.
+            jobs[str(path)] = (base, 'refs/review-bot/pr-' + number)
+    for path, (base, ref) in jobs.items():
+        errors = cleanup(base, path, ref)
+        report['errors'].extend(errors)
+        if not errors:
+            report['removed'] += 1
+    # A crash may occur after ref acquisition but before worktree creation.
+    for base in bases:
+        try:
+            refs = _git(base, ['for-each-ref', '--format=%(refname)', _ref_prefix()]).splitlines()
+            for ref in refs:
+                if ref in protected_refs: continue
+                if any(ref == r for _, r in jobs.values()): continue  # Failed cleanup retains its journal.
+                _git(base, ['update-ref', '-d', ref])
+                report['removed'] += 1
+        except (WorktreeError, OSError, subprocess.SubprocessError) as exc:
+            report['errors'].append(str(exc)[:400])
+    return report
 
 
 def file_history(base, sha, paths, per_file=5, max_files=10):

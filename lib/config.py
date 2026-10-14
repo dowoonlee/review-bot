@@ -47,6 +47,8 @@ DEFAULTS = {
         "rereviewOnNewCommits": True,
         # 에이전트를 동시에 띄운다. 메모리가 빠듯하면 false 로 내린다.
         "parallel": True,
+        "recoveryAttempts": 2,  # 실패한 리뷰만 최대 두 번 보완
+
         # 이 확장자만 리뷰 대상으로 본다. 비우면 전부.
         "includeExts": [],
         # 지적의 좌표가 diff 밖이면(변경 파일이 아니거나, 변경 라인 ±3 밖) 반증도
@@ -57,14 +59,17 @@ DEFAULTS = {
         # repos[repo].runtime으로 저장소별 덮어쓰기 가능.
         "runtime": {
             "enabled": True,
+            "recoveryAttempts": 2,  # 실행 환경/계획 실패 복구; 성공한 명령 재사용
             "model": "sonnet",
             "maxTurns": 40,
             "planTimeoutSec": 600,
             "setupTimeoutSec": 900,
             "testTimeoutSec": 900,
             "browserTimeoutSec": 300,
+            "browserLocale": "ko-KR",
             "image": "mcr.microsoft.com/playwright:v1.58.2-noble",
             "memory": "6g",
+            "minFreeDiskGiB": 3,
             "cpus": 4,
             # head 에서 실패한 명령을 base(merge-base)에서 한 번 더 돌려, 거기서도
             # 실패하면 baseline 으로 표시한다 — 컨테이너에 없는 docker·.git 을 쓰는
@@ -105,10 +110,8 @@ DEFAULTS = {
         # 판정이 낼 수 있는 이벤트. 여기서 빼면 그 판정은 COMMENT 로 내려간다.
         "allowedEvents": ["COMMENT", "APPROVE", "REQUEST_CHANGES"],
         "judgeModel": "opus",
-        # 승인의 문턱. 게시될 지적에 이 등급보다 높은 것이 하나라도 남으면 판정이
-        # APPROVE 라도 COMMENT 로 내린다. nit 이면 P3·altitude 만 남았을 때 승인.
-        # "머지 전 권장" (P2) 을 달아 놓고 승인하는 모순을 코드에서 막는다.
-        "approveMaxSeverity": "nit",
+        # 우선순위와 조치를 분리한다. required/uncertain은 승인 차단,
+        # optional은 P2라도 승인과 함께 게시 가능. approveMaxSeverity는 더 이상 사용하지 않는다.
         # head 커밋의 CI가 실패하거나 진행 중이면 승인하지 않는다. 체크가 없는 저장소에는
         # 영향이 없다 — 대신 "CI 없음" 이 판정 자료에 실린다.
         "approveNeedsGreenCi": True,
@@ -143,6 +146,8 @@ DEFAULTS = {
         # 알림을 울린다 — 사내망 밖에서도 돌려야 하면 이 값을 false 로 내린다.
         "required": True,
     },
+    "insights": {"enabled": False, "model": "claude-sonnet-5-5",
+                 "maxPerTick": 3, "timeoutSec": 90, "maxTokens": 8192, "workspaceID": ""},
     "limits": {
         # 한 틱에 리뷰할 PR 최대 개수. 틱 시간과 사용량에 직결된다.
         "maxPerTick": 2,
