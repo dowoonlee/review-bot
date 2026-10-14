@@ -52,11 +52,11 @@ struct DashboardView: View {
         // 첫 항목과 섹션 머리글이 바 아래로 말려 들어가 잘린다.
         VStack(spacing: 0) {
             statusBar
-            NavigationSplitView {
+            HSplitView {
                 sidebar
-                    .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
-            } detail: {
+                    .frame(minWidth: 240, idealWidth: 260, maxWidth: 280)
                 detail
+                    .frame(minWidth: 500, maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .onChange(of: store.runGroups.count) {
@@ -189,77 +189,123 @@ struct DashboardView: View {
     // MARK: 사이드바
 
     private var sidebar: some View {
-        List(selection: $selection) {
-            Label("홈", systemImage: "house").tag(Selection.home)
-            Label("리뷰 요청", systemImage: "arrow.left.arrow.right").tag(Selection.requests(false))
-
-            if !store.live.isEmpty {
-                Section("라이브 세션") {
-                    ForEach(store.live) { s in
-                        HStack(spacing: 6) {
-                            ProgressView().controlSize(.mini)
-                            VStack(alignment: .leading, spacing: 1) {
-                                HStack(spacing: 5) {
-                                    Text(s.agent).f(.callout)
-                                    if let c = store.current {
-                                        Text(c.label).f(.caption2).foregroundStyle(.secondary)
-                                    }
-                                }
-                                Text("턴 " + String(s.turns) + " · " + s.toolSummary)
-                                    .f(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                            }
-                        }
-                        .tag(Selection.live(s.id))
-                    }
+        VStack(spacing: 0) {
+            VStack(spacing: 4) {
+                navigationRow(.home) { Label("홈", systemImage: "house") }
+                navigationRow(.requests(false), active: isRequestSelection) {
+                    Label("리뷰 요청", systemImage: "arrow.left.arrow.right")
                 }
             }
+            .padding(.horizontal, 10).padding(.top, 14).padding(.bottom, 12)
+            Divider().padding(.horizontal, 14)
 
-            if !store.drafts.isEmpty {
-                Section("게시 대기 \(store.drafts.count)건") {
-                    ForEach(store.drafts) { d in
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 5) {
-                                Image(systemName: "tray.full")
-                                    .f(.caption2).foregroundStyle(.orange)
-                                Text(d.label).f(.callout, .medium)
-                                EventBadge(event: d.event)
-                                Spacer()
-                            }
-                            Text("인라인 \(d.inline ?? 0) · 본문 \(d.demoted ?? 0) · \(shortTime(d.at))")
-                                .f(.caption2).foregroundStyle(.secondary)
-                        }
-                        .tag(Selection.draft(d.id))
-                    }
-                }
-            }
-
-            // 이력은 저장소 → PR 로 묶는다. 한 PR 이 여러 번 도는 것은 흔한 일이라
-            // 평평한 목록으로 두면 왜 여러 개인지 읽히지 않는다.
-            ForEach(groupedByRepo, id: \.repo) { bucket in
-                Section(bucket.repo) {
-                    ForEach(bucket.groups) { group in
-                        groupHeader(group)
-                        if expanded.contains(group.id) {
-                            ForEach(group.runs) { r in
-                                runRow(r)
-                                    .tag(Selection.run(r.id))
-                                    .contextMenu {
-                                        Button("이 기록 삭제", role: .destructive) {
-                                            Task { await store.forget(r) }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    if !store.live.isEmpty {
+                        sidebarSection("라이브 세션") {
+                            ForEach(store.live) { session in
+                                navigationRow(.live(session.id)) {
+                                    HStack(spacing: 8) {
+                                        ProgressView().controlSize(.mini)
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(session.agent).f(.callout)
+                                            Text("턴 \(session.turns) · \(session.toolSummary)")
+                                                .f(.caption2).foregroundStyle(.secondary).lineLimit(1)
                                         }
                                     }
+                                }
+                            }
+                        }
+                    }
+                    if !store.drafts.isEmpty {
+                        sidebarSection("게시 대기 \(store.drafts.count)건") {
+                            ForEach(store.drafts) { draft in
+                                navigationRow(.draft(draft.id)) {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        HStack {
+                                            Text(draft.label).f(.callout, .medium)
+                                            Spacer()
+                                            EventBadge(event: draft.event)
+                                        }
+                                        Text("인라인 \(draft.inline ?? 0) · 본문 \(draft.demoted ?? 0)")
+                                            .f(.caption2).foregroundStyle(.secondary)
+                                    }
+                                }
+                                .contextMenu {
+                                    Button("이 PR의 초안·기록·검증 자료 정리", role: .destructive) {
+                                        Task { await store.cleanPR(draft.repo, draft.number) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ForEach(groupedByRepo, id: \.repo) { bucket in
+                        sidebarSection(bucket.repo) {
+                            ForEach(bucket.groups) { group in
+                                groupHeader(group)
+                                    .padding(.horizontal, 10).padding(.vertical, 6)
+                                if expanded.contains(group.id) {
+                                    ForEach(group.runs) { run in
+                                        navigationRow(.run(run.id)) { runRow(run) }
+                                            .padding(.leading, 12)
+                                            .contextMenu {
+                                                Button("이 기록 삭제", role: .destructive) {
+                                                    Task { await store.forget(run) }
+                                                }
+                                            }
+                                    }
+                                }
                             }
                         }
                     }
                 }
+                .padding(.horizontal, 10).padding(.vertical, 14)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .frame(maxHeight: .infinity)
 
-            Section {
-                Label("틱 로그", systemImage: "text.alignleft").tag(Selection.log)
-                Label("설정 · 리뷰어와 도구", systemImage: "gearshape").tag(Selection.settings)
+            Divider().padding(.horizontal, 14)
+            VStack(spacing: 4) {
+                navigationRow(.log) { Label("틱 로그", systemImage: "text.alignleft") }
+                navigationRow(.settings) { Label("설정 · 리뷰어와 도구", systemImage: "gearshape") }
             }
+            .padding(.horizontal, 10).padding(.vertical, 12)
         }
-        .listStyle(.sidebar)
+        .frame(maxHeight: .infinity)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private var isRequestSelection: Bool {
+        switch selection {
+        case .requests, .sent, .pending: true
+        default: false
+        }
+    }
+
+    private func navigationRow<Content: View>(_ target: Selection, active: Bool? = nil,
+                                              @ViewBuilder content: () -> Content) -> some View {
+        let selected = active ?? (selection == target)
+        return Button { selection = target } label: {
+            content()
+                .f(.callout, selected ? .semibold : .regular)
+                .foregroundStyle(selected ? Color.accentColor : Color.primary)
+                .frame(maxWidth: .infinity, minHeight: 22, alignment: .leading)
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(selected ? Color.accentColor.opacity(0.16) : .clear,
+                            in: RoundedRectangle(cornerRadius: 7))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func sidebarSection<Content: View>(_ title: String,
+                                               @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).f(.caption2, .semibold).foregroundStyle(.secondary)
+                .lineLimit(1).padding(.horizontal, 12).padding(.bottom, 4)
+            content()
+        }
     }
 
     /// PR 머리 행. 작은 삼각형만 누르게 하면 표적이 너무 좁아서, 행 전체를 눌러
@@ -292,6 +338,9 @@ struct DashboardView: View {
             Button("이 PR 이력 \(group.runs.count)건 삭제", role: .destructive) {
                 Task { await store.forget(group: group) }
             }
+            Button("이 PR의 초안·기록·검증 자료 정리", role: .destructive) {
+                Task { await store.cleanPR(group.repo, group.number) }
+            }
         }
     }
 
@@ -304,7 +353,7 @@ struct DashboardView: View {
                     Text("실패").f(.caption2).foregroundStyle(.red)
                 } else {
                     EventBadge(event: r.event)
-                    Text((r.posted ?? false) ? "게시" : "초안")
+                    Text((r.posted ?? false) ? "게시" : r.event == "PENDING" ? "대기" : "초안")
                         .f(.caption2)
                         .foregroundStyle((r.posted ?? false) ? Color.green : .orange)
                 }

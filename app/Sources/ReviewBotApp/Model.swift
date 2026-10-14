@@ -49,6 +49,35 @@ enum BotPaths {
 // MARK: - 봇이 남긴 기록
 
 /// runs.jsonl 한 줄. 성공한 리뷰와 실패한 리뷰가 같은 파일에 섞여 있어 대부분 옵셔널이다.
+struct DecisionReason: Decodable, Sendable, Identifiable {
+    var code: String
+    var message: String
+    var source: String?
+    var id: String { code }
+    var label: String {
+        switch code {
+        case "DEFECT": "수정 필요"
+        case "HUMAN_REVIEW": "사람 확인 필요"
+        case "ENVIRONMENT_UNAVAILABLE": "실행 환경 대기"
+        case "CI_PENDING": "CI 대기"
+        case "CI_FAILED": "CI 실패"
+        case "REVIEW_INCOMPLETE": "코드 검토 미완료"
+        case "VALIDATION_INCOMPLETE": "실행 검증 미완료"
+        case "JUDGE_FAILED": "판정 생성 실패"
+        case "PUBLISH_FAILED": "게시 실패"
+        default: "판정 조건"
+        }
+    }
+}
+
+struct DecisionRecord: Decodable, Sendable {
+    var judgeEvent: String?
+    var finalEvent: String?
+    var judgeReason: String?
+    var summary: String?
+    var reasons: [DecisionReason]?
+}
+
 struct RunRecord: Decodable, Identifiable, Sendable {
     var repo: String?
     var number: Int?
@@ -61,6 +90,7 @@ struct RunRecord: Decodable, Identifiable, Sendable {
     var dropped: Int?
     var event: String?
     var reason: String?
+    var decision: DecisionRecord?
     var summary: String?
     var draft: String?
     var posted: Bool?
@@ -80,7 +110,7 @@ struct RunRecord: Decodable, Identifiable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case repo, number, title, account, sha, inline, demoted, dropped
-        case event, reason, summary, draft, posted, at, error, degraded
+        case event, reason, decision, summary, draft, posted, at, error, degraded
         case reviewDecision, lostAnchors, skipped, files, churn
         case costUSD = "cost_usd"
         case agentErrors = "agent_errors"
@@ -110,10 +140,11 @@ struct ReviewedRecord: Decodable, Sendable {
     var inline: Int?
     var demoted: Int?
     var posted: Bool?
+    var decision: DecisionRecord?
     var costUSD: Double?
 
     enum CodingKeys: String, CodingKey {
-        case at, sha, event, inline, demoted, posted
+        case at, sha, event, inline, demoted, posted, decision
         case costUSD = "cost_usd"
     }
 }
@@ -131,6 +162,8 @@ struct StatusSnapshot: Decodable, Sendable {
     var running: RunningInfo?
     var pending: [PendingPR]
     var outgoing: [SentPR]?
+    var insightSettings: InsightSettings?
+    var selectionSettings: SelectionSettings?
     var outgoingErrors: [String]?
     var outgoingFailedAccounts: [String]?
     var config: BotConfig?
@@ -159,6 +192,8 @@ struct RunningInfo: Decodable, Sendable {
 }
 
 struct PendingPR: Decodable, Sendable, Identifiable {
+    var account: String?
+    var insight: RequestInsight?
     var repo: String
     var number: Int
     var title: String
@@ -179,7 +214,13 @@ struct PendingPR: Decodable, Sendable, Identifiable {
     var label: String { "\(repo.split(separator: "/").last.map(String.init) ?? repo)#\(number)" }
 }
 
+struct SentResponse: Decodable, Sendable {
+    var id: String
+}
+
 struct SentPR: Decodable, Sendable, Identifiable {
+    var responses: [SentResponse]?
+    var insight: RequestInsight?
     var repo: String
     var number: Int
     var title: String

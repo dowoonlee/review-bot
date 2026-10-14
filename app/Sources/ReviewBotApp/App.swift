@@ -15,7 +15,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// Headless API calls keep the key inside this signed executable.
 @main
+struct ReviewBotEntry {
+    @MainActor static func main() async {
+        let args = CommandLine.arguments
+        if args.count > 1 && args[1] == "--insight-key-fd" { exit(2) }
+        if args.count > 1 && ["--insight-api", "--jev-api"].contains(args[1]) {
+            guard args.count == 2 else { exit(2) }
+            let result = args[1] == "--jev-api" ? await JevAPI.run() : await InsightAPI.run()
+            if let data = try? JSONSerialization.data(withJSONObject: result) {
+                try? FileHandle.standardOutput.write(contentsOf: data)
+            }
+            return
+        }
+        ReviewBotApp.main()
+    }
+}
+
 struct ReviewBotApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var store = BotStore()

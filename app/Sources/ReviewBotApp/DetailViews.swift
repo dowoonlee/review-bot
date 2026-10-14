@@ -14,7 +14,8 @@ struct RunDetailView: View {
                 if run.wasSkipped { skippedBox }
                 if run.failed { failureBox }
                 if run.partial { partialBox }
-                if let reason = run.reason, !reason.isEmpty { verdictBox(reason) }
+                if let decision = run.decision { decisionBox(decision) }
+                else if let reason = run.reason, !reason.isEmpty { verdictBox(reason) }
                 if let summary = run.summary, !summary.isEmpty {
                     section("리뷰어 요약") { Markdown(text: summary) }
                 }
@@ -82,12 +83,37 @@ struct RunDetailView: View {
     }
 
     private var partialBox: some View {
-        box(.orange, "리뷰어 일부가 실패했습니다 — 반쪽 리뷰입니다",
+        box(.orange, "리뷰어 실행 오류 — 보완 여부는 최종 판정을 확인하세요",
             (run.agentErrors ?? []).joined(separator: "\n"))
     }
 
     private func verdictBox(_ reason: String) -> some View {
         box(.blue, "판정", reason)
+    }
+
+    private func decisionBox(_ decision: DecisionRecord) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Text("AI 판정").f(.caption)
+                if let event = decision.judgeEvent { EventBadge(event: event) }
+                else { Text("미실행").f(.caption).foregroundStyle(.secondary) }
+                Image(systemName: "arrow.right").foregroundStyle(.secondary)
+                Text("최종").f(.caption)
+                EventBadge(event: decision.finalEvent ?? run.event)
+            }
+            if let summary = decision.summary, !summary.isEmpty {
+                Text(summary).f(.callout).textSelection(.enabled)
+            }
+            ForEach(decision.reasons ?? []) { reason in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(reason.label).f(.caption, .semibold)
+                    Text(reason.message).f(.callout).textSelection(.enabled)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func box(_ color: Color, _ title: String, _ body: String) -> some View {
@@ -270,6 +296,7 @@ struct PendingDetailView: View {
                 }
 
                 people
+                if let insight = pr.insight { InsightDetailView(insight: insight) }
 
                 HStack {
                     Button {
@@ -285,7 +312,7 @@ struct PendingDetailView: View {
                 if let rec = store.reviewed["\(pr.repo)#\(pr.number)"] {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("마지막 처리").f(.caption, .semibold).foregroundStyle(.secondary)
-                        Text("\(rec.at ?? "-") · \(rec.event ?? "-") · 인라인 \(rec.inline ?? 0) · \((rec.posted ?? false) ? "게시함" : "초안만")")
+                        Text("\(rec.at ?? "-") · \(rec.event ?? "-") · 인라인 \(rec.inline ?? 0) · \(rec.event == "DISCARDED" ? "로컬 자료 정리됨" : rec.event == "PENDING" ? "검증 대기" : (rec.posted ?? false) ? "게시함" : "초안만")")
                             .f(.caption, mono: true)
                         Text("커밋 \(String((rec.sha ?? "-").prefix(12)))")
                             .f(.caption, mono: true).foregroundStyle(.secondary)
@@ -356,6 +383,8 @@ struct PendingDetailView: View {
     private var statusText: String {
         switch pr.status {
         case "posted": "리뷰 게시함"
+        case "pending": "검증 대기"
+        case "discarded": "로컬 자료 정리됨"
         case "draft": "초안만 있음 — 다음 틱에 재리뷰"
         case "new": "아직 리뷰 안 함"
         default: "감시 대상 아님"

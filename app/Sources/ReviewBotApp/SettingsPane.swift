@@ -35,6 +35,10 @@ struct SettingsPaneView: View {
                 Divider()
                 posting
                 Divider()
+                InsightSettingsView()
+                Divider()
+                JevSettingsView()
+                Divider()
                 cadence
                 Divider()
                 reviewers

@@ -11,6 +11,7 @@ struct HomePaneView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                HomeBriefingView(selection: $selection)
                 nowCard
                 if !store.drafts.isEmpty { draftsCard }
                 todayCard

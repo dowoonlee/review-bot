@@ -62,6 +62,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <!-- 메뉴바 상주 앱 — Dock 아이콘 없이 뜬다. 대시보드 창은 그대로 열린다. -->
   <key>LSUIElement</key>               <true/>
   <key>NSHighResolutionCapable</key>   <true/>
+  <key>NSAppleEventsUsageDescription</key><string>선택한 PR의 분석 내용을 iTerm에서 Codex 또는 Claude로 이어서 작업합니다.</string>
 </dict>
 </plist>
 PLIST

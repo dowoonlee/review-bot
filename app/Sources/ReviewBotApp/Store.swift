@@ -31,6 +31,28 @@ final class BotStore {
     var statusError: String?
     var statusLoadedAt: Date?
     var isRefreshingStatus = false
+    var homeBaseline: [String: HomeStamp]? = UserDefaults.standard.data(forKey: "homeOverviewBaseline")
+        .flatMap { try? JSONDecoder().decode([String: HomeStamp].self, from: $0) }
+    var homeAcknowledgedAt = UserDefaults.standard.object(forKey: "homeOverviewAcknowledgedAt") as? Date
+    var homeTasks = HomeTaskFile.empty
+    private var homeTaskData: Data?
+    var homeTaskError: String?
+    var homeOverview: HomeOverview { HomeOverview(status, tasks: homeTasks) }
+    var homeChanges: [HomeChange] { homeOverview.changes(since: homeBaseline) }
+    var homeSnapshotComplete: Bool {
+        status != nil && statusError == nil && (status?.errors.isEmpty ?? false)
+            && (status?.outgoingErrors?.isEmpty ?? true)
+            && (status?.outgoingFailedAccounts?.isEmpty ?? true)
+    }
+    func acknowledgeHome() {
+        guard homeSnapshotComplete else { return }
+        homeBaseline = homeOverview.stamps
+        homeAcknowledgedAt = Date()
+        if let data = try? JSONEncoder().encode(homeBaseline) {
+            UserDefaults.standard.set(data, forKey: "homeOverviewBaseline")
+            UserDefaults.standard.set(homeAcknowledgedAt, forKey: "homeOverviewAcknowledgedAt")
+        }
+    }
 
     var sentPRs: [SentPR] {
         (status?.outgoing ?? []).sorted {
@@ -44,6 +66,7 @@ final class BotStore {
     private var sessionOffsets: [String: UInt64] = [:]
     private var sessionCache: [String: LiveSession] = [:]
     private var pollTask: Task<Void, Never>?
+    private var statusPollTask: Task<Void, Never>?
     private var lastStatusFetch: Date?
     private var seenDrafts: Set<String>?
     private var seenPRs: Set<String>?
@@ -59,13 +82,18 @@ final class BotStore {
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 self?.refreshLocal()
-                if let self, self.shouldRefetchStatus() { await self.refreshStatus() }
+                if let self, self.shouldRefetchStatus(), !self.isRefreshingStatus {
+                    self.statusPollTask = Task { [weak self] in await self?.refreshStatus() }
+                }
                 try? await Task.sleep(for: .seconds(2))
             }
         }
     }
 
-    func stop() { pollTask?.cancel(); pollTask = nil }
+    func stop() {
+        pollTask?.cancel(); pollTask = nil
+        statusPollTask?.cancel(); statusPollTask = nil
+    }
 
     private func shouldRefetchStatus() -> Bool {
         guard let last = lastStatusFetch else { return true }
@@ -104,7 +132,41 @@ final class BotStore {
         return Appended(data: data, restarted: restarted || from == 0)
     }
 
+    func readHomeTasks() {
+        let path = BotPaths.state.appending(path: "home-tasks.json")
+        guard FileManager.default.fileExists(atPath: path.path) else {
+            if homeTaskData != nil { homeTasks = .empty; homeTaskData = nil }
+            homeTaskError = nil
+            return
+        }
+        guard let data = try? Data(contentsOf: path) else { homeTaskError = "할 일 기록을 읽지 못했습니다."; return }
+        guard data != homeTaskData else { return }
+        guard let tasks = try? JSONDecoder().decode(HomeTaskFile.self, from: data) else {
+            homeTaskError = "할 일 기록을 읽지 못했습니다."; return
+        }
+        homeTaskData = data
+        homeTasks = tasks
+        homeTaskError = nil
+    }
+    func completeHomeTask(_ row: HomeRequest) async -> String {
+        do {
+            let old = homeTasks.currentTask(for: row.id)
+            let task: HomeTask
+            if let old, ["running", "reopened", "stopped"].contains(old.status) { task = old }
+            else { task = try await HomeTaskClient.start(row, agent: "manual") }
+            let result = await HomeTaskClient.command("complete", id: task.id)
+            readHomeTasks()
+            return result.code == 0 ? "완료 처리했습니다." : result.output
+        } catch { return error.localizedDescription }
+    }
+    func reopenHomeTask(_ task: HomeTask) async {
+        let result = await HomeTaskClient.command("reopen", id: task.id)
+        readHomeTasks()
+        if result.code != 0 { homeTaskError = result.output }
+    }
+
     func refreshLocal() {
+        readHomeTasks()
         readRuns()
         readLog()
         readReviewed()
@@ -404,9 +466,12 @@ final class BotStore {
         // 일부 계정 조회 실패는 빈 목록으로 보이지 않게 이전 결과를 유지한다.
         let failed = Set(snap.outgoingFailedAccounts ?? [])
         snap.outgoing = (snap.outgoing ?? []) + (status?.outgoing ?? []).filter { failed.contains($0.account) }
+        snap.selectionSettings = .local
         status = snap
         statusError = snap.errors.first
         statusLoadedAt = Date()
+        readHomeTasks()
+        if homeBaseline == nil && homeSnapshotComplete { acknowledgeHome() }
         if let secs = snap.config?.intervalSec, secs > 0 { tickInterval = TimeInterval(secs) }
         announceNewRequests(snap.pending)
     }
@@ -477,6 +542,33 @@ final class BotStore {
 
     /// 틱당 리뷰 상한. launchd 를 건드리지 않으므로 틱이 도는 중에도 받아 준다 —
     /// 도는 틱은 이전 상한으로 끝내고 다음 틱부터 새 값이 적용된다.
+    func setInsights(_ on: Bool) async {
+        await run(["insights", on ? "enable" : "disable"], label: "요청 분석 설정")
+    }
+
+    func selectionRegistrationDidChange() {
+        status?.selectionSettings = .local
+    }
+
+    func checkJev(_ input: JevAPI.Input) async -> String {
+        let output = await JevAPI.run(input: input)
+        if output["ok"] as? Bool == true { return "Jev 연결과 분류 응답을 확인했습니다." }
+        if let status = output["status"] as? Int { return "Jev API HTTP \(status) · 키와 모델을 확인해 주세요." }
+        return "Jev 연결을 확인하지 못했습니다. 등록 상태와 키체인 접근을 확인해 주세요."
+    }
+
+    func setInsightWorkspace(_ workspace: String) async {
+        await run(["insights", "workspace", workspace], label: "Workspace 설정")
+    }
+
+    func checkInsightConnection() async {
+        await run(["insights", "check"], label: "Claude API 연결 확인")
+    }
+
+    func setInsightModel(_ model: String) async {
+        await run(["insights", "model", model], label: "분석 모델 변경")
+    }
+
     func setMaxPerTick(_ n: Int) async {
         await run(["cap", String(n)], label: "틱당 리뷰 상한 변경")
     }
@@ -538,6 +630,10 @@ final class BotStore {
 
     func forget(group: RunGroup) async {
         await run(["forget", "\(group.repo)#\(group.number)"], label: "이력 삭제")
+    }
+
+    func cleanPR(_ repo: String, _ number: Int) async {
+        await run(["forget", "\(repo)#\(number)", "--artifacts"], label: "PR 로컬 자료 정리")
     }
 
     func forgetAll() async {

@@ -61,6 +61,8 @@ struct EventBadge: View {
         case "APPROVE": "승인"
         case "REQUEST_CHANGES": "변경 요청"
         case "COMMENT": "코멘트"
+        case "PENDING": "검증 대기"
+        case "DISCARDED": "정리됨"
         default: e
         }
     }

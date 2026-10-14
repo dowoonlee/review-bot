@@ -125,6 +125,7 @@ private enum ReceivedFilter: String, CaseIterable {
     case new = "새 요청"
     case draft = "봇 초안 검토"
     case posted = "봇 리뷰 게시됨"
+    case discarded = "로컬 자료 정리됨"
     case unwatched = "자동 리뷰 대상 아님"
 
     func matches(_ pr: PendingPR) -> Bool {
@@ -133,6 +134,7 @@ private enum ReceivedFilter: String, CaseIterable {
         case .new: pr.status == "new"
         case .draft: pr.status == "draft"
         case .posted: pr.status == "posted"
+        case .discarded: pr.status == "discarded"
         case .unwatched: pr.status == "unwatched"
         }
     }
@@ -332,6 +334,7 @@ struct RequestsPaneView: View {
                 Image(systemName: "chevron.right").foregroundStyle(.tertiary)
             }
             Text(pr.repo).f(.caption).foregroundStyle(.secondary)
+            if let insight = pr.insight { Text(insight.nextAction).f(.caption).foregroundStyle(.tint) }
             if pr.reviewers.isEmpty {
                 Text("현재 지정된 리뷰어 없음").f(.body).foregroundStyle(.secondary)
             } else {
@@ -367,6 +370,7 @@ struct RequestsPaneView: View {
                 Image(systemName: "chevron.right").foregroundStyle(.tertiary)
             }
             Text("\(pr.repo) · \(pr.author) 작성").f(.caption).foregroundStyle(.secondary)
+            if let insight = pr.insight { Text(insight.nextAction).f(.caption).foregroundStyle(.tint) }
             if let by = pr.requestedBy { Text("\(by) 님이 리뷰 요청").f(.caption) }
         }
         .padding(.vertical, 13).frame(maxWidth: .infinity, alignment: .leading)
@@ -376,6 +380,8 @@ struct RequestsPaneView: View {
         switch pr.status {
         case "posted": "봇 리뷰 게시됨"
         case "draft": "봇 초안 검토"
+        case "pending": "검증 대기"
+        case "discarded": "로컬 자료 정리됨"
         case "unwatched": "자동 리뷰 대상 아님"
         default: "새 요청"
         }
@@ -404,6 +410,7 @@ struct SentPRDetailView: View {
                 }
                 RequestsSyncStatus()
                 Divider()
+                if let insight = pr.insight { InsightDetailView(insight: insight) }
                 Text("리뷰어별 현황").f(.headline)
                 if pr.reviewers.isEmpty {
                     Text("현재 지정된 리뷰어나 표시할 리뷰가 없습니다.").foregroundStyle(.secondary)
