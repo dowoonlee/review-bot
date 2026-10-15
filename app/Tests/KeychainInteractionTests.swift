@@ -35,6 +35,12 @@ final class KeychainInteractionTests: XCTestCase {
         XCTAssertEqual(InsightKeychain.errorCode(errSecAuthFailed), "keychain_locked")
         XCTAssertEqual(InsightKeychain.errorCode(errSecItemNotFound), "missing_key")
     }
+    func testLaunchAuthorizationOnlyWhenStoredKeyIsBlocked() {
+        XCTAssertFalse(InsightKeychain.needsLaunchAuthorization(errSecSuccess))
+        XCTAssertFalse(InsightKeychain.needsLaunchAuthorization(errSecItemNotFound))
+        XCTAssertTrue(InsightKeychain.needsLaunchAuthorization(errSecInteractionNotAllowed))
+        XCTAssertTrue(InsightKeychain.needsLaunchAuthorization(errSecAuthFailed))
+    }
     func testBackgroundQueryExplicitlyRefusesAuthenticationUI() {
         let query = InsightKeychain.readQuery(serviceName: "fixture", interactive: false)
         XCTAssertEqual(query[kSecUseAuthenticationUI as String] as? String, kSecUseAuthenticationUIFail as String)

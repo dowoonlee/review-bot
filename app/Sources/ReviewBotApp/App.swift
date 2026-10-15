@@ -100,6 +100,8 @@ private struct MenuBarLabel: View {
                 AppDelegate.showDashboard = show
                 // 실행했는데 아무것도 안 보이면 안 켜진 것과 구별되지 않는다. 창을 띄운다.
                 show()
+                // 다시 빌드한 뒤 첫 실행이면 키체인이 이 빌드를 모른다. 지금 한 번 물어 둔다.
+                Task.detached(priority: .userInitiated) { InsightKeychain.authorizeOnLaunchIfNeeded() }
             }
     }
 }

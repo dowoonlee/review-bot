@@ -1,6 +1,7 @@
 import Foundation
 import Security
 import LocalAuthentication
+import os
 
 /// Values go directly to Security.framework; never to command arguments, config, or logs.
 enum InsightKeychain {
@@ -98,7 +99,36 @@ enum InsightKeychain {
             return ReadResult(status: status, data: status == errSecSuccess && includeData ? value as? Data : nil)
         }
     }
-    /// Only a deliberate settings button may request authentication UI. No key leaves this type.
+    /// 시작 시 암호 창을 열 상태인가. 성공이면 필요 없고, 항목이 없으면 열어도 소용없다.
+    static func needsLaunchAuthorization(_ status: OSStatus) -> Bool {
+        status != errSecSuccess && status != errSecItemNotFound
+    }
+    /// GUI 로 앱을 켤 때 한 번, 저장된 키를 조용히 읽지 못하면 그 자리에서 허용 창을 연다.
+    ///
+    /// 자체 서명 빌드는 Team ID 가 없어 macOS 가 키체인 항목의 partition 목록을 cdhash 로
+    /// 관리한다. cdhash 는 빌드마다 바뀌므로 다시 빌드할 때마다 "항상 허용" 을 한 번 더
+    /// 받아야 하고, 그 전까지는 백그라운드 분석이 전부 "키체인 접근 필요" 로 멈춘다.
+    /// 사용자가 앱을 켠 순간은 이미 앞에 앉아 있으니 여기서 묻는다. 헬퍼(--insight-api 등)와
+    /// 예약 틱은 이 경로를 타지 않아 여전히 창을 열지 않는다.
+    private static let launchAuthorizationRequested = OSAllocatedUnfairLock(initialState: false)
+    static func authorizeOnLaunchIfNeeded(services: [String] = [service, JevRegistration.service]) {
+        let first = launchAuthorizationRequested.withLock { requested -> Bool in
+            defer { requested = true }
+            return !requested
+        }
+        guard first else { return }
+        for name in services {
+            // 속성만 읽으면 ACL 을 타지 않아 막힌 것을 못 본다. 값을 읽되 이 타입 밖으로 내지 않는다.
+            let silent = readResult(serviceName: name)
+            guard needsLaunchAuthorization(silent.status) else {
+                if silent.status == errSecSuccess { recordAccess(silent.status, serviceName: name) }
+                continue
+            }
+            _ = authorize(serviceName: name)
+        }
+    }
+    /// Only a deliberate settings button or the GUI launch check may request authentication UI.
+    /// No key leaves this type.
     static func authorize(serviceName: String = "review-bot-anthropic") -> OSStatus {
         let status = readResult(serviceName: serviceName, interactive: true).status
         recordAccess(status, serviceName: serviceName)
