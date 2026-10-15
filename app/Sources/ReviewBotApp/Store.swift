@@ -61,6 +61,11 @@ final class BotStore {
         }
     }
 
+    /// 나에게 할당된 열린 이슈, 긴급한 것부터. 정렬 점수는 봇이 정한다 (Jev → Priority 필드).
+    var assignedIssues: [AssignedIssue] {
+        (status?.issues ?? []).sorted(by: AssignedIssue.urgentFirst)
+    }
+
     private var runsOffset: UInt64 = 0
     private var logOffset: UInt64 = 0
     private var sessionOffsets: [String: UInt64] = [:]

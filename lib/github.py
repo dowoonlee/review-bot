@@ -694,3 +694,163 @@ def request_context(repo, number, account=None, bounded=True):
             'base': pr['baseRefOid'], 'isDraft': pr['isDraft'], 'reviewDecision': pr.get('reviewDecision'),
             'mergeable': pr.get('mergeable'), 'checksState': checks,
             'sources': sources, 'incomplete': incomplete}
+
+
+_ISSUE_FIELDS = '''
+      issueFieldValues(first: 10) { nodes {
+        ... on IssueFieldSingleSelectValue { optionId field { ... on IssueFieldSingleSelect { name options { id name } } } }
+        ... on IssueFieldDateValue { value field { ... on IssueFieldDate { name } } }
+      } }
+'''
+
+_ASSIGNED_ISSUES_QUERY = '''
+query($searchQuery: String!, $cursor: String) {
+  search(query: $searchQuery, type: ISSUE, first: 50, after: $cursor) {
+    issueCount
+    pageInfo { hasNextPage endCursor }
+    nodes { ... on Issue {
+      number title url createdAt updatedAt
+      repository { nameWithOwner }
+      author { login }
+      labels(first: 20) { nodes { name } }
+      milestone { title dueOn }
+      comments { totalCount }
+      issueType { name }
+''' + _ISSUE_FIELDS + '''
+    } }
+  }
+}
+'''
+
+ASSIGNED_ISSUES_CAP = 200
+
+
+def issue_fields(node):
+    """org 이슈 필드(Priority·Target date 등)를 {이름: 값} 으로 편다. 옵션 id 는 필드가
+    함께 내려 주는 옵션 표로 이름으로 바꾼다 — id 를 하드코딩하면 org 가 바뀔 때 깨진다."""
+    out = {}
+    for value in ((node or {}).get('issueFieldValues') or {}).get('nodes') or []:
+        field = (value or {}).get('field') or {}
+        name = field.get('name')
+        if not name:
+            continue
+        if 'optionId' in value:
+            options = {o.get('id'): o.get('name') for o in field.get('options') or []}
+            out[name] = options.get(value.get('optionId'))
+        elif 'value' in value:
+            out[name] = value.get('value')
+    return out
+
+
+def _issue_row(node, account):
+    fields = issue_fields(node)
+    milestone = node.get('milestone') or {}
+    return {
+        'repo': node['repository']['nameWithOwner'], 'number': node['number'],
+        'title': node.get('title') or '', 'url': node.get('url') or '',
+        'author': (node.get('author') or {}).get('login') or '',
+        'account': account or 'global',
+        'createdAt': node.get('createdAt') or '', 'updatedAt': node.get('updatedAt') or '',
+        'labels': [l.get('name') for l in (node.get('labels') or {}).get('nodes') or [] if l.get('name')],
+        'milestone': milestone.get('title'), 'milestoneDue': milestone.get('dueOn'),
+        'comments': (node.get('comments') or {}).get('totalCount') or 0,
+        'type': (node.get('issueType') or {}).get('name'),
+        'priority': fields.get('Priority'),
+        'targetDate': fields.get('Target date'),
+    }
+
+
+def assigned_issues(account=None):
+    """나에게 할당된 열린 이슈. PR 은 뺀다 (is:issue). 우선순위는 org 이슈 필드에서 읽는다.
+
+    페이지는 상한(ASSIGNED_ISSUES_CAP)까지 읽고, 넘치면 조용히 자르지 않고 경고한다.
+    """
+    cursor, out, warnings = None, [], []
+    while True:
+        args = ['api', 'graphql', '-f', 'query=' + _ASSIGNED_ISSUES_QUERY,
+                '-f', 'searchQuery=is:issue is:open assignee:@me sort:updated-desc']
+        if cursor:
+            args += ['-f', 'cursor=' + cursor]
+        payload = _gh_json(args, timeout=60, account=account)
+        if payload.get('errors'):
+            raise GhError('담당 이슈 GraphQL 조회 실패')
+        search = (payload.get('data') or {}).get('search')
+        if search is None:
+            raise GhError('담당 이슈 검색 결과가 없습니다')
+        for node in search.get('nodes') or []:
+            if node and node.get('number') and (node.get('repository') or {}).get('nameWithOwner'):
+                out.append(_issue_row(node, account))
+        page = search.get('pageInfo') or {}
+        if not page.get('hasNextPage'):
+            break
+        if len(out) >= ASSIGNED_ISSUES_CAP:
+            out = out[:ASSIGNED_ISSUES_CAP]
+            warnings.append('담당 이슈가 %d건을 넘어 최근 갱신 순으로 %d건만 표시합니다'
+                            % (ASSIGNED_ISSUES_CAP, len(out)))
+            break
+        next_cursor = page.get('endCursor')
+        if not next_cursor or next_cursor == cursor:
+            raise GhError('담당 이슈의 다음 페이지를 읽을 수 없습니다')
+        cursor = next_cursor
+    return out, warnings
+
+
+_ISSUE_CONTEXT = '''
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      title url body state createdAt updatedAt
+      author { login }
+      assignees(first: 10) { nodes { login } }
+      labels(first: 20) { nodes { name } }
+      milestone { title dueOn }
+      issueType { name }
+      comments(last: 30) {
+        pageInfo { hasPreviousPage }
+        nodes { id url body createdAt author { login } }
+      }
+''' + _ISSUE_FIELDS + '''
+    }
+  }
+}
+'''
+
+
+def issue_context(repo, number, account=None):
+    """Jev 에 보낼 이슈 스냅샷. 본문과 최근 댓글만 잘라 담고, 잘린 곳은 incomplete 로 표시한다."""
+    owner, name = repo.split('/', 1)
+    payload = _gh_json(['api', 'graphql', '-f', 'query=' + _ISSUE_CONTEXT,
+                        '-f', 'owner=' + owner, '-f', 'name=' + name,
+                        '-F', 'number=%d' % number], timeout=30, account=account)
+    if payload.get('errors'):
+        raise GhError('이슈 조회 실패')
+    issue = ((payload.get('data') or {}).get('repository') or {}).get('issue')
+    if not issue:
+        raise GhError('이슈를 읽지 못했습니다')
+    incomplete = False
+    remaining = 30000
+
+    def clip(text):
+        nonlocal incomplete, remaining
+        text = text or ''
+        clipped = text[:min(4000, remaining)]
+        if len(clipped) != len(text):
+            incomplete = True
+        remaining -= len(clipped)
+        return clipped
+    sources = [{'id': 'issue', 'url': issue['url'], 'body': clip(issue.get('body')),
+                'author': (issue.get('author') or {}).get('login'), 'at': issue.get('createdAt')}]
+    comments = issue.get('comments') or {}
+    if (comments.get('pageInfo') or {}).get('hasPreviousPage'):
+        incomplete = True
+    for comment in comments.get('nodes') or []:
+        sources.append({'id': comment['id'], 'url': comment['url'], 'body': clip(comment.get('body')),
+                        'author': (comment.get('author') or {}).get('login'), 'at': comment.get('createdAt')})
+    milestone = issue.get('milestone') or {}
+    return {'repo': repo, 'number': number, 'title': issue['title'], 'state': issue.get('state'),
+            'type': (issue.get('issueType') or {}).get('name'),
+            'labels': [l.get('name') for l in (issue.get('labels') or {}).get('nodes') or []],
+            'assignees': [a.get('login') for a in (issue.get('assignees') or {}).get('nodes') or []],
+            'milestone': milestone.get('title'), 'milestoneDue': milestone.get('dueOn'),
+            'fields': issue_fields(issue), 'createdAt': issue.get('createdAt'), 'updatedAt': issue.get('updatedAt'),
+            'sources': sources, 'incomplete': incomplete}

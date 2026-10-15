@@ -4,6 +4,7 @@ enum Selection: Hashable {
     case home
     case settings
     case requests(Bool)
+    case issues
     case sent(String)
     case draft(String)
     case run(String)
@@ -18,6 +19,7 @@ enum Selection: Hashable {
         case .home: "home"
         case .settings: "settings"
         case .requests(let sent): sent ? "sentRequests" : "receivedRequests"
+        case .issues: "issues"
         case .sent(let id): "sent:\(id)"
         case .log: "log"
         case .draft(let id): "draft:\(id)"
@@ -33,6 +35,7 @@ enum Selection: Hashable {
         case "settings": .settings
         case "sentRequests": .requests(true)
         case "receivedRequests": .requests(false)
+        case "issues": .issues
         case "log": .log
         default: nil
         }
@@ -195,6 +198,20 @@ struct DashboardView: View {
                 navigationRow(.requests(false), active: isRequestSelection) {
                     Label("리뷰 요청", systemImage: "arrow.left.arrow.right")
                 }
+                navigationRow(.issues) {
+                    HStack {
+                        Label("담당 이슈", systemImage: "checklist")
+                        Spacer()
+                        if let urgent = urgentIssueCount, urgent > 0 {
+                            // 메뉴에서 알고 싶은 것은 총수가 아니라 "지금 급한 게 몇 개냐" 다.
+                            Text("\(urgent)").f(.caption2, .semibold, digits: true)
+                                .foregroundStyle(.orange)
+                                .help("긴급·높음으로 분류된 이슈 \(urgent)건")
+                        } else if let total = store.status?.issues?.count, total > 0 {
+                            Text("\(total)").f(.caption2, digits: true).foregroundStyle(.secondary)
+                        }
+                    }
+                }
             }
             .padding(.horizontal, 10).padding(.top, 14).padding(.bottom, 12)
             Divider().padding(.horizontal, 14)
@@ -273,6 +290,11 @@ struct DashboardView: View {
         }
         .frame(maxHeight: .infinity)
         .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private var urgentIssueCount: Int? {
+        guard let issues = store.status?.issues else { return nil }
+        return issues.filter { $0.score >= 1.25 }.count
     }
 
     private var isRequestSelection: Bool {
@@ -399,6 +421,8 @@ struct DashboardView: View {
         case .requests(let sent):
             RequestsPaneView(selection: $selection, initiallySent: sent)
                 .id(sent)
+        case .issues:
+            IssuesPaneView()
         case .sent(let id):
             if let pr = store.sentPRs.first(where: { $0.id == id }) {
                 SentPRDetailView(pr: pr) { selection = .requests(true) }

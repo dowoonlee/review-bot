@@ -51,7 +51,7 @@ def clean_pr(repo, number, reset=False, preview=False):
             if removed:
                 rewrites[path] = ''.join(kept)
         counts[name] = removed
-    for cache_name in ('request-insights.json', 'request-selections.json'):
+    for cache_name in ('request-insights.json', 'request-selections.json', 'issue-selections.json'):
         cache_path = root / cache_name
         cache_data = read_json(cache_path)
         if cache_data is not None:
@@ -143,7 +143,7 @@ def clean_pr(repo, number, reset=False, preview=False):
     for path, content in rewrites.items():
         temporary = path.with_suffix(path.suffix + '.tmp')
         temporary.write_text(content)
-        if path.name in ('request-insights.json', 'request-selections.json'):
+        if path.name in ('request-insights.json', 'request-selections.json', 'issue-selections.json'):
             os.chmod(temporary, 0o600)
         temporary.replace(path)
     if reset and not errors:

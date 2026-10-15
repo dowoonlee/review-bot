@@ -89,6 +89,7 @@ class SentRequestsTests(unittest.TestCase):
              patch.object(github, "whoami", side_effect=lambda account: account), \
              patch.object(github, "review_requests", return_value=[draft]), \
              patch.object(github, "sent_review_requests", return_value=([], [])), \
+             patch.object(github, "assigned_issues", return_value=([], [])), \
              patch.object(bot["store"], "load", return_value={}), \
              patch.object(bot["store"], "pending_drafts", return_value=[]):
             result = status(cfg, skip_details=True)
@@ -112,6 +113,7 @@ class SentRequestsTests(unittest.TestCase):
              patch.object(github, "whoami", side_effect=lambda account: account), \
              patch.object(github, "review_requests", side_effect=[[received], []]), \
              patch.object(github, "sent_review_requests", side_effect=[github.GhError("offline"), ([sent], [])]), \
+             patch.object(github, "assigned_issues", return_value=([], [])), \
              patch.object(bot["store"], "load", return_value={}), \
              patch.object(bot["store"], "pending_drafts", return_value=[]):
             result = status(cfg, skip_details=True)

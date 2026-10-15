@@ -42,6 +42,7 @@ from lib import replies
 from lib import insights
 from lib import insight_api
 from lib import selection
+from lib import issues as issues_mod
 from lib import home_tasks
 from lib import store
 from lib import worktree
@@ -1402,7 +1403,7 @@ def _tick(cfg):
 
     # 계정마다 따로 조회한다. 리뷰 요청은 @me 기준이라 계정이 다르면 목록이 다르다.
     targets, total = [], 0
-    insight_targets = []
+    insight_targets, issue_targets = [], []
     for acct, repos in _accounts(cfg).items():
         try:
             me = gh.whoami(acct)
@@ -1436,6 +1437,11 @@ def _tick(cfg):
                 insight_targets.extend((acct, p, "outgoing") for p in outgoing if p["repo"] in repos)
             except (gh.GhError, OSError, ValueError) as e:
                 _log("리뷰 답변 확인 실패 (%s): %s" % (acct or "전역 gh", e))
+        try:
+            assigned, _warnings = gh.assigned_issues(account=acct)
+            issue_targets.extend((acct, i) for i in assigned)
+        except gh.GhError as e:
+            _log("담당 이슈 조회 실패 (%s): %s" % (acct or "전역 gh", e))
     try:
         insights.refresh(insight_targets, cfg, _log)
     except Exception:
@@ -1444,6 +1450,10 @@ def _tick(cfg):
         selection.refresh(insight_targets, cfg, _log)
     except Exception:
         _log("Jev 분류 실패 — 기존 리뷰를 계속합니다")
+    try:
+        issues_mod.refresh(issue_targets, cfg, _log)
+    except Exception:
+        _log("Jev 이슈 분류 실패 — 기존 리뷰를 계속합니다")
     by_pr = {(p['repo'], p['number']): p for p in targets}
     for pending in checkpoints.watching(cfg):
         by_pr[(pending['repo'], pending['number'])] = pending
@@ -1717,6 +1727,7 @@ def status_payload(cfg, skip_details=False):
     selection_cache = selection.load()
     selection_settings = selection.registration()
     outgoing, outgoing_errors, outgoing_failed_accounts = [], [], []
+    assigned, issue_errors, issue_cache = [], [], issues_mod.load()
     for acct, repos in groups.items():
         info = {"account": acct, "repos": sorted(repos), "tokenOwner": None, "ok": False}
         try:
@@ -1737,6 +1748,12 @@ def status_payload(cfg, skip_details=False):
         except gh.GhError as e:
             outgoing_failed_accounts.append(acct or "global")
             outgoing_errors.append("보낸 요청 조회 실패 (%s): %s" % (acct or "전역 gh", str(e)[:200]))
+        try:
+            rows, warnings = gh.assigned_issues(account=acct)
+            assigned.extend(rows)
+            issue_errors.extend(warnings)
+        except gh.GhError as e:
+            issue_errors.append("담당 이슈 조회 실패 (%s): %s" % (acct or "전역 gh", str(e)[:200]))
     credential_state = None
     if insights.settings(cfg)['enabled'] and any(
         insights.keychain_failure(insight_cache.get(insights.key(p.get('account'), p, direction)))
@@ -1787,6 +1804,11 @@ def status_payload(cfg, skip_details=False):
     for p in outgoing:
         p["insight"] = insights.view(insight_cache, cfg, p.get("account"), p, "outgoing", credential_state=credential_state)
         p["insight"]["selection"] = selection.view(selection_cache, selection_settings, p.get("account"), p, "outgoing", cfg)
+    assigned = list({(i["account"], i["repo"], i["number"]): i for i in assigned}.values())
+    for i in assigned:
+        i["watched"] = issues_mod.watched(cfg, i)
+        i["jev"] = issues_mod.view(issue_cache, selection_settings, i.get("account"), i, cfg)
+        i["rank"] = issues_mod.rank(i, i["jev"])
     visible_tasks = {home_tasks.identity(p["repo"], p["number"], p.get("account"), direction)
                      for direction, rows in (("incoming", pending), ("outgoing", outgoing)) for p in rows}
     try:
@@ -1815,6 +1837,8 @@ def status_payload(cfg, skip_details=False):
         "pending": pending,
         "outgoing": list({(p["account"], p["repo"], p["number"]): p for p in outgoing}.values()),
         "outgoingErrors": outgoing_errors,
+        "issues": assigned,
+        "issueErrors": issue_errors,
         "insightSettings": insights.settings(cfg),
         "selectionSettings": selection_settings,
         "outgoingFailedAccounts": outgoing_failed_accounts,

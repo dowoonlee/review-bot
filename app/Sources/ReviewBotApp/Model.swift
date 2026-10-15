@@ -165,6 +165,8 @@ struct StatusSnapshot: Decodable, Sendable {
     var insightSettings: InsightSettings?
     var selectionSettings: SelectionSettings?
     var outgoingErrors: [String]?
+    var issues: [AssignedIssue]?
+    var issueErrors: [String]?
     var outgoingFailedAccounts: [String]?
     var config: BotConfig?
     var reviewed: [String: ReviewedRecord]
@@ -480,4 +482,94 @@ struct Schedule: Decodable, Sendable {
     var reason: String
     var intervalSec: Int?
     var anchor: Date? { RunRecord.stamp.date(from: at) }
+}
+
+// MARK: - 나에게 할당된 이슈
+
+/// Jev 가 이슈 하나에 내린 판단. PR 대화용(JevDecision)과 답의 모양이 다르다.
+struct IssueDecision: Decodable, Sendable {
+    var status: String          // pending | ready | uncertain | stale | error
+    var state: String?          // actionable | blocked | needsInfo | resolved | unknown
+    var urgency: Double?
+    var confidence: Double?
+    var analyzedAt: String?
+    var error: String?
+    var incomplete: Bool?
+    var usable: Bool { status == "ready" && (confidence ?? 0) >= 0.8 }
+    var stateLabel: String? {
+        guard usable else { return nil }
+        return switch state {
+        case "actionable": "바로 착수 가능"
+        case "blocked": "다른 사람·의존성 대기"
+        case "needsInfo": "보고자 확인 필요"
+        case "resolved": "완료로 보임 · 닫기 검토"
+        default: nil
+        }
+    }
+    var statusLabel: String {
+        switch status {
+        case "ready": usable ? "Jev 분류" : "Jev 확신 부족"
+        case "uncertain": "Jev 확신 부족"
+        case "stale": "Jev · 새 변경 감지"
+        case "error": "Jev 오류"
+        default: "Jev 분류 대기"
+        }
+    }
+}
+
+/// 봇이 정한 정렬 점수. 출처가 Jev 면 분류 점수, 아니면 GitHub Priority 필드다.
+struct IssueRank: Decodable, Sendable {
+    var score: Double
+    var source: String          // jev | priority | none
+}
+
+struct AssignedIssue: Decodable, Sendable, Identifiable {
+    var repo: String
+    var number: Int
+    var title: String
+    var url: String
+    var author: String
+    var account: String
+    var createdAt: String
+    var updatedAt: String
+    var labels: [String]
+    var milestone: String?
+    var milestoneDue: String?
+    var comments: Int?
+    var type: String?
+    var priority: String?       // Urgent | High | Medium | Low — org 이슈 필드
+    var targetDate: String?
+    var watched: Bool?
+    var jev: IssueDecision?
+    var rank: IssueRank?
+
+    var id: String { "\(account):\(repo)#\(number)" }
+    var label: String { "\(repo.split(separator: "/").last.map(String.init) ?? repo)#\(number)" }
+    var score: Double { rank?.score ?? 1.0 }
+    /// 점수를 사람 말로. 2 에 가까우면 긴급, 1 근처면 보통, 그 아래는 낮음.
+    var urgencyLabel: String {
+        if score >= 1.75 { return "긴급" }
+        if score >= 1.25 { return "높음" }
+        if score >= 0.75 { return "보통" }
+        return "낮음"
+    }
+    var priorityLabel: String {
+        switch priority {
+        case "Urgent": "Urgent"
+        case "High": "High"
+        case "Medium": "Medium"
+        case "Low": "Low"
+        default: "우선순위 미지정"
+        }
+    }
+    /// 날짜가 없는 것은 맨 뒤로 보내기 위한 비교 키. ISO 날짜라 문자열 비교로 충분하다.
+    var dueKey: String { targetDate ?? milestoneDue ?? "9999" }
+
+    /// 긴급한 것부터. 같은 점수면 마감이 가까운 것, 그 다음 최근에 움직인 것.
+    static func urgentFirst(_ a: AssignedIssue, _ b: AssignedIssue) -> Bool {
+        if a.score != b.score { return a.score > b.score }
+        if a.dueKey != b.dueKey { return a.dueKey < b.dueKey }
+        if a.updatedAt != b.updatedAt { return a.updatedAt > b.updatedAt }
+        return a.id < b.id
+    }
 }

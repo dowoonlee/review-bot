@@ -226,6 +226,7 @@ class TickBlockingTests(unittest.TestCase):
                 mock.patch.object(github, "review_requests", return_value=[
                     {"repo": "org/repo", "number": 1, "title": "t", "author": "a"}]), \
                 mock.patch.object(github, "sent_review_requests", return_value=([], [])), \
+                mock.patch.object(github, "assigned_issues", return_value=([], [])), \
                 mock.patch.object(replies, "check"), \
                 mock.patch.object(notify_mod, "send") as notified, \
                 mock.patch.object(repomind, "connect",

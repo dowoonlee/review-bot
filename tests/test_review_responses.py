@@ -107,6 +107,7 @@ class TickResponseTests(unittest.TestCase):
              patch.object(github, "whoami", return_value="me"), \
              patch.object(github, "review_requests", side_effect=received), \
              patch.object(github, "sent_review_requests", side_effect=sent), \
+             patch.object(github, "assigned_issues", return_value=([], [])), \
              patch.object(replies, "check") as check:
             self.assertEqual(tick(cfg), 0)
         check.assert_called_once()
@@ -123,7 +124,8 @@ class TickResponseTests(unittest.TestCase):
              patch.object(store, "load", return_value={}), \
              patch.object(github, "whoami", return_value="me"), \
              patch.object(github, "review_requests", return_value=[pr()]), \
-             patch.object(github, "sent_review_requests", side_effect=github.GhError("offline")):
+             patch.object(github, "sent_review_requests", side_effect=github.GhError("offline")), \
+             patch.object(github, "assigned_issues", return_value=([], [])):
             self.assertEqual(tick(cfg), 0)
         self.assertEqual(processed, [1])
 
