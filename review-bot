@@ -2445,7 +2445,7 @@ def cmd_task(args, cfg):
     try:
         if args.action == 'start':
             repo, number = _parse_target(args.target)
-            row = home_tasks.start(repo, number, args.account, args.direction, args.title or '', args.label or '', args.agent)
+            row = home_tasks.start(repo, number, args.account, args.direction, args.title or '', args.label or '', args.agent, args.session_id, args.terminal_id)
         elif args.action == 'complete':
             row = home_tasks.complete(args.target)
         elif args.action == 'reopen':
@@ -2506,6 +2506,8 @@ def main():
     task.add_argument("--title")
     task.add_argument("--label")
     task.add_argument("--agent", choices=["codex", "claude", "manual"], default="manual")
+    task.add_argument("--session-id", help="연결할 기존 Codex/Claude 세션 UUID")
+    task.add_argument("--terminal-id", help="연결할 iTerm 세션 UUID")
     task.set_defaults(fn=cmd_task)
     ai = sub.add_parser("insights", help="Claude 요청 분석 설정 (키는 앱 설정에서 등록)")
     ai.add_argument("action", choices=["status", "enable", "disable", "model", "workspace", "check"])

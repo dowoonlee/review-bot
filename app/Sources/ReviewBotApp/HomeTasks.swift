@@ -9,6 +9,8 @@ struct HomeTask: Decodable, Sendable, Identifiable {
     var label: String
     var status: String
     var agent: String
+    var sessionID: String?
+    var terminalID: String?
     var startedAt: String
     var completedAt: String?
     var reopenReason: String?
@@ -32,10 +34,13 @@ enum HomeTaskClient {
         let message: String
         var errorDescription: String? { message }
     }
-    static func start(_ row: HomeRequest, agent: String) async throws -> HomeTask {
-        let result = await Shell.run([BotPaths.executable.path, "task", "start", "\(row.repo)#\(row.number)",
+    static func start(_ row: HomeRequest, agent: String, sessionID: String? = nil, terminalID: String? = nil) async throws -> HomeTask {
+        var arguments = [BotPaths.executable.path, "task", "start", "\(row.repo)#\(row.number)",
             "--account", row.account ?? "global", "--direction", row.id.hasPrefix("incoming:") ? "incoming" : "outgoing",
-            "--title", row.title, "--label", row.action, "--agent", agent], cwd: BotPaths.root.path)
+            "--title", row.title, "--label", row.action, "--agent", agent]
+        if let sessionID { arguments += ["--session-id", sessionID] }
+        if let terminalID { arguments += ["--terminal-id", terminalID] }
+        let result = await Shell.run(arguments, cwd: BotPaths.root.path)
         guard result.code == 0, let task = try? JSONDecoder().decode(HomeTask.self, from: Data(result.output.utf8)) else {
             throw Failure(message: result.output.isEmpty ? "작업을 등록하지 못했습니다." : result.output)
         }

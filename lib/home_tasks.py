@@ -57,16 +57,33 @@ def identity(repo, number, account, direction):
     return '%s:%s:%s#%s' % (direction, account or 'global', repo, number)
 
 
-def start(repo, number, account, direction, title='', label='', agent='manual'):
+def start(repo, number, account, direction, title='', label='', agent='manual', session_id=None, terminal_id=None):
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or number <= 0 or direction not in ('incoming', 'outgoing'):
         raise TaskError('올바른 PR과 요청 방향이 필요합니다')
+    def validate_id(value):
+        if value is None: return None
+        if agent not in ('codex', 'claude'):
+            raise TaskError('Codex 또는 Claude를 선택해 주세요')
+        try:
+            return str(uuid.UUID(value.strip()))
+        except (ValueError, AttributeError):
+            raise TaskError('올바른 세션 ID(UUID)를 입력해 주세요') from None
+    session_id, terminal_id = validate_id(session_id), validate_id(terminal_id)
     account = None if account in (None, '', 'global') else account
     key = identity(repo, number, account, direction)
     row = {'id': str(uuid.uuid4()), 'requestID': key, 'repo': repo, 'number': number,
            'account': account, 'direction': direction, 'title': title[:500], 'label': label[:300],
            'agent': agent, 'status': 'running', 'startedAt': now(), 'version': 0}
+    if session_id is not None:
+        row['sessionID'] = session_id
+    if terminal_id is not None:
+        row['terminalID'] = terminal_id
     with edit() as data:
         previous = data['tasks'].get(data['current'].get(key))
+        if ((session_id is not None or terminal_id is not None) and previous and previous['status'] == 'running'
+                and previous.get('sessionID') == session_id and previous.get('terminalID') == terminal_id
+                and previous['agent'] == agent):
+            return dict(previous)
         if previous: previous['status'] = 'superseded'
         data['tasks'][row['id']] = row
         data['current'][key] = row['id']

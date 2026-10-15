@@ -7,6 +7,14 @@ final class HomeTaskTests: XCTestCase {
             "title":"Fix","label":"리뷰 대응","status":status,"agent":"codex","startedAt":"now","completedAt":"later"]
         return try JSONDecoder().decode(HomeTask.self, from: JSONSerialization.data(withJSONObject:value))
     }
+    func testSessionLinkDecodesWithoutBreakingOlderRecords() throws {
+        XCTAssertNil(try record(status: "running", requestID: "request").sessionID)
+        let json = """
+        {"id":"task","requestID":"request","repo":"org/repo","number":1,"title":"Fix","label":"Reply","status":"running","agent":"claude","startedAt":"now","sessionID":"12345678-1234-5678-9abc-123456789abc"}
+        """
+        let linked = try JSONDecoder().decode(HomeTask.self, from: Data(json.utf8))
+        XCTAssertEqual(linked.sessionID, "12345678-1234-5678-9abc-123456789abc")
+    }
     func testCompletionHidesActionAndReopeningRestoresIt() throws {
         let snapshot = try HomeOverviewTests().snapshot([["reviewDecision":"CHANGES_REQUESTED"]])
         let key = HomeOverview(snapshot).requests[0].id

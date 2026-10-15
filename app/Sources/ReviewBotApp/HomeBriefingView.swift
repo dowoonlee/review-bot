@@ -6,6 +6,7 @@ struct HomeBriefingView: View {
     @State private var showAllActions = false
     @State private var showAllChanges = false
     @State private var showAllCompleted = false
+    @State private var sessionLink: HomeRequest?
     @State private var launching: String?
     @State private var launchMessages: [String: String] = [:]
 
@@ -136,6 +137,9 @@ struct HomeBriefingView: View {
                 Button(showAllChanges ? "변화 접기" : "변화 \(store.homeChanges.count)건 모두 보기") { showAllChanges.toggle() }.f(.caption)
             }
         }
+        .sheet(item: $sessionLink) { selected in
+            SessionLinkView(row: selected)
+        }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.22), in: RoundedRectangle(cornerRadius: 10))
@@ -213,6 +217,31 @@ struct HomeBriefingView: View {
                 }
             }
             if let task = store.homeTasks.currentTask(for: row.id) {
+                if let sessionID = task.sessionID ?? task.terminalID {
+                    HStack {
+                        Label("연결된 세션 · \(task.agent) · \(sessionID)", systemImage: "link")
+                            .f(.caption).textSelection(.enabled)
+                        if let terminalID = task.terminalID, let agent = AgentTerminal.Agent(rawValue: task.agent) {
+                            Button("작업 안내 전송") {
+                                launching = row.id
+                                Task {
+                                    do {
+                                        try await ExistingAgentSession.send(agent, terminalID: terminalID,
+                                            prompt: AgentTerminal.prompt(for: row, taskID: task.id))
+                                        launchMessages[row.id] = "연결한 iTerm 탭에 작업 안내를 전송했습니다."
+                                    } catch { launchMessages[row.id] = error.localizedDescription }
+                                    launching = nil
+                                }
+                            }.f(.caption).disabled(launching != nil)
+                        }
+                        Button("작업 안내 복사") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(AgentTerminal.prompt(for: row, taskID: task.id), forType: .string)
+                            launchMessages[row.id] = "연결한 대화에 작업 안내를 붙여넣어 주세요."
+                        }.f(.caption)
+                    }
+                }
+
                 if task.status == "running" {
                     Label("작업 중 · \(task.agent)", systemImage: "terminal").f(.caption).foregroundStyle(.orange)
                     Button("작업 중 표시 해제") { Task { await store.reopenHomeTask(task) } }.f(.caption)
@@ -242,6 +271,8 @@ struct HomeBriefingView: View {
                     .disabled(launching != nil)
                     .help("iTerm에서 해당 저장소로 이동해 \(agent.invocation)로 분석 내용을 전달합니다")
                 }
+                Button("기존 세션 연결") { sessionLink = row }
+                    .buttonStyle(.bordered).disabled(launching != nil)
                 Button("완료 처리") {
                     launching = row.id
                     Task {

@@ -17,6 +17,45 @@ class HomeTasksTests(unittest.TestCase):
         row=self.start(direction)
         with patch.object(tasks,'snapshot',return_value=copy.deepcopy(BASE)):
             return tasks.complete(row['id'])
+    def test_link_session_persists_and_repeated_link_preserves_task(self):
+        session = '12345678-1234-5678-9abc-123456789abc'
+        row = tasks.start('org/repo', 1, 'me', 'outgoing', agent='codex', session_id='  ' + session.upper() + '  ')
+        again = tasks.start('org/repo', 1, 'me', 'outgoing', agent='codex', session_id=session)
+        self.assertEqual(row['id'], again['id'])
+        self.assertEqual(tasks.load()['tasks'][row['id']]['sessionID'], session)
+        with patch.object(tasks, 'snapshot', return_value=BASE):
+            self.assertEqual(tasks.complete(row['id'])['status'], 'completed')
+
+    def test_terminal_link_without_conversation_id_and_tab_replacement(self):
+        terminal = '12345678-1234-5678-9abc-123456789abc'
+        row = tasks.start('org/repo', 1, 'me', 'outgoing', agent='codex', terminal_id=terminal)
+        again = tasks.start('org/repo', 1, 'me', 'outgoing', agent='codex', terminal_id=terminal)
+        self.assertEqual(row['id'], again['id'])
+        self.assertEqual(row['terminalID'], terminal)
+        self.assertNotIn('sessionID', row)
+        other = tasks.start('org/repo', 1, 'me', 'outgoing', agent='codex', terminal_id='22345678-1234-5678-9abc-123456789abc')
+        self.assertNotEqual(row['id'], other['id'])
+        with self.assertRaises(tasks.TaskError): tasks.complete(row['id'])
+        with self.assertRaises(tasks.TaskError):
+            tasks.start('org/repo', 1, 'me', 'outgoing', agent='codex', terminal_id='bad')
+        self.assertEqual(tasks.load()['current'][other['requestID']], other['id'])
+
+    def test_invalid_link_does_not_replace_current_task(self):
+        row = self.start()
+        for value in ['', 'not-a-session', '$(touch /tmp/bad)']:
+            with self.assertRaises(tasks.TaskError):
+                tasks.start('org/repo', 1, 'me', 'outgoing', agent='codex', session_id=value)
+        with self.assertRaises(tasks.TaskError):
+            tasks.start('org/repo', 1, 'me', 'outgoing', agent='manual', session_id='12345678-1234-5678-9abc-123456789abc')
+        self.assertEqual(tasks.load()['current'][row['requestID']], row['id'])
+
+    def test_link_new_session_rejects_previous_completion(self):
+        old = self.start()
+        linked = tasks.start('org/repo', 1, 'me', 'outgoing', agent='claude', session_id='12345678-1234-5678-9abc-123456789abc')
+        with self.assertRaises(tasks.TaskError):
+            tasks.complete(old['id'])
+        self.assertEqual(tasks.load()['current'][old['requestID']], linked['id'])
+
     def test_session_exit_does_not_complete_and_completion_is_idempotent(self):
         row=self.start()
         self.assertEqual(tasks.change(row['id'],'stopped')['status'],'stopped')
