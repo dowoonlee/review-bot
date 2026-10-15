@@ -58,7 +58,7 @@ final class ExistingAgentSessionTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        for (index, script) in [ExistingAgentSession.listScript, ExistingAgentSession.sendScript].enumerated() {
+        for (index, script) in [ExistingAgentSession.listScript, ExistingAgentSession.sendScript, ExistingAgentSession.focusScript].enumerated() {
             let result = await Shell.run(["/usr/bin/osacompile", "-o", directory.appendingPathComponent("\(index).scpt").path, "-e", script])
             XCTAssertEqual(result.code, 0, result.output)
         }

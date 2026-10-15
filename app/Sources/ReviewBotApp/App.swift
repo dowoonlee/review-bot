@@ -2,8 +2,7 @@ import SwiftUI
 
 /// Finder·Launchpad 에서 다시 눌렀을 때 창을 띄운다.
 ///
-/// 메뉴바 전용 앱(LSUIElement)은 Dock 아이콘이 없어서, 창이 안 뜨면 사용자 눈에는
-/// "실행이 안 된다" 로 보인다. 이미 떠 있는 앱을 다시 눌러도 macOS 는 새 프로세스를
+/// Dock·Finder·Launchpad에서 이미 떠 있는 앱을 다시 눌러도 macOS 는 새 프로세스를
 /// 만들지 않고 이 콜백만 부르므로, 여기서 창을 열어 줘야 한다.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor static var showDashboard: (() -> Void)?

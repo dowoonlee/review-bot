@@ -60,6 +60,44 @@ enum ExistingAgentSession {
         return parseSessions(result.output).filter { hasAgent(agent, tty: $0.tty, processes: processes.output) }
     }
 
+    static let focusScript = """
+    on run argv
+        set targetID to item 1 of argv
+        tell application id "com.googlecode.iterm2"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        ignoring case
+                            set matches to (id of s) is targetID
+                        end ignoring
+                        if matches then
+                            select w
+                            select t
+                            select s
+                            activate
+                            return "focused"
+                        end if
+                    end repeat
+                end repeat
+            end repeat
+        end tell
+        error "연결한 iTerm 세션이 닫혔습니다. 다시 선택해 주세요."
+    end run
+    """
+
+    static func focus(terminalID: String) async throws {
+        guard let id = UUID(uuidString: terminalID) else {
+            throw HomeTaskClient.Failure(message: "연결한 iTerm 세션 ID가 올바르지 않습니다. 다시 선택해 주세요.")
+        }
+        guard await MainActor.run(body: {
+            !NSRunningApplication.runningApplications(withBundleIdentifier: "com.googlecode.iterm2").isEmpty
+        }) else { throw HomeTaskClient.Failure(message: "iTerm이 실행 중이 아닙니다. 연결할 세션을 다시 열어 주세요.") }
+        let result = await Shell.run(["/usr/bin/osascript", "-e", focusScript, id.uuidString.lowercased()])
+        guard result.code == 0, result.output.trimmingCharacters(in: .whitespacesAndNewlines) == "focused" else {
+            throw HomeTaskClient.Failure(message: "연결한 세션으로 이동하지 못했습니다. iTerm 세션과 자동화 권한을 확인해 주세요. " + result.output)
+        }
+    }
+
     // Bracketed paste preserves multiline input. Remove terminal controls from PR-supplied text.
     static func pastePayload(_ prompt: String) -> String {
         let clean = String(prompt.unicodeScalars.filter {

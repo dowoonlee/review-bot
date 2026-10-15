@@ -221,6 +221,21 @@ struct HomeBriefingView: View {
                     HStack {
                         Label("연결된 세션 · \(task.agent) · \(sessionID)", systemImage: "link")
                             .f(.caption).textSelection(.enabled)
+                        if let terminalID = task.terminalID {
+                            Button {
+                                launching = row.id
+                                Task {
+                                    do {
+                                        try await ExistingAgentSession.focus(terminalID: terminalID)
+                                        launchMessages[row.id] = nil
+                                    } catch { launchMessages[row.id] = error.localizedDescription }
+                                    launching = nil
+                                }
+                            } label: {
+                                Label("세션으로 이동", systemImage: "arrow.up.forward.app")
+                            }.f(.caption).disabled(launching != nil)
+                                .help("연결한 iTerm 창·탭·분할 화면으로 이동합니다")
+                        }
                         if let terminalID = task.terminalID, let agent = AgentTerminal.Agent(rawValue: task.agent) {
                             Button("작업 안내 전송") {
                                 launching = row.id

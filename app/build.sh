@@ -59,8 +59,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleVersion</key>           <string>1</string>
   <key>LSMinimumSystemVersion</key>    <string>14.0</string>
-  <!-- 메뉴바 상주 앱 — Dock 아이콘 없이 뜬다. 대시보드 창은 그대로 열린다. -->
-  <key>LSUIElement</key>               <true/>
+  <!-- 일반 앱으로 Dock·앱 전환기에 표시한다. 메뉴바 아이콘은 MenuBarExtra로 유지한다. -->
+  <key>LSUIElement</key>               <false/>
   <key>NSHighResolutionCapable</key>   <true/>
   <key>NSAppleEventsUsageDescription</key><string>선택한 PR의 분석 내용을 iTerm에서 Codex 또는 Claude로 이어서 작업합니다.</string>
 </dict>
