@@ -626,6 +626,12 @@ final class BotStore {
         await run(["publish", "\(draft.repo)#\(draft.number)"], label: "초안 게시")
     }
 
+    /// 초안의 이벤트만 바꾼다. 파일만 고치므로 GitHub 에는 아무것도 나가지 않는다.
+    func setDraftEvent(_ draft: DraftPayload, _ event: String) async {
+        await run(["drafts", "event", "\(draft.repo)#\(draft.number)", event],
+                  label: event == "APPROVE" ? "승인으로 변경" : "초안 판정 변경")
+    }
+
     func tickNow() async { await runDetached(["tick"], label: "지금 틱") }
 
     // 이력 삭제. 처리 지문(reviewed.json)은 건드리지 않으므로 지웠다고 다시

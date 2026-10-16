@@ -551,12 +551,28 @@ struct DraftDetailView: View {
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .background(.orange.opacity(0.15), in: Capsule())
                     .foregroundStyle(.orange)
+                if let from = draft.overridden?.from {
+                    Text("사용자가 바꿈").f(.caption2)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(.purple.opacity(0.15), in: Capsule())
+                        .foregroundStyle(.purple)
+                        .help("봇의 판정은 \(eventName(from)) 였습니다.")
+                }
             }
             if let t = draft.title, !t.isEmpty {
                 Text(t).f(.callout).foregroundStyle(.secondary)
             }
             Text("인라인 \(draft.inline ?? 0) · 본문 \(draft.demoted ?? 0) · \(draft.at ?? "-") · 커밋 \(String((draft.sha ?? "-").prefix(12)))")
                 .f(.caption, mono: true).foregroundStyle(.secondary)
+        }
+    }
+
+    private func eventName(_ e: String) -> String {
+        switch e {
+        case "APPROVE": "승인"
+        case "REQUEST_CHANGES": "변경 요청"
+        case "COMMENT": "코멘트"
+        default: e
         }
     }
 
@@ -612,6 +628,22 @@ struct DraftDetailView: View {
                 Task { await store.review(draft.repo, draft.number) }
             } label: { Label("다시 리뷰", systemImage: "arrow.clockwise") }
                 .disabled(store.busy != nil || store.health == .running)
+
+            // 판정은 코멘트였지만 읽어 보니 승인해도 되겠다 싶을 때. 파일만 바뀌고
+            // 올라가는 건 여전히 위의 게시 버튼과 확인 창을 거친다.
+            if draft.canPromoteToApprove {
+                Button {
+                    Task { await store.setDraftEvent(draft, "APPROVE") }
+                } label: { Label("승인으로 바꾸기", systemImage: "checkmark.seal") }
+                    .help("초안을 승인(Approve)으로 게시하도록 바꿉니다. 게시 전까지 GitHub 에는 아무것도 올라가지 않습니다.")
+                    .disabled(store.busy != nil || store.health == .running)
+            } else if let from = draft.revertEvent {
+                Button {
+                    Task { await store.setDraftEvent(draft, from) }
+                } label: { Label("판정대로 되돌리기", systemImage: "arrow.uturn.backward") }
+                    .help("사용자가 바꾸기 전 봇의 판정으로 되돌립니다.")
+                    .disabled(store.busy != nil || store.health == .running)
+            }
 
             if store.busy != nil { ProgressView().controlSize(.small) }
         }

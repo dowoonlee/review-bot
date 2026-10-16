@@ -57,5 +57,64 @@ class DraftReconciliationTests(unittest.TestCase):
         self.assertEqual(store.pending_drafts()[0]['sha'], 'new')
 
 
+class DraftEventTests(DraftReconciliationTests):
+    def draft(self, number, event='COMMENT'):
+        data = {'repo': 'o/r', 'number': number, 'sha': 'abc', 'event': event,
+                'reason': 'judge said comment', 'at': '2026-10-16T09:00:00',
+                'decision': {'judgeEvent': event, 'finalEvent': event,
+                             'summary': 'judge said comment', 'reasons': []}}
+        path = Path(store.draft_payload_path('o/r', number))
+        path.write_text(json.dumps(data))
+        path.with_suffix('.md').write_text('<!-- event: %s -->\nreport' % event)
+        return path
+
+    def test_comment_draft_can_become_approval_and_remembers_the_judge(self):
+        path = self.draft(1)
+        draft = drafts.set_event('o/r', 1, 'APPROVE')
+        saved = json.loads(path.read_text())
+        self.assertEqual(saved, draft)
+        self.assertEqual(saved['event'], 'APPROVE')
+        self.assertEqual(saved['at'], '2026-10-16T09:00:00')
+        self.assertEqual(saved['override']['from'], 'COMMENT')
+        self.assertEqual(saved['override']['decision']['finalEvent'], 'COMMENT')
+        self.assertEqual(saved['decision']['judgeEvent'], 'COMMENT')
+        self.assertEqual(saved['decision']['finalEvent'], 'APPROVE')
+        self.assertEqual([r['code'] for r in saved['decision']['reasons']], ['HUMAN_OVERRIDE'])
+        self.assertEqual(saved['decision']['reasons'][0]['source'], 'user')
+        self.assertIn('승인', saved['reason'])
+        self.assertTrue(path.with_suffix('.md').read_text().startswith('<!-- event: APPROVE -->\nreport'))
+
+    def test_returning_to_the_judged_event_restores_the_original_decision(self):
+        path = self.draft(1)
+        original = json.loads(path.read_text())
+        drafts.set_event('o/r', 1, 'APPROVE')
+        drafts.set_event('o/r', 1, 'REQUEST_CHANGES')
+        twice = json.loads(path.read_text())
+        self.assertEqual(twice['override']['from'], 'COMMENT')
+        self.assertEqual([r['code'] for r in twice['decision']['reasons']], ['HUMAN_OVERRIDE'])
+        drafts.set_event('o/r', 1, 'COMMENT')
+        self.assertEqual(json.loads(path.read_text()), original)
+        self.assertTrue(path.with_suffix('.md').read_text().startswith('<!-- event: COMMENT -->'))
+
+    def test_same_event_and_bad_input_leave_the_draft_alone(self):
+        path = self.draft(1)
+        before = path.read_text()
+        drafts.set_event('o/r', 1, 'COMMENT')
+        self.assertEqual(path.read_text(), before)
+        with self.assertRaises(ValueError):
+            drafts.set_event('o/r', 1, 'MERGE')
+        self.assertEqual(path.read_text(), before)
+        with self.assertRaises(FileNotFoundError):
+            drafts.set_event('o/r', 2, 'APPROVE')
+
+    def test_draft_without_decision_or_report_still_changes(self):
+        path = Path(store.draft_payload_path('o/r', 3))
+        path.write_text(json.dumps({'repo': 'o/r', 'number': 3, 'sha': 'abc'}))
+        draft = drafts.set_event('o/r', 3, 'APPROVE')
+        self.assertEqual(draft['event'], 'APPROVE')
+        self.assertEqual(draft['override']['from'], 'COMMENT')
+        self.assertEqual(draft['decision']['judgeEvent'], 'COMMENT')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -340,9 +340,20 @@ struct DraftPayload: Decodable, Sendable, Identifiable {
     var dropped: [DroppedFinding]?
     var costUSD: Double?
     var at: String?
+    var overridden: DraftOverride?   // 사용자가 판정과 다른 이벤트로 바꿨을 때 원래 판정
 
     var id: String { "\(repo)#\(number)" }
     var label: String { "\(repo.split(separator: "/").last.map(String.init) ?? repo)#\(number)" }
+
+    /// 게시될 이벤트. 봇과 같은 규칙으로, 비어 있으면 코멘트다.
+    var effectiveEvent: String { event ?? "COMMENT" }
+    /// 코멘트 초안은 사람이 읽고 승인으로 올리기로 할 수 있다.
+    var canPromoteToApprove: Bool { effectiveEvent == "COMMENT" }
+    /// 사용자가 바꾼 초안이면 판정으로 되돌릴 이벤트.
+    var revertEvent: String? {
+        guard let from = overridden?.from, from != effectiveEvent else { return nil }
+        return from
+    }
 
     var notificationID: String { "\(id)|\(sha ?? "")|\(at ?? "")" }
 
@@ -354,7 +365,14 @@ struct DraftPayload: Decodable, Sendable, Identifiable {
         case repo, number, title, sha, account, event, reason, body
         case comments, inline, demoted, dropped, at
         case costUSD = "cost_usd"
+        case overridden = "override"
     }
+}
+
+/// 사용자가 초안의 이벤트를 바꾸기 전 판정. `review-bot drafts event` 가 남긴다.
+struct DraftOverride: Decodable, Sendable {
+    var from: String?
+    var at: String?
 }
 
 struct DraftComment: Decodable, Sendable, Identifiable {

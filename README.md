@@ -271,6 +271,13 @@ review-bot publish owner/repo#123 --dry-run   # 무엇이 나갈지 먼저 봅�
 review-bot publish owner/repo#123      # 그대로 올립니다
 ```
 
+판정이 코멘트였지만 읽어 보니 승인해도 되겠다면 `review-bot drafts event
+owner/repo#123 APPROVE` 로 초안의 이벤트만 바꾼 뒤 게시합니다. 본문과 인라인
+지적은 그대로이고, 원래 판정은 초안의 `override` 에 남아 `COMMENT` 로 되돌릴 수
+있습니다. 앱의 초안 화면에서는 **승인으로 바꾸기** 버튼이 같은 일을 하고, 바꾼
+초안에는 **판정대로 되돌리기** 가 나타납니다. 승인은 게시 때 CI 확인
+(`post.approveNeedsGreenCi`)을 여전히 거칩니다.
+
 초안 하나는 사람이 읽는 `.md` 와 게시용 `.json` 두 벌로 남습니다. `publish` 는
 그때 굳어진 본문과 인라인 좌표를 **그대로** 올리므로 리뷰를 다시 돌리지 않고,
 따라서 추가 비용이 없습니다. 대신 초안을 만든 뒤 새 커밋이 올라왔으면 좌표가
@@ -424,6 +431,7 @@ Apple Development. 그 뒤 `./build.sh` 를 다시 돌리면 그 신원을 알�
 | `review-bot interval [분]` | 틱 주기 조회·변경. launchd job 을 다시 올립니다 (기본 15분) |
 | `review-bot cap [건수]` | 틱당 리뷰 상한 조회·변경 (1~20). 도는 틱은 이전 상한으로 끝내고 다음 틱부터 적용 |
 | `review-bot drafts` | 게시를 기다리는 초안 목록 |
+| `review-bot drafts event owner/repo#123 APPROVE` | 초안의 리뷰 이벤트를 바꿈 (`APPROVE`/`COMMENT`/`REQUEST_CHANGES`). GitHub 에는 나가지 않음 |
 | `review-bot publish owner/repo#123` | 초안을 리뷰 없이 그대로 게시. `--dry-run` 으로 미리보기 |
 | `review-bot pause [사유]` / `resume` | 자동 리뷰 정지 / 재개 |
 | `review-bot doctor` | 의존성·인증·설정 점검 |
@@ -788,7 +796,7 @@ GitHub 게시 없이 PENDING으로 남기고 다음 틱에서 다시 확인합�
 실행 이력과 초안의 `decision`에는 `judgeEvent`, `finalEvent`, `judgeReason`, `summary`,
 `reasons`를 저장합니다. reasons는 DEFECT, HUMAN_REVIEW, ENVIRONMENT_UNAVAILABLE,
 CI_PENDING, CI_FAILED, REVIEW_INCOMPLETE, VALIDATION_INCOMPLETE, JUDGE_FAILED,
-POLICY_GUARD, PUBLISH_FAILED를 구분합니다. 앱 상세 화면에서도 최초 AI 판정과 최종
+POLICY_GUARD, PUBLISH_FAILED, HUMAN_OVERRIDE(사용자가 초안 이벤트를 바꿈)를 구분합니다. 앱 상세 화면에서도 최초 AI 판정과 최종
 판정, 대기·보류 이유를 함께 보여 줍니다. 이전 형식의 기록도 계속 읽을 수 있습니다.
 
 ## PR 로컬 자료 정리
