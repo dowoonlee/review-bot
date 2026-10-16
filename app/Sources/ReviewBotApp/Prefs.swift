@@ -53,7 +53,7 @@ final class Prefs {
 /// 왜 안 오는지 보이는 편이 낫다. 배너가 막혀도 소리는 나므로 소리는 따로 낸다.
 @MainActor
 @Observable
-final class Notifier {
+final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     static let shared = Notifier()
 
     enum Status: Equatable {
@@ -78,6 +78,7 @@ final class Notifier {
     /// 앱이 완전히 뜨기 전에 부르면 `Notifications are not allowed for this application`
     /// 이 돌아오는 일이 있어, 실패하면 잠깐 뒤 몇 번 더 물어본다.
     func prepare(attempt: Int = 1) {
+        UNUserNotificationCenter.current().delegate = self
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { ok, err in
             Task { @MainActor in
                 if let err {
@@ -98,8 +99,35 @@ final class Notifier {
     }
 
     private(set) var attempts = 0
+    var requestedDraftID: String?
 
-    func post(title: String, body: String, sound: Bool = true) {
+    func openDraft(_ id: String) {
+        requestedDraftID = id
+        AppDelegate.showDashboard?()
+        NSApplication.shared.requestUserAttention(.informationalRequest)
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .list])
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        if response.actionIdentifier == UNNotificationDefaultActionIdentifier,
+           let id = response.notification.request.content.userInfo["draftID"] as? String {
+            Task { @MainActor in self.openDraft(id) }
+        }
+        completionHandler()
+    }
+
+    func post(title: String, body: String, sound: Bool = true, draftID: String? = nil) {
         lastSent = "\(shortNow()) \(title) — \(body.prefix(60))"
         if sound { NSSound(named: "Glass")?.play() }   // 배너가 막혀도 이건 들린다
 
@@ -107,12 +135,22 @@ final class Notifier {
             let content = UNMutableNotificationContent()
             content.title = title
             content.body = body
-            content.sound = .default
+            content.sound = sound ? .default : nil
+            if let draftID { content.userInfo["draftID"] = draftID }
             UNUserNotificationCenter.current().add(
                 UNNotificationRequest(identifier: UUID().uuidString,
-                                      content: content, trigger: nil))
+                                      content: content, trigger: nil)) { error in
+                    guard let error else { return }
+                    let message = error.localizedDescription
+                    Task { @MainActor in
+                        self.status = .failed(message)
+                        self.fallback(title: title, body: body)
+                        if let draftID { self.openDraft(draftID) }
+                    }
+                }
         } else {
             fallback(title: title, body: body)
+            if let draftID { openDraft(draftID) }
         }
     }
 

@@ -344,6 +344,12 @@ struct DraftPayload: Decodable, Sendable, Identifiable {
     var id: String { "\(repo)#\(number)" }
     var label: String { "\(repo.split(separator: "/").last.map(String.init) ?? repo)#\(number)" }
 
+    var notificationID: String { "\(id)|\(sha ?? "")|\(at ?? "")" }
+
+    static func needingNotification(_ drafts: [DraftPayload], seen: Set<String>) -> [DraftPayload] {
+        drafts.filter { !seen.contains($0.notificationID) }
+    }
+
     enum CodingKeys: String, CodingKey {
         case repo, number, title, sha, account, event, reason, body
         case comments, inline, demoted, dropped, at

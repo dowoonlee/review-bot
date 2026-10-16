@@ -80,7 +80,7 @@ final class BotStore {
 
     func start() {
         guard pollTask == nil else { return }
-        seenDrafts = UserDefaults.standard.stringArray(forKey: "seenDrafts").map(Set.init)
+        seenDrafts = UserDefaults.standard.stringArray(forKey: "seenDraftRevisions").map(Set.init)
         seenPRs = UserDefaults.standard.stringArray(forKey: "seenPRs").map(Set.init)
         Notifier.shared.prepare()
         readLaunchdInterval()
@@ -177,8 +177,8 @@ final class BotStore {
         readReviewed()
         readFlags()
         readLiveSessions()
-        readDrafts()
         readMode()
+        readDrafts()
         readCurrent()
         readSchedule()
     }
@@ -224,18 +224,20 @@ final class BotStore {
         announceNewDrafts()
     }
 
-    /// 처음 본 초안만 알린다. 이미 본 것은 UserDefaults 에 남아 재시작해도 조용하다.
+    /// PR 번호가 같아도 새로 생성한 초안은 다시 검토해야 한다.
     private func announceNewDrafts() {
-        let ids = Set(drafts.map(\.id))
+        let ids = Set(drafts.map(\.notificationID))
         defer {
             seenDrafts = ids
-            UserDefaults.standard.set(Array(ids), forKey: "seenDrafts")
+            UserDefaults.standard.set(Array(ids), forKey: "seenDraftRevisions")
         }
-        guard let seen = seenDrafts else { return }     // 첫 관측은 기준선일 뿐이다
-        for id in ids.subtracting(seen) {
-            guard let d = drafts.first(where: { $0.id == id }) else { continue }
-            announce("리뷰 초안이 준비됐습니다",
-                     "\(d.label) · \(d.event ?? "COMMENT") · 인라인 \(d.inline ?? 0)건 — 읽어 보고 게시하세요")
+        guard !autoPost,
+              UserDefaults.standard.object(forKey: "notify") as? Bool ?? true else { return }
+        for draft in DraftPayload.needingNotification(drafts, seen: seenDrafts ?? []) {
+            Notifier.shared.post(
+                title: "리뷰를 검토해 주세요",
+                body: "\(draft.label) · \(draft.title ?? "")\n초안이 준비됐습니다. 검토 후 게시해 주세요.",
+                draftID: draft.id)
         }
     }
 

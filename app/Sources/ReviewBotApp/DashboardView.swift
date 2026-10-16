@@ -72,9 +72,15 @@ struct DashboardView: View {
             UserDefaults.standard.set(selection?.stored, forKey: "lastPane")
         }
         .task {
-            if let saved = Selection.restore(UserDefaults.standard.string(forKey: "lastPane")) {
+            if !didLandOnDraft, let saved = Selection.restore(UserDefaults.standard.string(forKey: "lastPane")) {
                 selection = saved
             }
+        }
+        .onChange(of: Notifier.shared.requestedDraftID, initial: true) {
+            guard let id = Notifier.shared.requestedDraftID else { return }
+            selection = .draft(id)
+            didLandOnDraft = true
+            Notifier.shared.requestedDraftID = nil
         }
         // 검토를 기다리는 초안이 있으면 그리로 데려간다. 켜 두고 잊는 것이
         // 이 모드의 유일한 실패 방식이라, 한 번은 눈앞에 놓는다.
