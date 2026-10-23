@@ -556,7 +556,7 @@ struct DraftDetailView: View {
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(.purple.opacity(0.15), in: Capsule())
                         .foregroundStyle(.purple)
-                        .help("봇의 판정은 \(eventName(from)) 였습니다.")
+                        .help("봇의 판정은 \(eventLabel(from)) 였습니다.")
                 }
             }
             if let t = draft.title, !t.isEmpty {
@@ -564,15 +564,6 @@ struct DraftDetailView: View {
             }
             Text("인라인 \(draft.inline ?? 0) · 본문 \(draft.demoted ?? 0) · \(draft.at ?? "-") · 커밋 \(String((draft.sha ?? "-").prefix(12)))")
                 .f(.caption, mono: true).foregroundStyle(.secondary)
-        }
-    }
-
-    private func eventName(_ e: String) -> String {
-        switch e {
-        case "APPROVE": "승인"
-        case "REQUEST_CHANGES": "변경 요청"
-        case "COMMENT": "코멘트"
-        default: e
         }
     }
 
@@ -610,6 +601,25 @@ struct DraftDetailView: View {
         }
     }
 
+    // 메뉴 항목 — "승인으로 바꾸기" 꼴. 봇의 판정으로 돌아가는 항목은 그렇다고 적는다.
+    private func switchLabel(_ event: String) -> String {
+        let to: String = switch event {
+        case "APPROVE": "승인으로"
+        case "REQUEST_CHANGES": "변경 요청으로"
+        case "COMMENT": "코멘트로"
+        default: "\(event) 로"
+        }
+        return event == draft.revertEvent ? "\(to) 되돌리기 (봇 판정)" : "\(to) 바꾸기"
+    }
+    private func switchIcon(_ event: String) -> String {
+        if event == draft.revertEvent { return "arrow.uturn.backward" }
+        return switch event {
+        case "APPROVE": "checkmark.seal"
+        case "REQUEST_CHANGES": "exclamationmark.octagon"
+        default: "text.bubble"
+        }
+    }
+
     private var actions: some View {
         HStack {
             Button { confirming = true } label: {
@@ -629,21 +639,23 @@ struct DraftDetailView: View {
             } label: { Label("다시 리뷰", systemImage: "arrow.clockwise") }
                 .disabled(store.busy != nil || store.health == .running)
 
-            // 판정은 코멘트였지만 읽어 보니 승인해도 되겠다 싶을 때. 파일만 바뀌고
-            // 올라가는 건 여전히 위의 게시 버튼과 확인 창을 거친다.
-            if draft.canPromoteToApprove {
-                Button {
-                    Task { await store.setDraftEvent(draft, "APPROVE") }
-                } label: { Label("승인으로 바꾸기", systemImage: "checkmark.seal") }
-                    .help("초안을 승인(Approve)으로 게시하도록 바꿉니다. 게시 전까지 GitHub 에는 아무것도 올라가지 않습니다.")
-                    .disabled(store.busy != nil || store.health == .running)
-            } else if let from = draft.revertEvent {
-                Button {
-                    Task { await store.setDraftEvent(draft, from) }
-                } label: { Label("판정대로 되돌리기", systemImage: "arrow.uturn.backward") }
-                    .help("사용자가 바꾸기 전 봇의 판정으로 되돌립니다.")
-                    .disabled(store.busy != nil || store.health == .running)
+            // 읽어 보니 봇의 판정과 다르게 올리고 싶을 때 — 승인·코멘트·변경 요청 중
+            // 지금 것을 뺀 나머지를 고른다. 파일만 바뀌고 올라가는 건 여전히 위의
+            // 게시 버튼과 확인 창을 거친다. 사용자가 바꾼 초안이면 봇 판정으로
+            // 돌아가는 항목이 따로 표시된다.
+            Menu {
+                ForEach(draft.switchableEvents, id: \.self) { event in
+                    Button {
+                        Task { await store.setDraftEvent(draft, event) }
+                    } label: {
+                        Label(switchLabel(event), systemImage: switchIcon(event))
+                    }
+                }
+            } label: {
+                Label("게시 방식 바꾸기", systemImage: "arrow.triangle.2.circlepath")
             }
+            .help("초안을 어떤 리뷰 이벤트로 게시할지 바꿉니다. 게시 전까지 GitHub 에는 아무것도 올라가지 않습니다.")
+            .disabled(store.busy != nil || store.health == .running)
 
             if store.busy != nil { ProgressView().controlSize(.small) }
         }

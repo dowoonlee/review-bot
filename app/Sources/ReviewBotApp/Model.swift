@@ -347,8 +347,10 @@ struct DraftPayload: Decodable, Sendable, Identifiable {
 
     /// 게시될 이벤트. 봇과 같은 규칙으로, 비어 있으면 코멘트다.
     var effectiveEvent: String { event ?? "COMMENT" }
-    /// 코멘트 초안은 사람이 읽고 승인으로 올리기로 할 수 있다.
-    var canPromoteToApprove: Bool { effectiveEvent == "COMMENT" }
+    /// 사람이 읽고 다른 이벤트로 올리기로 할 수 있다 — 지금 이벤트를 뺀 나머지.
+    /// `review-bot drafts event` 가 받는 순서와 같다.
+    static let events = ["APPROVE", "COMMENT", "REQUEST_CHANGES"]
+    var switchableEvents: [String] { Self.events.filter { $0 != effectiveEvent } }
     /// 사용자가 바꾼 초안이면 판정으로 되돌릴 이벤트.
     var revertEvent: String? {
         guard let from = overridden?.from, from != effectiveEvent else { return nil }
@@ -373,6 +375,16 @@ struct DraftPayload: Decodable, Sendable, Identifiable {
 struct DraftOverride: Decodable, Sendable {
     var from: String?
     var at: String?
+}
+
+/// 리뷰 이벤트의 한국어 이름 — 배지·메뉴·명령 라벨이 같은 말을 쓴다.
+func eventLabel(_ event: String) -> String {
+    switch event {
+    case "APPROVE": "승인"
+    case "REQUEST_CHANGES": "변경 요청"
+    case "COMMENT": "코멘트"
+    default: event
+    }
 }
 
 struct DraftComment: Decodable, Sendable, Identifiable {

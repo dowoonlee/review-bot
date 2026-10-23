@@ -2,33 +2,42 @@ import XCTest
 @testable import ReviewBotApp
 
 final class DraftEventTests: XCTestCase {
-    func testCommentDraftOffersApproval() throws {
+    func testDraftOffersEveryOtherEvent() throws {
         let plain = try decode(["repo": "o/r", "number": 1])
         XCTAssertEqual(plain.effectiveEvent, "COMMENT")
-        XCTAssertTrue(plain.canPromoteToApprove)
+        XCTAssertEqual(plain.switchableEvents, ["APPROVE", "REQUEST_CHANGES"])
         XCTAssertNil(plain.revertEvent)
 
         let comment = try decode(["repo": "o/r", "number": 1, "event": "COMMENT"])
-        XCTAssertTrue(comment.canPromoteToApprove)
+        XCTAssertEqual(comment.switchableEvents, ["APPROVE", "REQUEST_CHANGES"])
 
-        for event in ["APPROVE", "REQUEST_CHANGES"] {
-            let d = try decode(["repo": "o/r", "number": 1, "event": event])
-            XCTAssertFalse(d.canPromoteToApprove, event)
-            XCTAssertNil(d.revertEvent, event)
-        }
+        let approve = try decode(["repo": "o/r", "number": 1, "event": "APPROVE"])
+        XCTAssertEqual(approve.switchableEvents, ["COMMENT", "REQUEST_CHANGES"])
+        XCTAssertNil(approve.revertEvent)
+
+        let changes = try decode(["repo": "o/r", "number": 1, "event": "REQUEST_CHANGES"])
+        XCTAssertEqual(changes.switchableEvents, ["APPROVE", "COMMENT"])
+        XCTAssertNil(changes.revertEvent)
     }
 
     func testOverriddenDraftOffersReturnToJudgedEvent() throws {
         let promoted = try decode(["repo": "o/r", "number": 1, "event": "APPROVE",
                                    "override": ["from": "COMMENT", "at": "2026-10-16T09:00:00"]])
-        XCTAssertFalse(promoted.canPromoteToApprove)
+        XCTAssertEqual(promoted.switchableEvents, ["COMMENT", "REQUEST_CHANGES"])
         XCTAssertEqual(promoted.revertEvent, "COMMENT")
         XCTAssertEqual(promoted.overridden?.from, "COMMENT")
 
         let backAlready = try decode(["repo": "o/r", "number": 1, "event": "COMMENT",
                                       "override": ["from": "COMMENT"]])
         XCTAssertNil(backAlready.revertEvent)
-        XCTAssertTrue(backAlready.canPromoteToApprove)
+        XCTAssertEqual(backAlready.switchableEvents, ["APPROVE", "REQUEST_CHANGES"])
+    }
+
+    func testEventLabelsMatchTheBot() {
+        XCTAssertEqual(eventLabel("APPROVE"), "승인")
+        XCTAssertEqual(eventLabel("COMMENT"), "코멘트")
+        XCTAssertEqual(eventLabel("REQUEST_CHANGES"), "변경 요청")
+        XCTAssertEqual(eventLabel("PENDING"), "PENDING")
     }
 
     private func decode(_ object: [String: Any]) throws -> DraftPayload {

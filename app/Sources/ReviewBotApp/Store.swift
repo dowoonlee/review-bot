@@ -659,7 +659,7 @@ final class BotStore {
     /// 초안의 이벤트만 바꾼다. 파일만 고치므로 GitHub 에는 아무것도 나가지 않는다.
     func setDraftEvent(_ draft: DraftPayload, _ event: String) async {
         await run(["drafts", "event", "\(draft.repo)#\(draft.number)", event],
-                  label: event == "APPROVE" ? "승인으로 변경" : "초안 판정 변경")
+                  label: "\(eventLabel(event))(으)로 변경")
     }
 
     func tickNow() async { await runDetached(["tick"], label: "지금 틱") }
