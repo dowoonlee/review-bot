@@ -689,6 +689,12 @@ final class BotStore {
 
     enum Health { case running, paused, idle, problem }
 
+    /// 이 PR 의 초안을 지금 건드리면 안 되는가. 봇이 다른 PR 을 보는 중이면 false 다.
+    func draftLocked(_ repo: String, _ number: Int) -> Bool {
+        DraftGate.blocked(busy: busy != nil, running: health == .running,
+                          current: current, repo: repo, number: number)
+    }
+
     var health: Health {
         if let r = running, r.alive { return .running }
         if paused != nil { return .paused }

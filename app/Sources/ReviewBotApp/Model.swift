@@ -193,6 +193,21 @@ struct RunningInfo: Decodable, Sendable {
     var alive: Bool
 }
 
+/// 초안에 손대는 버튼(게시·게시 방식 바꾸기)을 언제 막는가.
+///
+/// 봇의 `publish` 와 `drafts event` 는 틱 전체가 아니라 그 PR 만 잠근다. 그래서 봇이
+/// 돌고 있어도 **다른** PR 을 리뷰하는 중이면 이 초안은 그대로 올릴 수 있다. 막아야
+/// 하는 것은 같은 PR 을 리뷰하는 중일 때 — 그때는 봇이 초안을 다시 쓰고 있어 CLI 가
+/// 거절한다 — 와 앱이 이미 다른 명령을 돌리고 있을 때뿐이다.
+enum DraftGate {
+    static func blocked(busy: Bool, running: Bool, current: CurrentRun?,
+                        repo: String, number: Int) -> Bool {
+        if busy { return true }
+        guard running, let c = current else { return false }
+        return c.repo == repo && c.number == number
+    }
+}
+
 struct PendingPR: Decodable, Sendable, Identifiable {
     var account: String?
     var insight: RequestInsight?

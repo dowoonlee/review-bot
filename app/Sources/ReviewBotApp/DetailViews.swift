@@ -622,11 +622,14 @@ struct DraftDetailView: View {
 
     private var actions: some View {
         HStack {
+            // 봇이 다른 PR 을 리뷰하는 중이어도 이 초안은 올릴 수 있다 — 게시는 이 PR
+            // 만 잠근다. 같은 PR 을 리뷰 중일 때만 막는다.
             Button { confirming = true } label: {
                 Label(publishLabel, systemImage: publishIcon)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(store.busy != nil || store.health == .running)
+            .disabled(store.draftLocked(draft.repo, draft.number))
+            .help(reviewingThisPR ? "봇이 이 PR 을 리뷰하는 중입니다 — 끝나면 게시할 수 있습니다" : "")
 
             Button {
                 if let url = URL(string: "https://github.com/\(draft.repo)/pull/\(draft.number)") {
@@ -655,11 +658,15 @@ struct DraftDetailView: View {
                 Label("게시 방식 바꾸기", systemImage: "arrow.triangle.2.circlepath")
             }
             .help("초안을 어떤 리뷰 이벤트로 게시할지 바꿉니다. 게시 전까지 GitHub 에는 아무것도 올라가지 않습니다.")
-            .disabled(store.busy != nil || store.health == .running)
+            .disabled(store.draftLocked(draft.repo, draft.number))
 
             if store.busy != nil { ProgressView().controlSize(.small) }
         }
         .buttonStyle(.bordered)
+    }
+
+    private var reviewingThisPR: Bool {
+        store.health == .running && store.current?.repo == draft.repo && store.current?.number == draft.number
     }
 
     /// 게시가 거절되면 그 이유가 여기로 온다 — 새 커밋이 올라온 경우가 대표적이다.

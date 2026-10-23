@@ -3,6 +3,7 @@ import json
 import fcntl
 import os
 import time
+from contextlib import contextmanager
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE_DIR = os.path.join(ROOT, "state")
@@ -56,6 +57,27 @@ def save(data):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
     os.replace(tmp, REVIEWED)
+
+
+def commit(state, mutate):
+    """reviewed.json 을 잠근 채 다시 읽어 `mutate` 를 적용하고 저장한다.
+
+    틱은 처리 이력을 시작할 때 한 번 읽어 들고 다니면서 PR 하나를 끝낼 때마다 그
+    사본을 통째로 저장한다. 그 사이 `publish` 가 다른 PR 의 기록을 "게시함" 으로
+    고쳤다면, 틱의 다음 저장이 낡은 사본으로 그 기록을 덮어 게시가 없던 일이 된다.
+    그래서 쓰기는 들고 있던 사본이 아니라 지금 파일에 있는 내용 위에 하고, 들고
+    있던 `state` 는 저장된 내용으로 바꿔 준다. `mutate` 의 반환값을 그대로 돌려준다.
+    """
+    _ensure()
+    with open(REVIEWED + ".lock", "a+") as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        fresh = load()
+        result = mutate(fresh)
+        save(fresh)
+    if state is not None and state is not fresh:
+        state.clear()
+        state.update(fresh)
+    return result
 
 
 def key(repo, number):
@@ -426,3 +448,38 @@ def release_lock():
     finally:
         _LOCK_HANDLE.close()
         _LOCK_HANDLE = _LOCK_OWNER = _LOCK_MARKER = None
+
+
+def pr_lock_path(repo, number):
+    return os.path.join(STATE_DIR, "locks", "%s-%s.lock" % (repo.replace("/", "__"), number))
+
+
+@contextmanager
+def pr_lock(repo, number):
+    """PR 하나를 잡는다. 잡았으면 True, 다른 명령이 잡고 있으면 False 를 낸다.
+
+    틱 전체를 잠그는 `acquire_lock` 과 다르다. 초안 게시와 이벤트 변경은 그 PR 의
+    초안 파일과 처리 이력 한 줄만 건드리므로, 틱이 **다른** PR 을 리뷰하는 동안에도
+    할 수 있어야 한다. 겹치면 안 되는 것은 같은 PR 을 리뷰하는 틱과 게시가 동시에
+    초안을 쓰는 경우뿐이라, 그 범위만 PR 단위로 잠근다. 틱은 PR 을 처리하는 동안,
+    게시·이벤트 변경은 파일을 읽고 쓰는 동안 이 lock 을 잡는다.
+
+    lock 파일은 지우지 않는다 — flock 파일을 unlink 하면 서로 다른 inode 를 잠근
+    두 쪽이 동시에 들어오는 틈이 생긴다 (`acquire_lock` 의 guard 와 같은 이유).
+    """
+    path = pr_lock_path(repo, number)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    handle = open(path, "a+")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        finally:
+            handle.close()

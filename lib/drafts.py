@@ -26,16 +26,20 @@ def reconcile(cfg, locked=False):
                                         '--json', 'state'], account=account)
                 if meta.get('state') not in ('MERGED', 'CLOSED'):
                     continue
-                path = store.draft_payload_path(repo, number)
-                # A newer draft must never be archived using an older snapshot.
-                with open(path, encoding='utf-8') as source:
-                    if json.load(source) != draft:
+                # 게시가 이 초안을 쓰고 있으면 건드리지 않는다 — 다음에 다시 본다.
+                with store.pr_lock(repo, number) as owned:
+                    if not owned:
                         continue
-                archive = os.path.join(store.DRAFTS, 'archived')
-                os.makedirs(archive, exist_ok=True)
-                name = '%s-%s-%s.json' % (os.path.basename(path)[:-5],
-                                         meta['state'].lower(), time.time_ns())
-                os.rename(path, os.path.join(archive, name))
+                    path = store.draft_payload_path(repo, number)
+                    # A newer draft must never be archived using an older snapshot.
+                    with open(path, encoding='utf-8') as source:
+                        if json.load(source) != draft:
+                            continue
+                    archive = os.path.join(store.DRAFTS, 'archived')
+                    os.makedirs(archive, exist_ok=True)
+                    name = '%s-%s-%s.json' % (os.path.basename(path)[:-5],
+                                             meta['state'].lower(), time.time_ns())
+                    os.rename(path, os.path.join(archive, name))
             except FileNotFoundError:
                 continue
             except (github.GhError, OSError, ValueError) as exc:

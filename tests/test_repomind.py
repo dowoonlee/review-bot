@@ -205,7 +205,12 @@ class TickBlockingTests(unittest.TestCase):
         return runpy.run_path(str(Path(__file__).resolve().parents[1] / "review-bot"))
 
     def _run(self, required):
+        import tempfile
         from lib import github, notify as notify_mod, replies, store as store_mod
+        # 틱이 PR 단위 lock 파일을 쓰므로 실제 state 디렉터리를 건드리지 않게 한다.
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        state_dir = mock.patch.object(store_mod, "STATE_DIR", tmp.name); state_dir.start()
+        self.addCleanup(state_dir.stop)
         bot = self._tick()
         tick = bot["_tick"]
         seen = []

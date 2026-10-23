@@ -88,6 +88,11 @@ class ResponseTests(unittest.TestCase):
 
 
 class TickResponseTests(unittest.TestCase):
+    def setUp(self):
+        # 틱이 PR 단위 lock 파일을 쓰므로 실제 state 디렉터리를 건드리지 않게 한다.
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        p = patch.object(store, "STATE_DIR", self.tmp.name); p.start(); self.addCleanup(p.stop)
+
     def test_queries_run_together_and_received_failure_does_not_block_replies(self):
         bot = runpy.run_path(str(Path(__file__).resolve().parents[1] / "review-bot"))
         tick = bot["_tick"]

@@ -452,8 +452,7 @@ def _announce_skip(r, cfg, state):
                 "%s#%s — %s" % (repo, number, reason),
                 sound=(cfg.get("notify") or {}).get("sound"),
                 enabled=(cfg.get("notify") or {}).get("enabled", True))
-    store.mark_skip_announced(state, repo, number, sha, reason)
-    store.save(state)
+    store.commit(state, lambda s: store.mark_skip_announced(s, repo, number, sha, reason))
     _log("  → 알림을 보냈습니다. 그래도 보려면 "
          "`review-bot review %s#%s --force-size`" % (repo, number))
     return True
@@ -1067,14 +1066,15 @@ def _publish(repo, number, cfg, preview=False):
         result["decision"] = policy.revise_decision(result.get("decision"), result["event"], "PUBLISH_FAILED", first, "github")
         result["reason"] = result["decision"]["summary"]
     _verify_posted(repo, number, result, acct, me)
-    state = store.load()
-    prev = state.get(store.key(repo, number)) or {}
-    store.mark(state, repo, number, head, inline=result.get("inline"),
-               demoted=result.get("demoted"), posted=True,
-               cost_usd=prev.get("cost_usd") or d.get("cost_usd"),
-               requestedAt=d.get("requestedAt"),
-               event=result.get("event"), decision=result.get("decision"))
-    store.save(state)
+
+    def record(state):
+        prev = state.get(store.key(repo, number)) or {}
+        store.mark(state, repo, number, head, inline=result.get("inline"),
+                   demoted=result.get("demoted"), posted=True,
+                   cost_usd=prev.get("cost_usd") or d.get("cost_usd"),
+                   requestedAt=d.get("requestedAt"),
+                   event=result.get("event"), decision=result.get("decision"))
+    store.commit(None, record)
     store.log_run(result)
     try:
         os.remove(path)                 # 게시했으니 대기 목록에서 뺀다 (.md 는 남는다)
@@ -1086,15 +1086,22 @@ def _publish(repo, number, cfg, preview=False):
     return 0
 
 
+PR_BUSY = "봇이 이 PR 을 처리하는 중입니다 (리뷰 또는 게시) — 끝난 뒤 다시 부르세요."
+
+
 def cmd_publish(args, cfg):
+    """초안을 게시한다.
+
+    틱 전체가 아니라 그 PR 만 잠근다 — 게시는 이 PR 의 초안 파일과 처리 이력 한
+    줄만 건드리므로, 틱이 다른 PR 을 리뷰하는 중이어도 기다릴 이유가 없다. 같은 PR
+    을 리뷰하는 틱이 초안을 다시 쓰는 것과만 겹치지 않으면 된다.
+    """
     repo, number = _parse_target(args.target)
-    if not store.acquire_lock():
-        _log("틱이 돌고 있습니다 — 끝난 뒤 다시 부르세요.")
-        return 1
-    try:
+    with store.pr_lock(repo, number) as owned:
+        if not owned:
+            _log(PR_BUSY)
+            return 1
         return _publish(repo, number, cfg, preview=args.dry_run)
-    finally:
-        store.release_lock()
 
 
 def cmd_drafts(args, cfg):
@@ -1117,23 +1124,23 @@ def cmd_drafts(args, cfg):
 def cmd_draft_event(args, cfg):
     """초안의 리뷰 이벤트를 바꾼다 — 판정은 코멘트였지만 사람이 승인하기로 한 때.
 
-    게시 전의 파일만 고치므로 GitHub 에는 아무것도 나가지 않는다. 리뷰가 도는 중에
-    같은 초안을 다시 쓰면 변경이 사라지므로 틱과 같은 lock 을 잡는다.
+    게시 전의 파일만 고치므로 GitHub 에는 아무것도 나가지 않는다. 같은 PR 을 리뷰하는
+    틱이 초안을 다시 쓰면 변경이 사라지므로 그 PR 의 lock 을 잡는다 — 틱 전체를
+    잠그지는 않는다.
     """
     repo, number = _parse_target(args.target)
-    if not store.acquire_lock():
-        _log("틱이 돌고 있습니다 — 끝난 뒤 다시 부르세요.")
-        return 1
-    try:
-        draft = drafts_mod.set_event(repo, number, args.event)
-    except FileNotFoundError:
-        _log("게시할 초안이 없습니다 (%s#%s)" % (repo, number))
-        return 1
-    except (ValueError, OSError) as e:
-        _log("초안을 고치지 못했습니다: %s" % e)
-        return 1
-    finally:
-        store.release_lock()
+    with store.pr_lock(repo, number) as owned:
+        if not owned:
+            _log(PR_BUSY)
+            return 1
+        try:
+            draft = drafts_mod.set_event(repo, number, args.event)
+        except FileNotFoundError:
+            _log("게시할 초안이 없습니다 (%s#%s)" % (repo, number))
+            return 1
+        except (ValueError, OSError) as e:
+            _log("초안을 고치지 못했습니다: %s" % e)
+            return 1
     print("%s#%s · %s 로 게시 예정 — %s" % (repo, number,
           EVENT_LABEL.get(draft.get("event"), draft.get("event")), draft.get("reason") or ""))
     if draft.get("event") == "APPROVE" and cfg["post"].get("approveNeedsGreenCi", True):
@@ -1162,7 +1169,12 @@ def cmd_forget(args, cfg):
     try:
         if getattr(args, 'artifacts', False):
             repo, number = _parse_target(args.target)
-            report = cleanup.clean_pr(repo, number, reset=args.reset, preview=args.dry_run)
+            # 초안 파일을 지우므로 같은 PR 의 게시와 겹치면 안 된다.
+            with store.pr_lock(repo, number) as owned:
+                if not owned:
+                    _log(PR_BUSY)
+                    return 1
+                report = cleanup.clean_pr(repo, number, reset=args.reset, preview=args.dry_run)
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return 1 if report.get('errors') else 0
         rows = store.read_runs()
@@ -1196,13 +1208,14 @@ def cmd_forget(args, cfg):
         # 지문까지 지우면 그 PR 은 "본 적 없는 것" 이 되어 다음 틱에 다시 리뷰한다.
         forgotten = 0
         if args.reset:
-            state = store.load()
-            for key in list(state):
-                if args.all or (repo is not None and key == store.key(repo, number)):
-                    del state[key]
-                    forgotten += 1
-            if forgotten:
-                store.save(state)
+            def drop(state):
+                n = 0
+                for key in list(state):
+                    if args.all or (repo is not None and key == store.key(repo, number)):
+                        del state[key]
+                        n += 1
+                return n
+            forgotten = store.commit(None, drop)
 
         print("이력 %d건 삭제 (남은 %d건)" % (removed, len(keep)))
         if forgotten:
@@ -1394,10 +1407,8 @@ def _gc(cfg, verbose=False):
     nc, cfreed = janitor.sweep_cache_repos(cfg.get("repos"))
     if nc:
         out.append("캐시 클론 %d개 (%s)" % (nc, janitor.human(cfreed)))
-    state = store.load()
-    npr = janitor.prune_reviewed(state, g.get("reviewedDays", 90))
+    npr = store.commit(None, lambda s: janitor.prune_reviewed(s, g.get("reviewedDays", 90)))
     if npr:
-        store.save(state)
         out.append("오래된 기록 %d건" % npr)
     if out and (verbose or swept):
         _log("정리: " + " · ".join(out))
@@ -1510,25 +1521,32 @@ def _tick(cfg):
             _log("틱당 상한 %d건 도달 — 나머지는 다음 틱에" % cap)
             break
         _log("· %s#%s %s" % (pr["repo"], pr["number"], pr["title"][:50]))
-        try:
-            r = process_pr(pr, cfg, state, mcp=mcp)
-        except (gh.GhError, worktree.WorktreeError, reviewer.ReviewError) as e:
-            _log("  실패: %s" % str(e)[:200])
-            store.log_run({"repo": pr["repo"], "number": pr["number"],
-                           "error": str(e)[:300]})
-            continue
-        if r.get("skipped"):
-            _log("  건너뜀 — %s" % r["skipped"])
-            _announce_skip(r, cfg, state)
-            continue
-        reviewed += 1
-        done.append(r)
-        store.mark(state, r["repo"], r["number"], r["sha"],
-                   inline=r.get("inline"), demoted=r.get("demoted"),
-                   posted=r.get("posted"), cost_usd=r.get("cost_usd"),
-                   requestedAt=r.get("requestedAt"), event=r.get("event"), pending=r.get("pending", False), decision=r.get("decision"))
-        store.save(state)
-        store.log_run(r)
+        # PR 하나를 보는 동안만 그 PR 을 잠근다. 다른 PR 의 초안 게시는 그 사이에도
+        # 들어올 수 있고, 들어와도 서로 다른 파일을 건드리므로 겹치지 않는다.
+        with store.pr_lock(pr["repo"], pr["number"]) as owned:
+            if not owned:
+                _log("  건너뜀 — 다른 명령(게시 등)이 이 PR 을 잡고 있습니다. 다음 틱에 봅니다")
+                continue
+            try:
+                r = process_pr(pr, cfg, state, mcp=mcp)
+            except (gh.GhError, worktree.WorktreeError, reviewer.ReviewError) as e:
+                _log("  실패: %s" % str(e)[:200])
+                store.log_run({"repo": pr["repo"], "number": pr["number"],
+                               "error": str(e)[:300]})
+                continue
+            if r.get("skipped"):
+                _log("  건너뜀 — %s" % r["skipped"])
+                _announce_skip(r, cfg, state)
+                continue
+            reviewed += 1
+            done.append(r)
+            store.commit(state, lambda s: store.mark(
+                s, r["repo"], r["number"], r["sha"],
+                inline=r.get("inline"), demoted=r.get("demoted"),
+                posted=r.get("posted"), cost_usd=r.get("cost_usd"),
+                requestedAt=r.get("requestedAt"), event=r.get("event"),
+                pending=r.get("pending", False), decision=r.get("decision")))
+            store.log_run(r)
         where = "검증 대기" if r.get("pending") else "초안" if r.get("draft") else ("게시" if r.get("posted") else "-")
         _log("  %s — %s · inline %d · 요약 %d"
              % (where, EVENT_LABEL.get(r.get("event"), r.get("event") or "-"),
@@ -1589,33 +1607,38 @@ def cmd_review(args, cfg):
         _log("틱이 돌고 있습니다 — 끝난 뒤 다시 부르거나 `review-bot pause` 로 멈추세요.")
         return 1
     try:
-        _recover_resources(cfg)
-        state = store.load()
-        pr = {"repo": repo, "number": number, "title": ""}
-        mcp, blocked = _connect_repomind(cfg)
-        if blocked:
-            return 1
-        try:
-            r = process_pr(pr, cfg, state, force=True, mcp=mcp,
-                           force_size=getattr(args, "force_size", False),
-                           rejudge=getattr(args, "rejudge", False))
-        except (gh.GhError, worktree.WorktreeError, reviewer.ReviewError) as e:
-            _log("실패: %s" % str(e)[:300])
-            store.log_run({"repo": repo, "number": number, "error": str(e)[:300]})
-            return 1
-        if r.get("skipped"):
-            _log("건너뜀 — %s" % r["skipped"])
-            if r.get("skipKind") == "size":
-                _log("상한을 무시하고 보려면 --force-size 를 붙이세요")
+        with store.pr_lock(repo, number) as owned:
+            if not owned:
+                _log(PR_BUSY)
+                return 1
+            _recover_resources(cfg)
+            state = store.load()
+            pr = {"repo": repo, "number": number, "title": ""}
+            mcp, blocked = _connect_repomind(cfg)
+            if blocked:
+                return 1
+            try:
+                r = process_pr(pr, cfg, state, force=True, mcp=mcp,
+                               force_size=getattr(args, "force_size", False),
+                               rejudge=getattr(args, "rejudge", False))
+            except (gh.GhError, worktree.WorktreeError, reviewer.ReviewError) as e:
+                _log("실패: %s" % str(e)[:300])
+                store.log_run({"repo": repo, "number": number, "error": str(e)[:300]})
+                return 1
+            if r.get("skipped"):
+                _log("건너뜀 — %s" % r["skipped"])
+                if r.get("skipKind") == "size":
+                    _log("상한을 무시하고 보려면 --force-size 를 붙이세요")
+                return 0
+            store.commit(state, lambda s: store.mark(
+                s, repo, number, r["sha"], inline=r.get("inline"),
+                demoted=r.get("demoted"), posted=r.get("posted"),
+                cost_usd=r.get("cost_usd"),
+                requestedAt=r.get("requestedAt"), event=r.get("event"),
+                pending=r.get("pending", False), decision=r.get("decision")))
+            store.log_run(r)
+            print(json.dumps(r, ensure_ascii=False, indent=2))
             return 0
-        store.mark(state, repo, number, r["sha"], inline=r.get("inline"),
-                   demoted=r.get("demoted"), posted=r.get("posted"),
-                   cost_usd=r.get("cost_usd"),
-                   requestedAt=r.get("requestedAt"), event=r.get("event"), pending=r.get("pending", False), decision=r.get("decision"))
-        store.save(state)
-        store.log_run(r)
-        print(json.dumps(r, ensure_ascii=False, indent=2))
-        return 0
     finally:
         store.release_lock()
 

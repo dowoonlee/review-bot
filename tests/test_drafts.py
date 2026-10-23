@@ -12,7 +12,7 @@ class DraftReconciliationTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        for name, value in [('DRAFTS', str(self.root)), ('_ensure', lambda: None),
+        for name, value in [('STATE_DIR', str(self.root)), ('DRAFTS', str(self.root)), ('_ensure', lambda: None),
                             ('acquire_lock', lambda: True), ('release_lock', lambda: None)]:
             patch = mock.patch.object(store, name, value)
             patch.start()
