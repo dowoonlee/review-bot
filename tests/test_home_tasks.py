@@ -11,8 +11,8 @@ class HomeTasksTests(unittest.TestCase):
     def setUp(self):
         temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup)
         patcher=patch.object(store,'STATE_DIR',temp.name);patcher.start();self.addCleanup(patcher.stop)
-    def start(self,direction='outgoing'):
-        return tasks.start('org/repo',1,'me',direction,'title','reply','codex')
+    def start(self,direction='outgoing',label='reply'):
+        return tasks.start('org/repo',1,'me',direction,'title',label,'codex')
     def completed(self,direction='outgoing'):
         row=self.start(direction)
         with patch.object(tasks,'snapshot',return_value=copy.deepcopy(BASE)):
@@ -98,13 +98,36 @@ class HomeTasksTests(unittest.TestCase):
         self.assertIsNotNone(tasks.reason_for_reopen(incoming,dict(BASE,head='new-head')))
     def test_approval_reopens_sent_pr_once(self):
         done=self.completed()
-        self.assertEqual(tasks.reason_for_reopen(done,dict(BASE,approved=True)),'승인이 끝나 머지 조건을 확인할 차례입니다')
+        self.assertEqual(tasks.reason_for_reopen(done,dict(BASE,approved=True)),tasks.APPROVAL_REASON)
         self.assertIsNone(tasks.reason_for_reopen(done,dict(BASE,approved=True,state='MERGED')))
         self.assertIsNone(tasks.reason_for_reopen(self.completed('incoming'),dict(BASE,approved=True)))
-        row=self.start()
-        with patch.object(tasks,'snapshot',return_value=dict(BASE,approved=True)):
+        row=self.start(label=tasks.MERGE_CHECK_LABEL)
+        with patch.object(tasks,'snapshot',return_value=dict(BASE,approved=True,approvals=['a1'])):
             after=tasks.complete(row['id'])
-        self.assertIsNone(tasks.reason_for_reopen(after,dict(BASE,approved=True)))
+        self.assertTrue(after['baseline']['approved'])
+        self.assertIsNone(tasks.reason_for_reopen(after,dict(BASE,approved=True,approvals=['a1'])))
+    def test_completing_other_step_while_approved_still_leads_to_merge_check(self):
+        row=self.start(label='수정 요청 검토')
+        with patch.object(tasks,'snapshot',return_value=dict(BASE,approved=True,approvals=['a1'])):
+            done=tasks.complete(row['id'])
+        self.assertFalse(done['baseline']['approved'])
+        self.assertEqual(done['baseline']['approvals'],['a1'])
+        with patch.object(tasks,'snapshot',return_value=dict(BASE,approved=True,approvals=['a1'])):
+            tasks.reconcile({done['requestID']})
+        row=tasks.load()['tasks'][done['id']]
+        self.assertEqual((row['status'],row['reopenReason'],row.get('mergeCheck')),('reopened',tasks.APPROVAL_REASON,True))
+        with patch.object(tasks,'snapshot',return_value=dict(BASE,approved=True,approvals=['a1'])):
+            again=tasks.complete(row['id'])
+        self.assertTrue(again['baseline']['approved'])
+        self.assertIsNone(tasks.reason_for_reopen(again,dict(BASE,approved=True,approvals=['a1'])))
+    def test_new_approval_after_merge_check_reopens_again(self):
+        row=self.start(label=tasks.MERGE_CHECK_LABEL)
+        with patch.object(tasks,'snapshot',return_value=dict(BASE,approved=True,approvals=['a1'])):
+            done=tasks.complete(row['id'])
+        self.assertEqual(tasks.reason_for_reopen(done,dict(BASE,approved=True,approvals=['a1','a2'])),tasks.APPROVAL_REASON)
+        self.assertIsNone(tasks.reason_for_reopen(done,dict(BASE,approved=False,approvals=['a1','a2'])))
+        legacy=dict(done,baseline={k:v for k,v in done['baseline'].items() if k!='approvals'})
+        self.assertEqual(tasks.reason_for_reopen(legacy,dict(BASE,approved=True,approvals=['a1'])),tasks.APPROVAL_REASON)
     def test_approved_follows_review_decision_then_reviewers(self):
         self.assertTrue(tasks.approved({'reviewDecision':'APPROVED','reviewRequests':[{'login':'x'}]}))
         self.assertFalse(tasks.approved({'reviewDecision':'REVIEW_REQUIRED','latestReviews':[{'state':'APPROVED'}]}))
@@ -129,6 +152,7 @@ class HomeTasksTests(unittest.TestCase):
         with patch.object(github,'request_context',return_value=context),patch.object(github,'pr_meta',return_value=meta):
             snapshot=tasks.snapshot(self.start())
         self.assertEqual(set(snapshot['feedback']),{'question'})
+        self.assertEqual(snapshot['approvals'],['approval'])
         self.assertFalse(snapshot['approved'])
         with patch.object(github,'request_context',return_value=context),patch.object(github,'pr_meta',return_value=dict(meta,reviewDecision='APPROVED')):
             self.assertTrue(tasks.snapshot(self.start())['approved'])
