@@ -97,14 +97,27 @@ def approval_block(evidence):
     # 그것만 있고 통과한 테스트가 하나도 없으면 PR 을 뒷받침하는 근거도 없는 것이다.
     if any(t.get('status') not in ('passed', 'baseline') for t in tests):
         return '관련 로컬 테스트가 실패하거나 완료되지 않아 승인하지 않습니다.'
+    missing_checks = []
     for test in tests:
-        if test.get('required', True) and test.get('cases'):
+        if not test.get('required', True):
+            continue
+        name = test.get('name') or test.get('id') or '이름 없는 검사'
+        reason = test.get('scopeReason')
+        context = name + (' — ' + reason if reason else '')
+        if test.get('cases'):
             required = required_case_ids(test)
-            passed = {c['id'] for c in test['cases'] if c['status'] == 'passed'}
-            if not set(required) <= passed:
-                return '변경 핵심 테스트가 실패·skip·기존 실패로 남아 실행 검증이 필요합니다.'
-        elif test.get('required', True) and test.get('status') != 'passed':
-            return '변경 핵심 테스트의 통과 근거가 없어 승인하지 않습니다.'
+            statuses = {c['id']: c['status'] for c in test['cases']}
+            missing = sorted(identity for identity in required if statuses.get(identity) != 'passed')
+            if missing:
+                details = ', '.join('%s (%s)' % (identity, statuses.get(identity, '보고서에 없음'))
+                                    for identity in missing[:8])
+                if len(missing) > 8:
+                    details += ' 외 %d건' % (len(missing) - 8)
+                missing_checks.append('%s: %s' % (context, details))
+        elif test.get('status') != 'passed':
+            missing_checks.append('%s: %s — 통과 근거 없음' % (context, test.get('status', '미실행')))
+    if missing_checks:
+        return '변경 핵심 테스트의 실행 검증이 필요합니다. ' + '; '.join(missing_checks)
     if evidence.get('testsApplicable', True):
         if not any(t.get('status') == 'passed' or
                    any(c['status'] == 'passed' for c in t.get('cases', [])) for t in tests):
@@ -171,7 +184,7 @@ def parse_junit(data):
 
 def _test(container, spec, cfg):
     result = container.shell(spec['command'], cfg.get('testTimeoutSec', 900), check=False)
-    result.update({k: spec[k] for k in ('id', 'name', 'command', 'required', 'requiredCases', 'report') if k in spec})
+    result.update({k: spec[k] for k in ('id', 'name', 'command', 'required', 'requiredCases', 'scopeReason', 'report') if k in spec})
     report = spec.get('report')
     if report:
         destination = container.directory / ('junit-' + uuid.uuid4().hex + '.xml')
@@ -365,8 +378,13 @@ def _plan(meta, files, cwd, cfg):
         if test.get('requiredCases') and not report:
             raise ExecutionError('requiredCases에는 JUnit report가 필요합니다')
         if 'requiredCases' in test and (not isinstance(test['requiredCases'], list) or
-                                       any(not isinstance(c, str) for c in test['requiredCases'])):
-            raise ExecutionError('requiredCases는 테스트 식별자 배열이어야 합니다')
+                                       not test['requiredCases'] or
+                                       any(not isinstance(c, str) or not c.strip() for c in test['requiredCases'])):
+            raise ExecutionError('requiredCases는 비어 있지 않은 테스트 식별자 배열이어야 합니다')
+        if 'scopeReason' in test and (not isinstance(test['scopeReason'], str) or not test['scopeReason'].strip()):
+            raise ExecutionError('scopeReason에는 변경과 검증 범위의 관계를 적으세요')
+        if test.get('requiredCases') and not test.get('scopeReason'):
+            raise ExecutionError('requiredCases를 지정하면 scopeReason에 필수·제외 범위의 근거를 적으세요')
     if plan['testsApplicable'] and not any(t.get('required', True) for t in plan['tests']):
         raise ExecutionError('변경 핵심 테스트 계획이 없습니다')
     if plan.get('_meta', {}).get('salvaged'):

@@ -250,11 +250,13 @@ def _summary_body(payload, inline, demoted, verdict=None, note=None):
     if note:
         # 같은 PR 에 리뷰가 또 올라오는 이유를 작성자가 첫 줄에서 알 수 있어야 한다.
         parts += ["", "> ℹ️ %s" % note]
-    if verdict.get("reason"):
-        parts += ["", "> **판정** — %s" % verdict["reason"]]
     if verdict.get("guard"):
-        # 판정이 안전장치에 걸려 내려갔으면 그 사실도 PR 작성자에게 보인다.
-        parts += ["> ⚠️ %s" % verdict["guard"]]
+        parts += ["", "> **최종 판정 — %s**: %s" %
+                  (EVENT_LABEL.get(verdict.get("event"), verdict.get("event", "COMMENT")), verdict["guard"])]
+        if verdict.get("reason"):
+            parts += ["> **자동 판정의 참고 의견 (최종 판정과 별개)** — %s" % verdict["reason"]]
+    elif verdict.get("reason"):
+        parts += ["", "> **판정** — %s" % verdict["reason"]]
 
     # Priority and action are separate: optional P2 feedback can accompany approval.
     must = []
@@ -302,6 +304,10 @@ def _summary_body(payload, inline, demoted, verdict=None, note=None):
                 label += " · " + ", ".join("%s %d" % item for item in sorted(counts.items()))
             source = "CI 대체" if test.get('source') == 'ci' else "로컬"
             parts.append("- %s %s: **%s** (`%s`)" % (source, test["name"], label, test["command"]))
+            if test.get('scopeReason'):
+                parts.append("  - 검증 범위 근거: " + test['scopeReason'])
+            if test.get('requiredCases'):
+                parts.append("  - 필수 케이스: " + ", ".join("`%s`" % case for case in test['requiredCases']))
         baseline = evidence.get("baseline") or {}
         if baseline.get("status") == "complete":
             parts.append("- 기준선: base `%s` 에서 실패한 명령 %d개를 같은 절차로 재실행했습니다."

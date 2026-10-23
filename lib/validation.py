@@ -69,7 +69,7 @@ def obligations(previous):
     for test in previous.get('tests', []):
         if test.get('status') == 'failed' and failure_kind(test) == 'test':
             # Even a broad regression run cannot disappear after discovering a failure.
-            saved[check_id(test)] = copy.deepcopy(test)
+            saved.setdefault(check_id(test), copy.deepcopy(test))
         identity = check_id(test)
         if identity in saved and test.get('cases') and saved[identity].get('required', True):
             # Once concrete cases have been observed, selecting fewer cases is not a repair.
@@ -97,11 +97,13 @@ def preserve(plan, previous=None):
             changed = any(test.get(k) != original.get(k) for k in ('command', 'report'))
             if changed and (satisfied(outcome) or
                             (outcome.get('status') == 'failed' and failure_kind(outcome) == 'test')):
-                test = {k: original[k] for k in ('id', 'name', 'command', 'report', 'required', 'requiredCases') if k in original}
+                test = {k: original[k] for k in ('id', 'name', 'command', 'report', 'required', 'requiredCases', 'scopeReason') if k in original}
                 test['id'] = identity
             elif changed and not test.get('repairReason'):
                 raise ContractError('필수 테스트 명령을 보완할 때 id를 유지하고 repairReason을 적으세요: ' + identity)
             test['required'] = original.get('required', True)
+            if original.get('scopeReason'):
+                test['scopeReason'] = original['scopeReason']
             if original.get('requiredCases'):
                 test['requiredCases'] = list(dict.fromkeys(original['requiredCases'] + (test.get('requiredCases') or [])))
             else:
@@ -109,7 +111,7 @@ def preserve(plan, previous=None):
         checks.append(test)
     for identity, original in old.items():
         if identity not in used:
-            checks.append({**{k: original[k] for k in ('name', 'command', 'report', 'required', 'requiredCases') if k in original},
+            checks.append({**{k: original[k] for k in ('name', 'command', 'report', 'required', 'requiredCases', 'scopeReason') if k in original},
                            'id': identity})
     plan['tests'] = checks
     if any(t.get('required', True) for t in checks):

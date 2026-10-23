@@ -39,7 +39,18 @@ CI (테스트 이름이 관련 검증을 포함하는지 확인):
   원래 항목이 복원됩니다. 파일명·실행 도구 오류로 명령을 고칠 때는 같은 id에 repairReason을
   적으세요. 실제 assertion 실패는 명령 변경·테스트 축소로 없앨 수 없습니다.
   requiredCases는 필수인 JUnit 식별자(classname::name) 배열입니다. 정확히 알 때만 지정하고,
-  생략하면 해당 명령의 모든 테스트가 필수입니다. 승인을 위해 필요한 테스트를 제외하지 마세요.
+  생략하면 해당 명령의 모든 테스트가 필수입니다. 빈 배열은 허용하지 않습니다.
+  여러 환경/기능이 섞인 파일은 반드시 코드를 읽어 변경 케이스와 공통 회귀 케이스를 식별하세요.
+  정확한 식별자를 알면 requiredCases로 지정하고, 모르면 명령을 관련 경로/파라미터로 분리하세요.
+  같은 파일에 있다는 이유만으로 다른 환경의 테스트까지 필수로 묶지 마세요.
+  scopeReason에 변경 파일·동작과 필수 케이스의 관계, 제외한 환경/기능이 무관한 근거를 적으세요.
+  requiredCases를 쓰면 scopeReason은 필수입니다. 예: AWS 전용 overlay 변경이며 aws 렌더와
+  공통 OFF 계약을 검증한다. SKPC Helm과 local Tilt는 변경·공통 의존성 영향이 없어 제외한다.
+  공통 템플릿/정책 변경이면 다른 환경도 영향을 받을 수 있으므로 함께 필수로 검증하세요.
+  필수 케이스는 baseline(동일 원인의 base 실패)이나 skip이어도 미검증이므로 승인을 막습니다.
+  필수 밖의 baseline/skip은 차단하지 않지만 새 실패는 계속 차단합니다.
+  이 범위는 실행 전에 정하고 재시도에서 실패 결과를 보고 축소하지 마세요.
+  승인을 위해 필요한 테스트를 제외하지 마세요.
 - pytest는 --junitxml, vitest는 junit reporter와 outputFile을 사용해 테스트별 보고서를 남기세요.
   report는 /work 기준 상대 경로입니다. 보고서 디렉터리는 setup에서 만드세요.
   예: command="cd service && uv run pytest tests/test_contract.py --junitxml=/work/results/contract.xml",
@@ -100,7 +111,7 @@ CI (테스트 이름이 관련 검증을 포함하는지 확인):
 JSON만 출력:
 {{"testsApplicable": true, "visualApplicable": true,
   "setup": "cd services/frontend && ...",
-  "tests": [{{"name": "관련 단위 테스트", "command": "cd services/frontend && ...", "required": true, "report": "results/unit.xml", "ciChecks": [], "ciReason": ""}}],
+  "tests": [{{"name": "관련 단위 테스트", "command": "cd services/frontend && ...", "required": true, "scopeReason": "변경 동작과 공통 소비처를 검증하는 범위", "report": "results/unit.xml", "ciChecks": [], "ciReason": ""}}],
   "start": "cd services/frontend && ...",
   "browser": "await page.goto('http://127.0.0.1:5173/...'); ...",
   "scenarios": ["실제 변경 동작과 기대 결과"],

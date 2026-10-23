@@ -38,6 +38,23 @@ class EvidenceTests(unittest.TestCase):
                     with self.assertRaises(runtime.ExecutionError):
                         runtime._plan(META, [], '/tmp', {})
 
+    def test_case_scope_needs_nonempty_ids_and_reason(self):
+        for cases, reason, valid in [(['c::aws'], 'AWS changed; SKPC unrelated', True),
+                                     (['c::aws'], None, False), ([], 'scope', False),
+                                     ([' '], 'scope', False)]:
+            plan = copy.deepcopy(PLAN)
+            plan['tests'][0].update(requiredCases=cases, report='results/test.xml')
+            if reason is not None:
+                plan['tests'][0]['scopeReason'] = reason
+            with self.subTest(cases=cases, reason=reason), \
+                    mock.patch.object(reviewer, '_run', return_value=plan), \
+                    mock.patch.object(runtime, 'repository_context', return_value={}):
+                if valid:
+                    self.assertEqual(runtime._plan(META, [], '/tmp', {})['tests'][0]['requiredCases'], cases)
+                else:
+                    with self.assertRaises(runtime.ExecutionError):
+                        runtime._plan(META, [], '/tmp', {})
+
     def test_planner_inventory_names_existing_mock_server_and_project_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

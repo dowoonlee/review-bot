@@ -37,6 +37,15 @@ class DecisionTests(unittest.TestCase):
         self.assertNotIn('머지 전', body)
         self.assertIn('선택적 개선', self.bot['_comment_body'](f))
 
+    def test_guarded_summary_leads_with_final_decision(self):
+        body = self.bot['_summary_body']({}, [], [], {
+            'event': 'COMMENT', 'reason': '승인을 막을 공백이 없습니다.',
+            'guard': 'aws::render (skipped) — AWS 계약 검증 필요'})
+        self.assertIn('최종 판정 — 💬 Comment', body)
+        self.assertIn('자동 판정의 참고 의견 (최종 판정과 별개)', body)
+        self.assertLess(body.index('aws::render'), body.index('승인을 막을 공백'))
+        self.assertNotIn('> **판정** — 승인을', body)
+
     def test_confirmed_p2_can_request_changes_but_uncertain_cannot(self):
         for action, expected in [('required', 'REQUEST_CHANGES'), ('optional', 'COMMENT'), ('uncertain', 'COMMENT')]:
             self.assertEqual(self.bot['_guard_event']('REQUEST_CHANGES', [self.finding(action)], {}, self.cfg)[0], expected)
@@ -85,6 +94,28 @@ class TestEvidenceTests(unittest.TestCase):
         # The same report must not approve when the unexecuted budget is a required contract.
         head['requiredCases'].append('contract::budget')
         self.assertIn('핵심', runtime.approval_block(dict(GOOD, tests=[head])))
+
+    def test_mixed_environment_suite_uses_predeclared_scope(self):
+        test = {'name': 'overlay', 'status': 'baseline', 'required': True,
+                'requiredCases': ['overlay::aws'],
+                'scopeReason': 'AWS 전용 변경; SKPC와 Tilt는 영향 없음',
+                'cases': [{'id': 'overlay::aws', 'status': 'passed'},
+                          {'id': 'overlay::skpc', 'status': 'skipped'},
+                          {'id': 'overlay::tilt', 'status': 'baseline'}]}
+        self.assertFalse(runtime.approval_block(dict(GOOD, tests=[test])))
+        # The same outcomes block when a shared change also requires SKPC/Tilt.
+        test['requiredCases'] += ['overlay::skpc', 'overlay::tilt']
+        test['scopeReason'] = '공통 템플릿 변경으로 모든 환경에 영향'
+        reason = runtime.approval_block(dict(GOOD, tests=[test]))
+        for detail in ('overlay::skpc (skipped)', 'overlay::tilt (baseline)', '공통 템플릿'):
+            self.assertIn(detail, reason)
+        test['requiredCases'] = ['overlay::missing']
+        self.assertIn('overlay::missing (보고서에 없음)', runtime.approval_block(dict(GOOD, tests=[test])))
+        # A newly failing non-required case must not be silently exempted.
+        test['requiredCases'] = ['overlay::aws']
+        test['status'] = 'failed'
+        test['cases'][1]['status'] = 'failed'
+        self.assertTrue(runtime.approval_block(dict(GOOD, tests=[test])))
 
     def test_different_failure_on_base_never_exempts_head(self):
         head = {'status': 'failed', 'cases': self.cases('regression')}

@@ -54,3 +54,17 @@ class ValidationContractTests(unittest.TestCase):
 
     def test_skipped_required_case_is_not_a_completed_cache_entry(self):
         self.assertFalse(validation.satisfied({'status': 'passed', 'cases': [{'id': 'a', 'status': 'skipped'}]}))
+
+    def test_scoped_obligations_survive_failure_and_retry(self):
+        previous = self.previous()
+        previous['plan']['tests'][0].update(requiredCases=['aws'], scopeReason='AWS changed; SKPC unrelated')
+        previous['tests'][0]['cases'] = [{'id': 'aws', 'status': 'passed'}, {'id': 'skpc', 'status': 'failed'}]
+        plan, requirements = validation.preserve({'tests': [], 'scenarios': []}, previous)
+        self.assertEqual(requirements[0]['requiredCases'], ['aws'])
+        self.assertEqual(plan['tests'][0]['scopeReason'], 'AWS changed; SKPC unrelated')
+        previous['requirements'] = requirements
+        plan, _ = validation.preserve({'tests': [{'id': 'contract', 'name': 'contract',
+            'command': 'pytest contract', 'requiredCases': ['skpc'], 'scopeReason': 'changed rationale'}],
+            'scenarios': []}, previous)
+        self.assertEqual(set(plan['tests'][0]['requiredCases']), {'aws', 'skpc'})
+        self.assertEqual(plan['tests'][0]['scopeReason'], 'AWS changed; SKPC unrelated')
