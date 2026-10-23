@@ -103,6 +103,7 @@ struct HomeBriefingView: View {
                 Button(showAllCompleted ? "완료 항목 접기" : "완료 항목 모두 보기") { showAllCompleted.toggle() }.f(.caption)
             }
             if let error = store.homeTaskError { Text(error).f(.caption).foregroundStyle(.orange) }
+            if let error = store.sessionCheckError { Text(error).f(.caption).foregroundStyle(.orange) }
             Divider()
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
@@ -218,9 +219,18 @@ struct HomeBriefingView: View {
             }
             if let task = store.homeTasks.currentTask(for: row.id) {
                 if let sessionID = task.sessionID ?? task.terminalID {
+                    let alive = store.sessionLiveness[task.id]
                     HStack {
                         Label("연결된 세션 · \(task.agent) · \(sessionID)", systemImage: "link")
                             .f(.caption).textSelection(.enabled)
+                        if let alive {
+                            Text(alive ? "연결됨" : "세션 종료").f(.caption2)
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background((alive ? Color.green : Color.red).opacity(0.15), in: Capsule())
+                                .foregroundStyle(alive ? Color.green : Color.red)
+                                .help(alive ? "새로고침 때 iTerm 탭에서 \(task.agent) 가 실행 중인 것을 확인했습니다."
+                                            : "새로고침 때 iTerm 탭이 닫혔거나 \(task.agent) 가 종료된 것을 확인했습니다. 기존 세션 연결로 다시 연결하세요.")
+                        }
                         if let terminalID = task.terminalID {
                             Button {
                                 launching = row.id
@@ -233,7 +243,7 @@ struct HomeBriefingView: View {
                                 }
                             } label: {
                                 Label("세션으로 이동", systemImage: "arrow.up.forward.app")
-                            }.f(.caption).disabled(launching != nil)
+                            }.f(.caption).disabled(launching != nil || alive == false)
                                 .help("연결한 iTerm 창·탭·분할 화면으로 이동합니다")
                         }
                         if let terminalID = task.terminalID, let agent = AgentTerminal.Agent(rawValue: task.agent) {
@@ -247,7 +257,7 @@ struct HomeBriefingView: View {
                                     } catch { launchMessages[row.id] = error.localizedDescription }
                                     launching = nil
                                 }
-                            }.f(.caption).disabled(launching != nil)
+                            }.f(.caption).disabled(launching != nil || alive == false)
                         }
                         Button("작업 안내 복사") {
                             NSPasteboard.general.clearContents()

@@ -47,6 +47,40 @@ enum ExistingAgentSession {
         }
     }
 
+    /// 할 일에 연결된 iTerm 세션이 아직 살아 있는지 — 탭이 남아 있고 그 tty 에서 같은 CLI 가
+    /// 전경으로 돌고 있어야 산 것이다. 탭이 닫혔거나 CLI 가 빠져나와 셸 프롬프트만 남았으면 죽은 것.
+    struct Link: Sendable {
+        let taskID: String
+        let agent: AgentTerminal.Agent
+        let terminalID: String
+    }
+
+    static func liveness(_ links: [Link], sessions: [Session], processes: String) -> [String: Bool] {
+        var result: [String: Bool] = [:]
+        for link in links {
+            let session = sessions.first { $0.id == link.terminalID.lowercased() }
+            result[link.taskID] = session.map { hasAgent(link.agent, tty: $0.tty, processes: processes) } ?? false
+        }
+        return result
+    }
+
+    /// iTerm 이 꺼져 있으면 연결된 탭은 전부 죽은 것이다 — 세션 ID 는 iTerm 실행마다 새로 난다.
+    /// 자동화 권한이 없어 목록을 못 읽으면 모른다고 던진다. 그때는 아무것도 바꾸지 않는다.
+    static func liveness(_ links: [Link]) async throws -> [String: Bool] {
+        guard !links.isEmpty else { return [:] }
+        let running = await MainActor.run {
+            !NSRunningApplication.runningApplications(withBundleIdentifier: "com.googlecode.iterm2").isEmpty
+        }
+        guard running else { return Dictionary(uniqueKeysWithValues: links.map { ($0.taskID, false) }) }
+        let result = await Shell.run(["/usr/bin/osascript", "-e", listScript])
+        guard result.code == 0 else {
+            throw HomeTaskClient.Failure(message: "iTerm 세션을 읽지 못해 연결 상태를 확인하지 못했습니다. 시스템 설정의 자동화에서 ReviewBot의 iTerm 제어를 허용해 주세요.")
+        }
+        let processes = await Shell.run(["/bin/ps", "-axo", "tty=,stat=,comm="])
+        guard processes.code == 0 else { throw HomeTaskClient.Failure(message: "실행 중인 CLI를 확인하지 못했습니다.") }
+        return liveness(links, sessions: parseSessions(result.output), processes: processes.output)
+    }
+
     static func available(_ agent: AgentTerminal.Agent) async throws -> [Session] {
         guard await MainActor.run(body: {
             NSRunningApplication.runningApplications(withBundleIdentifier: "com.googlecode.iterm2").isEmpty == false

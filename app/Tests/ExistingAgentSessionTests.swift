@@ -33,6 +33,22 @@ final class ExistingAgentSessionTests: XCTestCase {
         XCTAssertTrue(ExistingAgentSession.hasAgent(.codex, tty: "/dev/ttys005", processes: rows))
     }
 
+    func testLivenessNeedsTheTabAndTheForegroundCLI() {
+        let open = "12345678-1234-5678-9abc-123456789abc"
+        let idle = "22345678-1234-5678-9abc-123456789abc"
+        let sessions = ExistingAgentSession.parseSessions("\(open)\t/dev/ttys001\tClaude\n\(idle)\t/dev/ttys002\tshell\n")
+        let processes = "ttys001  S+   claude\nttys002  S+   -zsh\n"
+        let links = [
+            ExistingAgentSession.Link(taskID: "t-open", agent: .claude, terminalID: open.uppercased()),
+            ExistingAgentSession.Link(taskID: "t-wrong-agent", agent: .codex, terminalID: open),
+            ExistingAgentSession.Link(taskID: "t-idle", agent: .claude, terminalID: idle),
+            ExistingAgentSession.Link(taskID: "t-closed", agent: .claude, terminalID: "32345678-1234-5678-9abc-123456789abc"),
+        ]
+        let alive = ExistingAgentSession.liveness(links, sessions: sessions, processes: processes)
+        XCTAssertEqual(alive, ["t-open": true, "t-wrong-agent": false, "t-idle": false, "t-closed": false])
+        XCTAssertEqual(ExistingAgentSession.liveness([], sessions: sessions, processes: processes), [:])
+    }
+
     func testPasteRetainsLiteralTextButRemovesEmbeddedTerminalControls() {
         let payload = ExistingAgentSession.pastePayload("한글\n$(touch nope)\t\u{1B}[201~\r\u{03}test")
         XCTAssertEqual(payload, "\u{1B}[200~한글\n$(touch nope)\t[201~test\u{1B}[201~")

@@ -37,6 +37,9 @@ final class BotStore {
     var homeTasks = HomeTaskFile.empty
     private var homeTaskData: Data?
     var homeTaskError: String?
+    /// 할 일 id → 연결된 iTerm 세션이 살아 있는지. 새로고침 때마다 다시 본다. 없으면 확인 못 한 것.
+    var sessionLiveness: [String: Bool] = [:]
+    var sessionCheckError: String?
     var homeOverview: HomeOverview { HomeOverview(status, tasks: homeTasks) }
     var homeChanges: [HomeChange] { homeOverview.changes(since: homeBaseline) }
     var homeSnapshotComplete: Bool {
@@ -168,6 +171,32 @@ final class BotStore {
         let result = await HomeTaskClient.command("reopen", id: task.id)
         readHomeTasks()
         if result.code != 0 { homeTaskError = result.output }
+    }
+
+    /// 지금 할 일에 보이는 작업 중 iTerm 탭에 연결된 것들이 아직 살아 있는지 본다.
+    ///
+    /// 탭을 닫거나 CLI 를 끝내도 파일에는 아무 흔적이 남지 않아, 앱은 계속 "작업 중"
+    /// 으로 알고 있었다. 죽은 세션에 "작업 중" 인 작업은 `task stop` 으로 내려 "세션 종료 ·
+    /// 완료 보고 없음" 이 되게 한다. 다시 열린 작업은 상태를 건드리지 않고 표시만 한다.
+    func checkConnectedSessions() async {
+        let links = homeTasks.current.values.compactMap { homeTasks.tasks[$0] }
+            .filter { ["running", "reopened", "stopped"].contains($0.status) }
+            .compactMap { task -> ExistingAgentSession.Link? in
+                guard let terminalID = task.terminalID, let agent = AgentTerminal.Agent(rawValue: task.agent) else { return nil }
+                return ExistingAgentSession.Link(taskID: task.id, agent: agent, terminalID: terminalID)
+            }
+        guard !links.isEmpty else { sessionLiveness = [:]; sessionCheckError = nil; return }
+        do {
+            let alive = try await ExistingAgentSession.liveness(links)
+            sessionLiveness = alive
+            sessionCheckError = nil
+            let dead = alive.filter { !$0.value }.keys
+                .compactMap { homeTasks.tasks[$0] }.filter { $0.status == "running" }
+            for task in dead { _ = await HomeTaskClient.command("stop", id: task.id) }
+            if !dead.isEmpty { readHomeTasks() }
+        } catch {
+            sessionCheckError = error.localizedDescription
+        }
     }
 
     func refreshLocal() {
@@ -478,6 +507,7 @@ final class BotStore {
         statusError = snap.errors.first
         statusLoadedAt = Date()
         readHomeTasks()
+        await checkConnectedSessions()
         if homeBaseline == nil && homeSnapshotComplete { acknowledgeHome() }
         if let secs = snap.config?.intervalSec, secs > 0 { tickInterval = TimeInterval(secs) }
         announceNewRequests(snap.pending)
