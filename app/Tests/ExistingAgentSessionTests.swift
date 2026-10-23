@@ -33,6 +33,25 @@ final class ExistingAgentSessionTests: XCTestCase {
         XCTAssertTrue(ExistingAgentSession.hasAgent(.codex, tty: "/dev/ttys005", processes: rows))
     }
 
+    func testForegroundCLIsReportAgentAndPIDPerTTY() {
+        let rows = "ttys001  S+   123 /usr/local/bin/codex\nttys002  S    124 claude\nttys003  S+   125 claude\n??       S+   126 codex\nttys004  S+   127 /Applications/My Tools/bin/codex\n"
+        let clis = ExistingAgentSession.foregroundCLIs(rows)
+        XCTAssertEqual(clis["ttys001"]?.agent, .codex)
+        XCTAssertEqual(clis["ttys001"]?.pid, 123)
+        XCTAssertNil(clis["ttys002"])
+        XCTAssertEqual(clis["ttys003"]?.agent, .claude)
+        XCTAssertEqual(clis["ttys004"]?.pid, 127)
+        XCTAssertEqual(clis.count, 4)
+    }
+
+    func testRepositoryNameFromRemoteURL() {
+        XCTAssertEqual(ExistingAgentSession.repoName(fromRemote: "git@github.com:org/repo.git\n"), "org/repo")
+        XCTAssertEqual(ExistingAgentSession.repoName(fromRemote: "https://github.com/org/my.repo"), "org/my.repo")
+        XCTAssertEqual(ExistingAgentSession.repoName(fromRemote: "ssh://git@github.com/org/repo/"), "org/repo")
+        XCTAssertNil(ExistingAgentSession.repoName(fromRemote: "https://gitlab.com/org/repo.git"))
+        XCTAssertNil(ExistingAgentSession.repoName(fromRemote: ""))
+    }
+
     func testLivenessNeedsTheTabAndTheForegroundCLI() {
         let open = "12345678-1234-5678-9abc-123456789abc"
         let idle = "22345678-1234-5678-9abc-123456789abc"

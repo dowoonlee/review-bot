@@ -14,6 +14,8 @@ struct HomeRequest: Identifiable {
     var insight: RequestInsight?
     var stamp: HomeStamp
     var account: String?
+    /// PR 의 head 브랜치. 기존 세션 연결에서 같은 브랜치를 체크아웃한 탭을 고르는 데 쓴다.
+    var headRef: String?
     var currentAI: Bool { insight?.status == "ready" }
 }
 
@@ -92,7 +94,8 @@ struct HomeOverview {
                 direction: "보낸 요청", selection: .sent(pr.id), insight: pr.insight,
                 stamp: HomeStamp(state: pr.reviewDecision ?? "", checks: pr.checksState ?? "",
                     conflict: pr.mergeable == "CONFLICTING", revision: pr.updatedAt + (pr.responses ?? []).map(\.id).sorted().joined(separator: ","),
-                    analysis: ai.map { ($0.summary ?? "") + items.map(\.text).joined(separator: "\n") } ?? ""), account: pr.account))
+                    analysis: ai.map { ($0.summary ?? "") + items.map(\.text).joined(separator: "\n") } ?? ""), account: pr.account,
+                headRef: pr.headRefName))
         }
         for pr in status?.pending ?? [] {
             let ai = pr.insight?.status == "ready" ? pr.insight : nil
@@ -103,7 +106,8 @@ struct HomeOverview {
                 reason: pr.holdReason ?? ai?.items?.first?.text ?? (pr.status == "draft" ? "게시 전 봇의 리뷰 초안을 확인하세요." : "받은 리뷰 요청의 변경 내용과 대화를 확인하세요."),
                 priority: 3, waiting: waiting, direction: "받은 요청", selection: .pending(pr.id), insight: pr.insight,
                 stamp: HomeStamp(state: pr.status, checks: "", conflict: false, revision: pr.updatedAt,
-                    analysis: ai.map { ($0.summary ?? "") + ($0.items ?? []).map(\.text).joined(separator: "\n") } ?? ""), account: pr.account))
+                    analysis: ai.map { ($0.summary ?? "") + ($0.items ?? []).map(\.text).joined(separator: "\n") } ?? ""), account: pr.account,
+                headRef: pr.headRefName))
         }
         if status?.selectionSettings?.enabled != true {
             for i in rows.indices { rows[i].insight?.selection = nil }

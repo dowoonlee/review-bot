@@ -1830,6 +1830,7 @@ def status_payload(cfg, skip_details=False):
                 item["prAuthor"] = (meta.get("author") or {}).get("login") or p["author"]
                 item["isDraft"] = bool(meta.get("isDraft"))
                 item["changedFiles"] = meta.get("changedFiles")
+                item["headRefName"] = meta.get("headRefName")
             except gh.GhError:
                 item["issues"] = []
         item["holdReason"] = hold_reason(cfg, item, me) if p["repo"] in known and not rec else None

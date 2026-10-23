@@ -6,6 +6,11 @@ enum ExistingAgentSession {
         let id: String
         let tty: String
         let name: String
+        /// 아래는 `availableAll` 이 채운다 — 전경 CLI 종류와 그 작업 디렉터리의 git 저장소·브랜치.
+        var agent: AgentTerminal.Agent? = nil
+        var directory: String? = nil
+        var repo: String? = nil
+        var branch: String? = nil
     }
 
     static let listScript = """
@@ -45,6 +50,61 @@ enum ExistingAgentSession {
             return fields.count == 3 && fields[0] == terminal && fields[1].contains("+")
                 && (fields[2].trimmingCharacters(in: .whitespaces) as NSString).lastPathComponent == agent.rawValue
         }
+    }
+
+    /// tty → 전경 CLI 와 pid. `ps -axo tty=,stat=,pid=,comm=` 출력을 읽는다.
+    static func foregroundCLIs(_ processes: String) -> [String: (agent: AgentTerminal.Agent, pid: Int)] {
+        var result: [String: (agent: AgentTerminal.Agent, pid: Int)] = [:]
+        for line in processes.split(separator: "\n") {
+            let fields = line.split(maxSplits: 3, whereSeparator: { $0.isWhitespace }).map(String.init)
+            guard fields.count == 4, fields[1].contains("+"), let pid = Int(fields[2]),
+                  let agent = AgentTerminal.Agent(rawValue: (fields[3].trimmingCharacters(in: .whitespaces) as NSString).lastPathComponent)
+            else { continue }
+            result[fields[0]] = (agent, pid)
+        }
+        return result
+    }
+
+    /// origin URL 에서 owner/repo. https·ssh·scp 꼴을 받고 GitHub 가 아니면 nil.
+    static func repoName(fromRemote url: String) -> String? {
+        let value = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pattern = #"github\.com[:/]([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
+              let range = Range(match.range(at: 1), in: value) else { return nil }
+        return String(value[range])
+    }
+
+    /// Codex·Claude 탭을 한 번에 — 추천 근거로 CLI 의 작업 디렉터리와 그 git 저장소·브랜치를 읽는다.
+    /// 화면에 보이는 텍스트는 읽지 않는다.
+    static func availableAll() async throws -> [Session] {
+        guard await MainActor.run(body: {
+            NSRunningApplication.runningApplications(withBundleIdentifier: "com.googlecode.iterm2").isEmpty == false
+        }) else { throw HomeTaskClient.Failure(message: "iTerm을 먼저 열어 주세요.") }
+        let result = await Shell.run(["/usr/bin/osascript", "-e", listScript])
+        guard result.code == 0 else {
+            throw HomeTaskClient.Failure(message: "iTerm 세션을 읽지 못했습니다. 시스템 설정의 자동화에서 ReviewBot의 iTerm 제어를 허용해 주세요.")
+        }
+        let processes = await Shell.run(["/bin/ps", "-axo", "tty=,stat=,pid=,comm="])
+        guard processes.code == 0 else { throw HomeTaskClient.Failure(message: "실행 중인 CLI를 확인하지 못했습니다.") }
+        let clis = foregroundCLIs(processes.output)
+        var sessions: [Session] = []
+        for var session in parseSessions(result.output) {
+            guard let cli = clis[String(session.tty.dropFirst("/dev/".count))] else { continue }
+            session.agent = cli.agent
+            let cwd = await Shell.run(["/usr/sbin/lsof", "-a", "-p", String(cli.pid), "-d", "cwd", "-Fn"])
+            if cwd.code == 0, let line = cwd.output.split(separator: "\n").first(where: { $0.hasPrefix("n/") }) {
+                let directory = String(line.dropFirst())
+                session.directory = directory
+                let branch = await Shell.run(["/usr/bin/git", "-C", directory, "rev-parse", "--abbrev-ref", "HEAD"])
+                let name = branch.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                if branch.code == 0, !name.isEmpty, name != "HEAD" { session.branch = name }
+                let remote = await Shell.run(["/usr/bin/git", "-C", directory, "remote", "get-url", "origin"])
+                if remote.code == 0 { session.repo = repoName(fromRemote: remote.output) }
+            }
+            sessions.append(session)
+        }
+        return sessions
     }
 
     /// 할 일에 연결된 iTerm 세션이 아직 살아 있는지 — 탭이 남아 있고 그 tty 에서 같은 CLI 가

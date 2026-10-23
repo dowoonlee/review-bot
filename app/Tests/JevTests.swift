@@ -25,6 +25,23 @@ final class JevTests: XCTestCase {
         let bad = String(decoding: data, as: UTF8.self).replacingOccurrences(of: "\"self\"", with: "\"secret-choice\"")
         XCTAssertThrowsError(try JevAPI.sanitized(Data(bad.utf8)))
     }
+    func testSessionMatchAcceptsOnlyOfferedLabelsOrNone() throws {
+        XCTAssertTrue(JevAPI.validChoices(["s1", "s2"]))
+        XCTAssertFalse(JevAPI.validChoices([]))
+        XCTAssertFalse(JevAPI.validChoices(["s1", "s1"]))
+        XCTAssertFalse(JevAPI.validChoices(["11111111-1111-1111-1111-111111111111"]))
+        let questions = JevAPI.sessionQuestions(["s1"])["session"] as? [String: Any]
+        XCTAssertEqual(Set((questions?["criteria"] as? [String: String] ?? [:]).keys), ["none", "s1"])
+        func answer(_ choice: String, _ confidence: Double) -> Data {
+            Data(#"{"answers":{"session":{"type":"choice","choice":"\#(choice)","confidence":\#(confidence)}},"usage":{"input_tokens":5}}"#.utf8)
+        }
+        let ok = try JevAPI.sanitizedSession(answer("s1", 0.9), choices: ["s1", "s2"])
+        XCTAssertEqual(ok["session"] as? String, "s1")
+        XCTAssertEqual(ok["confidence"] as? Double, 0.9)
+        XCTAssertEqual(try JevAPI.sanitizedSession(answer("none", 0.3), choices: ["s1"])["session"] as? String, "none")
+        XCTAssertThrowsError(try JevAPI.sanitizedSession(answer("s3", 0.9), choices: ["s1", "s2"]))
+        XCTAssertThrowsError(try JevAPI.sanitizedSession(answer("s1", 1.5), choices: ["s1"]))
+    }
     func testDisabledStaleAndLowConfidenceKeepOriginalBehavior() throws {
         let helper = HomeOverviewTests()
         func snapshot(enabled: Bool, state: String, confidence: Double) throws -> StatusSnapshot {

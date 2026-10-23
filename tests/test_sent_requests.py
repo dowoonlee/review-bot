@@ -11,7 +11,7 @@ def pr(number=1, requested=True):
         "number": number, "title": "Fix", "url": "https://github.com/org/repo/pull/%s" % number,
         "repository": {"nameWithOwner": "org/repo"}, "author": {"login": "me"},
         "updatedAt": "2026-09-14T00:00:00Z", "isDraft": False,
-        "reviewDecision": "APPROVED", "mergeable": "MERGEABLE",
+        "reviewDecision": "APPROVED", "mergeable": "MERGEABLE", "headRefName": "feature/x",
         "reviewRequests": {"nodes": [], "pageInfo": {"hasNextPage": False}},
         "latestReviews": {"nodes": [{"id": "R1", "author": {"login": "reviewer"}, "state": "APPROVED"}],
                           "pageInfo": {"hasNextPage": False}},
@@ -33,6 +33,7 @@ class SentRequestsTests(unittest.TestCase):
         self.assertEqual([r["number"] for r in rows], [1])
         self.assertEqual(rows[0]["reviewDecision"], "APPROVED")
         self.assertEqual(rows[0]["checksState"], "FAILURE")
+        self.assertEqual(rows[0]["headRefName"], "feature/x")
         self.assertFalse(warnings)
 
     @patch.object(github, "whoami", return_value="me")

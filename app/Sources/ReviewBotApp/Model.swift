@@ -212,6 +212,7 @@ struct PendingPR: Decodable, Sendable, Identifiable {
     var holdReason: String?    // 틱이 리뷰하지 않고 넘기는 이유 (draft · 본인 PR)
     var changedFiles: Int?
     var issues: [LinkedIssue]?
+    var headRefName: String?
 
     var id: String { "\(repo)#\(number)" }
     var label: String { "\(repo.split(separator: "/").last.map(String.init) ?? repo)#\(number)" }
@@ -237,6 +238,7 @@ struct SentPR: Decodable, Sendable, Identifiable {
     var checksState: String?
     var requestedAt: String?
     var reviewers: [PRReviewer]
+    var headRefName: String?
 
     var id: String { "\(account):\(repo)#\(number)" }
     var label: String { "\(repo)#\(number)" }

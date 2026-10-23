@@ -138,7 +138,7 @@ query($searchQuery: String!, $cursor: String) {
     issueCount
     pageInfo { hasNextPage endCursor }
     nodes { ... on PullRequest {
-      number title url updatedAt isDraft reviewDecision mergeable
+      number title url updatedAt isDraft reviewDecision mergeable headRefName
       repository { nameWithOwner }
       author { login }
       reviewRequests(first: 100) {
@@ -217,6 +217,7 @@ def sent_review_requests(account=None):
                 "account": account or "global", "updatedAt": pr["updatedAt"],
                 "isDraft": pr["isDraft"], "reviewDecision": pr.get("reviewDecision"),
                 "mergeable": pr.get("mergeable"), "checksState": checks.get("state"),
+                "headRefName": pr.get("headRefName"),
                 "requestedAt": history[-1].get("createdAt") if history else None,
                 # 재요청으로 표시 상태가 PENDING 이 되어도 제출된 답변은 따로 보존한다.
                 "responses": [{"id": r["id"], "author": r["author"]["login"],
