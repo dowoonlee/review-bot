@@ -242,7 +242,8 @@ def pr_meta(repo, number, account=None, timeout=120):
     return _gh_json([
         "pr", "view", str(number), "--repo", repo, "--json",
         "headRefOid,headRefName,baseRefOid,baseRefName,isDraft,additions,deletions,"
-        "changedFiles,title,body,author,url,mergeable,state,updatedAt,statusCheckRollup",
+        "changedFiles,title,body,author,url,mergeable,state,updatedAt,statusCheckRollup,"
+        "reviewDecision,latestReviews,reviewRequests",
     ], account=account, timeout=timeout)
 
 

@@ -45,6 +45,22 @@ final class HomeOverviewTests: XCTestCase {
         XCTAssertEqual(value.actions.first?.action, "CI 실패 확인")
         XCTAssertEqual(value.actions.last?.action, "최종 머지 조건 확인")
     }
+    func testAllReviewersApprovedWithoutDecisionIsMergeCheck() throws {
+        let value = HomeOverview(try snapshot([
+            ["number": 1, "checksState": "SUCCESS", "reviewers": [["name": "a", "state": "APPROVED"], ["name": "b", "state": "APPROVED"]]],
+            ["number": 2, "checksState": "SUCCESS", "reviewers": [["name": "a", "state": "APPROVED"], ["name": "b", "state": "PENDING"]]],
+            ["number": 3, "checksState": "SUCCESS", "reviewers": [["name": "a", "state": "APPROVED"]], "reviewDecision": "REVIEW_REQUIRED"]]))
+        XCTAssertEqual(value.actions.map(\.number), [1])
+        XCTAssertEqual(value.actions.first?.action, "최종 머지 조건 확인")
+        XCTAssertEqual(value.waiting.count, 2)
+    }
+    func testJevWaitDoesNotHideApprovedPR() throws {
+        let decision: [String: Any] = ["status": "disabled", "nextAction": "wait", "selection":
+            ["status": "ready", "actor": "other", "action": "wait", "urgency": 0.2, "confidence": 0.99]]
+        var value = try snapshot([["reviewDecision": "APPROVED", "checksState": "SUCCESS", "insight": decision]])
+        value.selectionSettings = .init(enabled: true, model: "jev-latest", registration: "g", keyReady: true)
+        XCTAssertEqual(HomeOverview(value).actions.first?.action, "최종 머지 조건 확인")
+    }
     func testChangesRemainUntilExplicitAcknowledgementAndDisappearanceIsNotMerge() throws {
         let old = HomeOverview(try snapshot([["checksState": "PENDING"]]))
         let new = HomeOverview(try snapshot([["checksState": "FAILURE"]]))

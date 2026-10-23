@@ -101,6 +101,14 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
+def approved(meta):
+    """필요한 승인이 모두 끝났는지. 보호 규칙이 없는 저장소는 리뷰어 전원 승인·대기 없음으로 본다."""
+    decision = meta.get('reviewDecision')
+    if decision: return decision == 'APPROVED'
+    reviews = [r.get('state') for r in meta.get('latestReviews') or [] if isinstance(r, dict)]
+    return bool(reviews) and all(state == 'APPROVED' for state in reviews) and not (meta.get('reviewRequests') or [])
+
+
 def snapshot(row):
     repo, number, account = row['repo'], row['number'], row.get('account')
     viewer = account or github.whoami(account)
@@ -125,7 +133,7 @@ def snapshot(row):
             failures[check_id] = digest([meta.get('headRefOid'), check])
     return {'state': meta.get('state'), 'head': meta.get('headRefOid'), 'updatedAt': meta.get('updatedAt'), 'requestedAt': requested_at,
             'feedback': feedback, 'failures': failures, 'conflict': meta.get('mergeable') == 'CONFLICTING',
-            'incomplete': context.get('incomplete', False)}
+            'approved': approved(meta) and not meta.get('isDraft'), 'incomplete': context.get('incomplete', False)}
 
 
 def complete(task_id):
@@ -170,6 +178,8 @@ def reason_for_reopen(row, current):
     if any(old.get('failures', {}).get(k) != v for k, v in current.get('failures', {}).items()):
         return '새 CI 실패가 확인됐습니다'
     if current.get('conflict') and not old.get('conflict'): return '새 브랜치 충돌이 생겼습니다'
+    if row['direction'] == 'outgoing' and current.get('approved') and not old.get('approved'):
+        return '승인이 끝나 머지 조건을 확인할 차례입니다'
     if (current.get('incomplete') or old.get('incomplete')) and current.get('updatedAt') != old.get('updatedAt'):
         return '대화 일부만 확인되어 새 변경을 다시 확인해야 합니다'
     if row['direction'] == 'incoming' and old.get('head') != current.get('head'):

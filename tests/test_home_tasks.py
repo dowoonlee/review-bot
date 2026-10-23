@@ -96,6 +96,22 @@ class HomeTasksTests(unittest.TestCase):
         self.assertIsNone(tasks.reason_for_reopen(done,dict(BASE,state='MERGED',feedback={'new':'x'})))
         incoming=self.completed('incoming')
         self.assertIsNotNone(tasks.reason_for_reopen(incoming,dict(BASE,head='new-head')))
+    def test_approval_reopens_sent_pr_once(self):
+        done=self.completed()
+        self.assertEqual(tasks.reason_for_reopen(done,dict(BASE,approved=True)),'승인이 끝나 머지 조건을 확인할 차례입니다')
+        self.assertIsNone(tasks.reason_for_reopen(done,dict(BASE,approved=True,state='MERGED')))
+        self.assertIsNone(tasks.reason_for_reopen(self.completed('incoming'),dict(BASE,approved=True)))
+        row=self.start()
+        with patch.object(tasks,'snapshot',return_value=dict(BASE,approved=True)):
+            after=tasks.complete(row['id'])
+        self.assertIsNone(tasks.reason_for_reopen(after,dict(BASE,approved=True)))
+    def test_approved_follows_review_decision_then_reviewers(self):
+        self.assertTrue(tasks.approved({'reviewDecision':'APPROVED','reviewRequests':[{'login':'x'}]}))
+        self.assertFalse(tasks.approved({'reviewDecision':'REVIEW_REQUIRED','latestReviews':[{'state':'APPROVED'}]}))
+        self.assertTrue(tasks.approved({'reviewDecision':None,'latestReviews':[{'state':'APPROVED'}],'reviewRequests':[]}))
+        self.assertFalse(tasks.approved({'reviewDecision':None,'latestReviews':[{'state':'APPROVED'}],'reviewRequests':[{'login':'x'}]}))
+        self.assertFalse(tasks.approved({'reviewDecision':None,'latestReviews':[{'state':'APPROVED'},{'state':'COMMENTED'}]}))
+        self.assertFalse(tasks.approved({'reviewDecision':None,'latestReviews':[]}))
     def test_reconcile_and_manual_reopen(self):
         done=self.completed()
         with patch.object(tasks,'snapshot',return_value=dict(BASE,feedback={'r2':'new'})):
@@ -113,6 +129,9 @@ class HomeTasksTests(unittest.TestCase):
         with patch.object(github,'request_context',return_value=context),patch.object(github,'pr_meta',return_value=meta):
             snapshot=tasks.snapshot(self.start())
         self.assertEqual(set(snapshot['feedback']),{'question'})
+        self.assertFalse(snapshot['approved'])
+        with patch.object(github,'request_context',return_value=context),patch.object(github,'pr_meta',return_value=dict(meta,reviewDecision='APPROVED')):
+            self.assertTrue(tasks.snapshot(self.start())['approved'])
     def test_forget_preserves_other_accounts_and_prs(self):
         row=self.start();other=tasks.start('org/repo',2,'me','outgoing')
         tasks.forget('org/repo',1)

@@ -61,6 +61,9 @@ struct HomeOverview {
         for pr in status?.outgoing ?? [] {
             let ai = pr.insight?.status == "ready" ? pr.insight : nil
             let items = ai?.items ?? []
+            // 보호 규칙이 없는 저장소는 reviewDecision 이 비므로 리뷰어 전원 승인·대기 없음을 승인으로 본다.
+            let approved = pr.reviewDecision == "APPROVED"
+                || ((pr.reviewDecision ?? "").isEmpty && !pr.reviewers.isEmpty && pr.reviewers.allSatisfy { $0.state == "APPROVED" })
             var action = "리뷰어 답변 대기", reason = "리뷰 답변이 오면 다시 확인하세요."
             var priority = 9, waiting = true
             if pr.isDraft {
@@ -78,7 +81,7 @@ struct HomeOverview {
                 action = "후속 확인"; reason = item.text; priority = 4; waiting = false
             } else if ["PENDING", "EXPECTED"].contains(pr.checksState ?? "") {
                 action = "CI 완료 대기"; reason = "실행 중인 검증 결과를 기다리고 있습니다."
-            } else if pr.reviewDecision == "APPROVED" {
+            } else if approved {
                 action = "최종 머지 조건 확인"; reason = "승인은 충족됐습니다. 필수 검사와 저장소의 머지 조건을 확인하세요."
                 priority = 5; waiting = false
             } else if pr.reviewers.contains(where: { $0.state == "COMMENTED" }) {
@@ -122,7 +125,7 @@ struct HomeOverview {
                         rows[i].action = "후속 리뷰 확인"; rows[i].priority = 4; rows[i].waiting = false
                         rows[i].reason = "Jev가 내 후속 리뷰가 필요한 것으로 분류했습니다."
                     }
-                } else if decision.actor == "other", decision.action == "wait", rows[i].priority != 1 {
+                } else if decision.actor == "other", decision.action == "wait", rows[i].priority != 1, rows[i].action != "최종 머지 조건 확인" {
                     rows[i].action = "상대 응답 대기"; rows[i].waiting = true
                     rows[i].reason = "Jev가 상대의 후속 답변을 기다릴 차례로 분류했습니다."
                 }
