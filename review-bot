@@ -11,6 +11,7 @@
   doctor   의존성·인증·설정 점검.
 """
 import argparse
+import glob
 import json
 import os
 import plistlib
@@ -477,6 +478,11 @@ def process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge=
         return _process_pr(pr, cfg, state, force, mcp, force_size, rejudge)
     finally:
         store.clear_current()
+        # 리뷰가 끝나면 바로, 체크포인트가 더는 가리키지 않는 이 PR 의 이전 실행을 지운다.
+        try:
+            janitor.prune_superseded(checkpoints.load(pr["repo"], pr["number"]))
+        except OSError as e:
+            _log("  이전 실행 증거 정리 실패 — 다음 틱에서 다시 봅니다: %s" % e)
 
 
 def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge=False):
@@ -1398,6 +1404,15 @@ def _gc(cfg, verbose=False):
     ns, freed = janitor.sweep_sessions(g.get("sessionDays", 3))
     if ns:
         out.append("claude 세션 %d개 (%s)" % (ns, janitor.human(freed)))
+    superseded = 0
+    for path in glob.glob(os.path.join(store.STATE_DIR, "checkpoints", "*.json")):
+        try:
+            with open(path, encoding="utf-8") as fp:
+                superseded += janitor.prune_superseded(json.load(fp), blocked=containers["blocked"])
+        except (OSError, ValueError):
+            continue
+    if superseded:
+        out.append("이전 실행 증거 %d개" % superseded)
     ne = janitor.prune_evidence(g.get("evidenceDays", 14), blocked=containers["blocked"])
     if ne:
         out.append("실행 검증 자료 %d개" % ne)

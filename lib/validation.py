@@ -66,6 +66,8 @@ def failure_kind(result, browser=False):
         return 'plan'
     output = result.get('output') or ''
     if browser:
+        if re.search(r"browserType\.launch|Executable doesn't exist at", output):
+            return 'infrastructure'
         if re.search(r'AssertionError', output):
             return 'test'
         if re.search(r'strict mode violation|TimeoutError|is not a function|is not defined|SyntaxError', output):

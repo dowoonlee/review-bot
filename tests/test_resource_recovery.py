@@ -154,6 +154,39 @@ class WorktreeRecoveryTests(unittest.TestCase):
 
 
 class EvidenceRecoveryTests(unittest.TestCase):
+    def test_superseded_runs_are_removed_right_after_a_newer_review_replaces_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pr = Path(tmp, 'evidence/o_r/1')
+            saved = time.time()
+            earlier = saved - 600
+            runs = {name: pr / name for name in ('oldhead/a', 'head/kept', 'head/attempt', 'head/report',
+                                                 'head/stale', 'head/live', 'head/foreign', 'head/after')}
+            owners = {'live': {'instance': 'ours', 'pid': 2}, 'foreign': {'instance': 'other', 'pid': 1}}
+            for name, path in runs.items():
+                path.mkdir(parents=True)
+                (path / 'result.json').write_text('{}')
+                if path.name in owners:
+                    (path / 'owner.json').write_text(json.dumps(owners[path.name]))
+                if path.name != 'after':  # 'after' is a failed review that ran after the save.
+                    for p in (*path.iterdir(), path):
+                        os.utime(p, (earlier, earlier))
+            other_pr = Path(tmp, 'evidence/o_r/2/head/x')
+            other_pr.mkdir(parents=True)
+            checkpoint = {'updated': saved, 'payload': {'runtime': {
+                'directory': str(runs['head/kept']),
+                'attempts': [{'directory': str(runs['head/attempt'])}],
+                'tests': [{'reused': True, 'reportArtifact': str(runs['head/report'] / 'junit-1.xml')}]}}}
+            with mock.patch.object(janitor, 'STATE_DIR', tmp), \
+                    mock.patch.object(resources, 'instance_id', return_value='ours'), \
+                    mock.patch.object(resources, 'alive', side_effect=lambda owner: owner['pid'] == 2):
+                self.assertEqual(janitor.prune_superseded(checkpoint), 2)
+                self.assertEqual(janitor.prune_superseded({'payload': {'runtime': {}}}), 0)
+            gone = {'oldhead/a', 'head/stale'}
+            for name, path in runs.items():
+                self.assertEqual(path.exists(), name not in gone, name)
+            self.assertFalse((pr / 'oldhead').exists())
+            self.assertTrue(other_pr.exists())
+
     def test_old_interrupted_runs_are_reaped_but_live_and_foreign_owners_are_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp,'evidence/repo/1/head')

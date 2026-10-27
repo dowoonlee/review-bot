@@ -5,6 +5,7 @@
 기록을 남기는데, 봇의 워크트리 경로에는 PR 번호가 들어 있어 PR 마다 새 디렉터리가
 생긴다. PR 한 건이 수 MB 이므로 그냥 두면 조용히 쌓인다.
 """
+import json
 import os
 from pathlib import Path
 import re
@@ -168,6 +169,53 @@ def human(n):
             return "%.0f%s" % (n, unit)
         n /= 1024.0
     return "%.1fTB" % n
+
+
+def _evidence_run(path, root):
+    """The run directory (repo/number/sha/run) that holds an evidence path, if any."""
+    try:
+        parts = Path(path).relative_to(root).parts
+    except ValueError:
+        return None
+    return root.joinpath(*parts[:4]) if len(parts) >= 4 else None
+
+
+def prune_superseded(checkpoint, blocked=()):
+    """Delete this PR's earlier runs as soon as a newer review has replaced them.
+
+    A review leaves one evidence run per attempt and per head; only the runs the
+    saved checkpoint still points at (its directory, recovery attempts, reused test
+    reports and screenshots) can be read again. The rest would sit for evidenceDays.
+    """
+    if '*' in blocked:
+        return 0
+    root = Path(STATE_DIR, "evidence")
+    runtime = ((checkpoint or {}).get('payload') or {}).get('runtime') or {}
+    referenced = {_evidence_run(m, root) for m in re.findall(r'"(/[^"]+)"', json.dumps(runtime))}
+    referenced.discard(None)
+    scope = referenced and next(iter(referenced)).parent.parent
+    if not scope or not scope.is_dir() or scope.is_symlink():
+        return 0
+    # Runs after the checkpoint was saved belong to a review that has not replaced
+    # it (still running, or failed): they are the evidence of what went wrong.
+    saved = checkpoint.get('updated') or 0
+    removed = 0
+    for run in scope.glob('*/*'):
+        if run in referenced or not run.is_dir() or run.is_symlink() or run.parent.is_symlink():
+            continue
+        if max([run.stat().st_mtime] + [p.stat().st_mtime for p in run.iterdir() if not p.is_symlink()]) >= saved:
+            continue
+        owner = resources.read_owner(run / 'owner.json')
+        if owner.get('instance') and (owner['instance'] != resources.instance_id() or
+                                     resources.alive(owner) or resources.owner_key(owner) in blocked):
+            continue  # Another bot instance, or a run that is still executing.
+        shutil.rmtree(run)
+        removed += 1
+        try:
+            run.parent.rmdir()
+        except OSError:
+            pass
+    return removed
 
 
 def prune_evidence(keep_days=14, blocked=()):
