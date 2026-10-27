@@ -9,7 +9,7 @@ import time
 import unittest
 from unittest import mock
 
-from lib import checkpoints, config, github, policy, preflight, reviewer, runtime, store, worktree
+from lib import checkpoints, config, github, policy, preflight, reviewer, runtime, store, validation, worktree
 
 BOT = Path(__file__).resolve().parents[1] / 'review-bot'
 GOOD = {'status': 'complete', 'sha': 'head', 'testsApplicable': True,
@@ -302,6 +302,38 @@ class RejudgeTests(unittest.TestCase):
         self.assertEqual(execution.call_count, 1)
         self.assertIsNone(execution.call_args.kwargs['previous'])
         self.review.assert_not_called()
+
+    def test_changed_runtime_keeps_required_checks_but_not_their_outcomes(self):
+        roundtrip = {'id': 'roundtrip', 'name': 'migration roundtrip', 'command': 'alembic downgrade && alembic upgrade'}
+        self.snapshot['payload']['runtime'] = dict(
+            copy.deepcopy(GOOD), plan={'tests': [roundtrip], 'scenarios': ['publish']}, requirements=[roundtrip],
+            tests=[dict(roundtrip, status='failed', output='downgrade blocked', failureKind='test')])
+        checkpoints.save('o/r', 1, self.snapshot)
+        self.cfg['review']['runtime']['model'] = 'other'
+        self.prepare.side_effect = None
+        self.prepare.return_value = (self.temp.name, 'head', self.temp.name, 'ref')
+        self.stack.enter_context(mock.patch.object(worktree, 'cleanup'))
+        execution = self.stack.enter_context(mock.patch.object(runtime, 'collect', return_value=copy.deepcopy(GOOD)))
+        self.bot['process_pr']({'repo': 'o/r', 'number': 1}, self.cfg, {}, force=True, rejudge=True)
+        previous = execution.call_args.kwargs['previous']
+        self.assertEqual([t['id'] for t in previous['requirements']], ['roundtrip'])
+        self.assertEqual(previous['plan'], {'scenarios': ['publish']})
+        self.assertNotIn('tests', previous)  # Old bot code's outcomes are not evidence.
+        # A narrower new plan cannot drop the required check.
+        plan = {'tests': [{'name': 'heads', 'command': 'alembic heads'}], 'scenarios': [], 'testsApplicable': True}
+        planned, _ = validation.preserve(plan, previous)
+        self.assertIn('alembic downgrade && alembic upgrade', [t['command'] for t in planned['tests']])
+
+    def test_required_checks_survive_even_when_no_evidence_is_reusable(self):
+        roundtrip = {'id': 'roundtrip', 'name': 'migration roundtrip', 'command': 'alembic downgrade && alembic upgrade'}
+        self.snapshot['payload']['runtime'] = dict(copy.deepcopy(GOOD), requirements=[roundtrip])
+        checkpoints.save('o/r', 1, self.snapshot)
+        # A review-bot edit changes both keys, so load() gives nothing to reuse.
+        changed = dict(self.snapshot['identity'], review='new', runtime='new')
+        self.assertIsNone(checkpoints.load('o/r', 1, changed))
+        self.assertEqual([t['id'] for t in checkpoints.obligations('o/r', 1, changed)['requirements']], ['roundtrip'])
+        for field in ('head', 'base', 'account'):
+            self.assertIsNone(checkpoints.obligations('o/r', 1, dict(changed, **{field: 'other'})))
 
     def test_unchanged_pending_ci_does_not_spend_on_judge_or_post(self):
         self.meta['statusCheckRollup'] = [{'name': 'unit', 'status': 'QUEUED'}]

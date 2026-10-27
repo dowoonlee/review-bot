@@ -31,8 +31,23 @@ class ValidationContractTests(unittest.TestCase):
         plan, _ = validation.preserve({'tests': [repaired], 'scenarios': []}, self.previous(kind='plan'))
         self.assertEqual(plan['tests'][0]['command'], 'pytest real_contract')
         repaired.pop('repairReason')
-        with self.assertRaises(validation.ContractError):
-            validation.preserve({'tests': [repaired], 'scenarios': []}, self.previous(kind='plan'))
+        # Unexplained: the obligation keeps its command and the rewrite runs beside it.
+        plan, required = validation.preserve({'tests': [repaired], 'scenarios': []}, self.previous(kind='plan'))
+        commands = {t['id']: t['command'] for t in plan['tests']}
+        self.assertEqual(commands['contract'], 'pytest contract')
+        self.assertIn('pytest real_contract', [c for i, c in commands.items() if i != 'contract'])
+        self.assertEqual(len(commands), 2)
+        self.assertIn('contract', [t['id'] for t in required])
+
+    def test_rewrite_that_only_adds_environment_variables_is_not_run_twice(self):
+        self.assertEqual(validation.command_core('export DB_SCHEMA_NAME=c2 && cd x && PYTHONPATH=.:app uv run pytest a.py'),
+                         'cd x && uv run pytest a.py')
+        rewritten = {'id': 'contract', 'name': 'contract', 'command': 'export DB_SCHEMA_NAME=c2 && pytest contract'}
+        plan, _ = validation.preserve({'tests': [rewritten], 'scenarios': []}, self.previous(kind='plan'))
+        self.assertEqual([t['command'] for t in plan['tests']], ['pytest contract'])
+        different = dict(rewritten, command='export DB_SCHEMA_NAME=c2 && pytest other')
+        plan, _ = validation.preserve({'tests': [different], 'scenarios': []}, self.previous(kind='plan'))
+        self.assertEqual(len(plan['tests']), 2)
 
     def test_timeout_words_in_an_assertion_are_not_infrastructure_failure(self):
         self.assertEqual(validation.failure_kind({'status': 'failed', 'output': 'ConnectionError / TimeoutError',

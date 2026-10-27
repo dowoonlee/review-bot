@@ -706,6 +706,21 @@ review-bot forget --all                              # 전부
 전에는 끊습니다. 컨테이너는 종료·실패·SIGTERM 시 제거합니다. 외부 서비스나 시크릿이
 필요한 경로를 실행하지 못하면 미확인으로 기록하고 승인하지 않습니다.
 
+DB 테스트는 계획의 `services: ["postgres"]`, `databaseSetup`으로 실행합니다.
+봇이 고정 이미지 `postgres:16-alpine`의 전용 DB를 만들고 테스트 컨테이너와
+네트워크 namespace를 공유합니다. 외부 연결을 끊은 뒤 `127.0.0.1:5432`만 사용하며,
+호스트 포트·Docker 소켓·공용 DB를 열지 않습니다. DB는 별도 1 GiB 메모리/1 CPU
+한도와 임시 저장소를 사용하고, 테스트 컨테이너와 함께 정리됩니다.
+head·baseline·재시도는 각각 빈 DB를 받습니다.
+
+`DB_HOST/PORT/USER/PASSWORD/NAME`과 asyncpg `DATABASE_URL`은 공개된 테스트용 값으로
+주입됩니다. 스키마는 저장소 설정을 따릅니다. 의존성은 `setup`에서 설치하고,
+실제 마이그레이션은 DB 준비 후 `databaseSetup`에서 실행합니다.
+DB 검사에는 `requires: ["postgres"]`를 붙이며, 서비스 선언이나 스키마 준비 명령이
+없으면 실행 전에 계획을 거절합니다. pytest 마커·상위 fixture를 읽어 단위/DB 검사를
+분리하고 핵심 DB 검사를 optional로 낮추지 않습니다. 준비 환경을 바꾸면 이전
+결과를 재사용하지 않고 동일한 필수 테스트를 다시 실행합니다.
+
 `state/evidence/<repo>/<PR>/<head>/<실행>/`에 계획, 명령별 로그, PNG, 결과 JSON을
 남깁니다. `gc.evidenceDays`(기본 14일) 이후에는 자동 정리합니다. `screenshotArtifacts`는 워크트리가 제거된 뒤에도 남는 PNG 경로입니다.
 실패·시간 초과·스크린샷 누락·핵심 경로 미검증은 코드에서 승인을 막습니다.
@@ -730,6 +745,16 @@ Python 검증에는 격리된 Python/pip 환경과 uv를 먼저 준비합니다.
 그것을 쓰는 테스트는 PR 과 무관하게 실패하고, 저장소에 원래 깨져 있는 테스트도
 있습니다. 이런 실패를 PR 탓으로 돌리면 봇은 승인을 영영 못 하고, "환경 탓으로
 보인다" 는 추측으로 넘기면 진짜 회귀를 놓칩니다.
+
+Docker 소켓은 계속 주지 않습니다. 소켓은 호스트 데몬 전체 권한이라 정리로는 막을
+수 없기 때문입니다. 대신 실패한 케이스가 모두 docker-py 의 소켓 부재 오류라면
+그 명령을 한 번 더 실행합니다. 재실행하는 동안에만 `lib/docker_shim/` 의 shim 을
+작업 트리 각 `.venv` 에 `.pth` 로 넣고, 끝나면 지웁니다. 테스트 명령이
+`PYTHONPATH` 를 직접 정해도 적용됩니다. 이 shim 은 클라이언트를 만들 때 데몬에 묻지
+않게 합니다. 초기화 중 클라이언트를 만들기만 하는 테스트는 이것으로 통과합니다. 실제
+API 를 호출하면 표식이 붙은 `DockerException` 으로 실패하고 `environment` 실패로
+분류됩니다. 이런 실패는 이전 실패로 재사용하지 않고 승인도 막습니다. 첫 실행에서
+통과하거나 skip 된 케이스는 재실행에서 Docker 때문에 실패해도 첫 결과를 유지합니다.
 
 head에서 실패한 명령은 **PR이 갈라진 base(merge-base)에서 같은 절차로 한 번 더**
 실행합니다(`review.runtime.baseline`, 기본 `true`). pytest/vitest의 JUnit 보고서에서
@@ -758,6 +783,20 @@ head에서 실패한 명령은 **PR이 갈라진 base(merge-base)에서 같은 �
 브라우저 언어는 `review.runtime.browserLocale`(기본 `ko-KR`)로 지정합니다. 브라우저
 실패 시에도 화면·콘솔 오류·본문을 수집하며, 시간 초과 복구 때 계획자가 이를 읽어
 테스트 환경을 보완합니다. 실패 화면은 시각 검증 통과의 근거로 사용하지 않습니다.
+
+필수 검증 가운데 일부는 계획자가 아니라 봇이 diff 에서 직접 도출합니다
+(`lib/obligations.py`, 증거의 `requiredChecks`). 계획이 그것을 빠뜨리면 실행 전에
+거부해 재계획하고, 실행 뒤에도 그것을 덮는(`covers`) 테스트가 통과하지 않으면
+승인하지 않습니다. 매 실행마다 현재 head 에서 다시 계산하므로 새 커밋이 낡은 의무를
+이어받지도, 새 위험을 피해 가지도 못합니다. 지금 규칙은 두 가지입니다.
+
+- `migration-roundtrip`: `alembic/versions/` 또는 `migrations/versions/` 의 리비전 파일이
+  추가·수정되면, 일회용 Postgres 에서 새 리비전 아래로 downgrade 한 뒤 upgrade head 까지
+  되돌리는 required 테스트가 있어야 합니다. 봇이 파일에서 `revision`·`down_revision` 을
+  읽어 계획자에게 주고, 명령이 그 식별자를 가리키는지 확인합니다. 저장소의 downgrade
+  가드(`ALLOW_DESTRUCTIVE_MIGRATION`)는 공용 DB 보호용이므로 이 명령에만, 그리고 일회용
+  DB 가 붙어 있을 때만 봇이 환경변수로 풉니다. setup·start 에는 넣지 않습니다.
+- `visual`: 아래의 `visualRequiredBy` 와 같습니다.
 
 CSS·JSX/TSX·Vue/Svelte 등 실제 화면 파일이 바뀌면 봇이 `visualRequiredBy`를 직접
 기록합니다. 문서·테스트·스토리 파일과 내용이 그대로인 이름 변경은 제외합니다. 이 경우
@@ -790,7 +829,13 @@ CI 진행 중에는 `PENDING`(검증 대기)으로 기록하고 GitHub에 최종
 
 재시도에는 tests[].id로 식별하는 필수 검증 목록을 유지합니다. 항목 삭제·optional 전환·
 이미 관측한 필수 테스트 케이스 축소는 허용하지 않습니다. 파일명/명령 구성 오류를
-보완할 때는 같은 id와 repairReason을 사용합니다. 실제 테스트 실패는 다른 실행 명령으로
+보완할 때는 같은 id와 repairReason을 사용합니다. repairReason 없이 명령을 바꾸면
+실행 전체를 버리지 않습니다. 원래 명령은 그 id로 남기고, 바꾼 명령은 별도 항목으로
+함께 실행합니다.
+
+봇 코드가 바뀌어 같은 head 의 이전 실행 결과를 재사용할 수 없을 때도 필수 검증
+목록은 체크포인트에서 이어받습니다(`checkpoints.obligations`). 이전 결과는 봇 코드에
+따라 달라지지만, 이 PR 이 증명해야 할 범위는 그렇지 않기 때문입니다. 실제 테스트 실패는 다른 실행 명령으로
 바꾸거나 계획에서 빼지 못하고, 이미 통과한 명령은 재사용합니다. 필수 케이스가 skip된
 명령은 완료한 캐시로 취급하지 않습니다. 테스트 traceback 안의 TimeoutError 문구만으로
 환경 오류를 판정하지 않습니다.

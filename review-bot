@@ -314,6 +314,12 @@ def _summary_body(payload, inline, demoted, verdict=None, note=None):
                          % (str(baseline.get("sha"))[:10], len(baseline.get("tests") or [])))
         elif baseline.get("status") == "error":
             parts.append("- 기준선: 잡지 못했습니다 — 실패한 테스트를 그대로 둡니다 (%s)" % str(baseline.get("error"))[:120])
+        for check in evidence.get("requiredChecks") or []:
+            if check["kind"] == "visual":
+                continue
+            covering = [t for t in evidence.get("tests") or [] if check["kind"] in (t.get("covers") or [])]
+            state = ", ".join("%s **%s**" % (t.get("name"), t.get("status")) for t in covering) or "**검증 항목 없음**"
+            parts.append("- 변경 유형별 필수 검증 `%s` (%s): %s" % (check["kind"], ", ".join(check["paths"]), state))
         visual = evidence.get("visual") or {}
         parts.append("- 화면 검증: %s — %s" % (visual.get("status", "미실행/해당 없음"), visual.get("summary", "")))
         for limitation in evidence.get("limitations") or []:
@@ -566,6 +572,9 @@ def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge
     reuse_review = bool(cached and reuse.get('review'))
     reuse_runtime = bool(cached and reuse.get('runtime'))
     saved_runtime = runtime.refresh_ci(cached['payload'].get('runtime') or {}, meta) if reuse_runtime else None
+    # 봇 코드가 바뀌어 이전 실행 결과를 못 쓰더라도, 이 PR 이 증명해야 할 필수 검증은
+    # 그대로다. 그것까지 버리면 새 계획이 범위를 줄여도 아무도 모른 채 승인된다.
+    obligations = saved_runtime if reuse_runtime else checkpoints.obligations(repo, number, identity)
     execution_ready = bool(saved_runtime) and not runtime.approval_block(saved_runtime)
     needs_execution = not execution_ready and (not cached or rejudge or not reuse_runtime)
     result['cache'] = {'review': False, 'runtime': execution_ready, 'decision': False}
@@ -615,7 +624,7 @@ def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge
                 payload['runtime'] = runtime.collect(
                     meta, files, wt, cfg_mod._merge(rcfg.get('runtime') or {}, entry.get('runtime') or {}),
                     progress=lambda message: _log('  ' + message), env=genv,
-                    previous=saved_runtime)
+                    previous=obligations)
                 runtime_ran = True
             finally:
                 if wt and base:
@@ -664,7 +673,7 @@ def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge
             if needs_execution:
                 meta['_runtime'] = runtime.collect(
                     meta, files, wt, cfg_mod._merge(rcfg.get('runtime') or {}, entry.get('runtime') or {}),
-                    progress=runtime_progress, env=genv, previous=saved_runtime)
+                    progress=runtime_progress, env=genv, previous=obligations)
                 runtime_ran = True
             else:
                 meta['_runtime'] = saved_runtime

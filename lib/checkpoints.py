@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import time
 
-from lib import store, config, agents
+from lib import store, config, agents, validation
 
 
 def _path(repo, number):
@@ -60,6 +60,23 @@ def load(repo, number, expected=None):
         return value
     except (OSError, ValueError):
         return None
+
+
+def obligations(repo, number, expected):
+    """Required checks for this exact revision, even when no evidence is reusable.
+
+    Any bot change invalidates earlier outcomes (and a change to review-bot itself
+    invalidates both review and runtime, so load() returns None), but not what this
+    PR must prove.
+    """
+    try:
+        value = json.loads(_path(repo, number).read_text())
+    except (OSError, ValueError):
+        return None
+    original = value.get('identity') or {}
+    if any(original.get(k) != expected.get(k) for k in ('head', 'base', 'account')):
+        return None
+    return validation.carry((value.get('payload') or {}).get('runtime'))
 
 
 def save(repo, number, value):

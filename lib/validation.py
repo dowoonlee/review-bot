@@ -8,6 +8,27 @@ class ContractError(ValueError):
     pass
 
 
+# The sandbox has no Docker daemon. Matches docker-py's missing-socket error and the
+# DockerException raised by lib/docker_shim once a real API call is attempted.
+DOCKER_UNAVAILABLE = re.compile(
+    r"DockerException: Error while fetching server API version: \('Connection aborted\.', "
+    r"FileNotFoundError|review-bot: the validation sandbox provides no Docker daemon")
+
+
+def docker_unavailable_case(case):
+    return bool(DOCKER_UNAVAILABLE.search(case.get('message') or ''))
+
+
+def docker_unavailable(result):
+    """Every failure is the missing Docker daemon, not an assertion about the code."""
+    if result.get('reportError'):
+        return False
+    failed = [c for c in result.get('cases') or [] if c.get('status') == 'failed']
+    if failed:
+        return all(docker_unavailable_case(c) for c in failed)
+    return bool(DOCKER_UNAVAILABLE.search(result.get('output') or ''))
+
+
 def check_id(test):
     return test.get('id') or 'test-' + hashlib.sha256(
         (test.get('name', '') + '\0' + test.get('command', '')).encode()).hexdigest()[:12]
@@ -49,6 +70,8 @@ def failure_kind(result, browser=False):
             return 'test'
         if re.search(r'strict mode violation|TimeoutError|is not a function|is not defined|SyntaxError', output):
             return 'plan'
+    if docker_unavailable(result):
+        return 'environment'
     # A failure inside a test is not an infrastructure failure just because its
     # assertion/traceback mentions TimeoutError or ConnectionError.
     if any(c.get('status') == 'failed' for c in result.get('cases', [])):
@@ -77,11 +100,31 @@ def obligations(previous):
     return list(saved.values())
 
 
+def carry(previous):
+    """What a PR must prove outlives a bot change; outcomes from older bot code do not."""
+    required = obligations(previous)
+    if not required:
+        return None
+    scenarios = ((previous or {}).get('plan') or {}).get('scenarios') or []
+    return {'requirements': required, 'plan': {'scenarios': list(scenarios)}}
+
+
+def command_core(command):
+    """The command without environment assignments, so `export X=1 && cmd` equals `cmd`."""
+    assignment = r'(export\s+)?[A-Za-z_][A-Za-z0-9_]*=\S*'
+    segments = []
+    for segment in re.split(r'\s*&&\s*', command.strip()):
+        segment = re.sub(r'^(%s\s+)+' % assignment, '', segment).strip()
+        if segment and not re.fullmatch(assignment, segment):
+            segments.append(re.sub(r'\s+', ' ', segment))
+    return ' && '.join(segments)
+
+
 def preserve(plan, previous=None):
     plan = copy.deepcopy(plan)
     old = {check_id(t): t for t in obligations(previous)}
     results = {check_id(t): t for t in (previous or {}).get('tests', [])}
-    checks, used = [], set()
+    checks, used, extra = [], set(), []
     for test in plan['tests']:
         matches = [key for key, item in old.items() if item['command'] == test['command']]
         if not matches:
@@ -97,11 +140,20 @@ def preserve(plan, previous=None):
             changed = any(test.get(k) != original.get(k) for k in ('command', 'report'))
             if changed and (satisfied(outcome) or
                             (outcome.get('status') == 'failed' and failure_kind(outcome) == 'test')):
-                test = {k: original[k] for k in ('id', 'name', 'command', 'report', 'required', 'requiredCases', 'scopeReason') if k in original}
+                test = {k: original[k] for k in ('id', 'name', 'command', 'report', 'required', 'requiredCases', 'scopeReason', 'requires', 'covers') if k in original}
                 test['id'] = identity
             elif changed and not test.get('repairReason'):
-                raise ContractError('필수 테스트 명령을 보완할 때 id를 유지하고 repairReason을 적으세요: ' + identity)
+                # An unexplained rewrite neither replaces the obligation nor discards the
+                # whole run: the original command stays, the rewrite runs beside it —
+                # unless it only adds environment variables, which is the same check twice.
+                if (command_core(test.get('command', '')) != command_core(original.get('command', '')) or
+                        test.get('report') != original.get('report')):
+                    extra.append({k: v for k, v in test.items() if k != 'id'})
+                test = {k: original[k] for k in ('name', 'command', 'report', 'required', 'requiredCases', 'scopeReason', 'requires', 'covers') if k in original}
+                test['id'] = identity
             test['required'] = original.get('required', True)
+            if original.get('requires'):
+                test['requires'] = list(dict.fromkeys(original['requires'] + test.get('requires', [])))
             if original.get('scopeReason'):
                 test['scopeReason'] = original['scopeReason']
             if original.get('requiredCases'):
@@ -109,9 +161,15 @@ def preserve(plan, previous=None):
             else:
                 test.pop('requiredCases', None)  # "all cases" cannot become a subset.
         checks.append(test)
+    for test in extra:
+        identity = check_id(test)
+        while identity in used or identity in old:
+            identity += '-rewrite'
+        used.add(identity)
+        checks.append(dict(test, id=identity))
     for identity, original in old.items():
         if identity not in used:
-            checks.append({**{k: original[k] for k in ('name', 'command', 'report', 'required', 'requiredCases', 'scopeReason') if k in original},
+            checks.append({**{k: original[k] for k in ('name', 'command', 'report', 'required', 'requiredCases', 'scopeReason', 'requires', 'covers') if k in original},
                            'id': identity})
     plan['tests'] = checks
     if any(t.get('required', True) for t in checks):
