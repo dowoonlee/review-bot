@@ -106,6 +106,55 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(collect.call_count, 1)
 
 
+class BrowserBaselineTests(unittest.TestCase):
+    HEAD = ['/tmp/h/01.png', '/tmp/h/02.png']
+    BASE = ['/tmp/b/01.png', '/tmp/b/02.png']
+
+    def evidence(self, browser='passed', visual=None):
+        return {'directory': tempfile.mkdtemp(), 'cost_usd': 0, 'limitations': [], 'screenshots': list(self.HEAD),
+                'browser': {'status': browser, 'output': 'ok', **({} if browser == 'passed' else {'failureKind': 'test'})},
+                'visual': visual or {'status': 'incomplete', 'complete': False, 'summary': '05 empty but assert passed',
+                                     'missing': []}}
+
+    def run_baseline(self, evidence, answer):
+        plan = {'scenarios': ['draft kept at 930px'], 'browser': '', 'start': '', 'setup': '', 'services': []}
+        base_browser = {'status': 'passed', 'output': 'ok'}
+        with mock.patch.object(runtime, '_merge_base', return_value='basesha'), \
+                mock.patch.object(runtime, '_provision'), \
+                mock.patch.object(runtime.Container, 'close'), \
+                mock.patch.object(runtime, '_run_browser', return_value=(base_browser, list(self.BASE))), \
+                mock.patch.object(reviewer, '_run', return_value=answer):
+            runtime._browser_baseline(META, plan, evidence, '/tmp', {}, None, lambda *_: None)
+        return evidence
+
+    def test_only_an_unresolved_verdict_that_replanning_cannot_fix_is_compared(self):
+        self.assertTrue(runtime._needs_browser_baseline(self.evidence()))
+        self.assertFalse(runtime._needs_browser_baseline(self.evidence(visual={'status': 'passed'})))
+        self.assertFalse(runtime._needs_browser_baseline(self.evidence(visual={'status': 'incomplete', 'missing': ['x']})))
+        replanned = self.evidence(browser='failed')
+        replanned['browser']['failureKind'] = 'plan'
+        self.assertFalse(runtime._needs_browser_baseline(replanned))
+
+    def test_behaviour_identical_on_base_clears_the_screen_verdict(self):
+        seen = self.HEAD + self.BASE
+        result = self.run_baseline(self.evidence(), {'verdict': 'same', 'summary': 'base shows the same empty input',
+                                                     'inspected': seen})
+        self.assertEqual((result['visual']['status'], result['visual']['complete']), ('passed', True))
+        self.assertEqual(result['browserBaseline']['verdict'], 'same')
+        self.assertIn('base shows the same empty input', result['visual']['summary'])
+
+    def test_same_needs_every_screenshot_on_both_sides_and_a_completed_head_run(self):
+        for answer, browser in (({'verdict': 'same', 'summary': 's', 'inspected': self.HEAD}, 'passed'),
+                                ({'verdict': 'same', 'summary': 's', 'inspected': self.HEAD + self.BASE}, 'failed'),
+                                ({'verdict': 'differs', 'summary': 'only head', 'inspected': self.HEAD + self.BASE}, 'passed'),
+                                ({'verdict': 'unsure', 'summary': '?', 'inspected': self.HEAD + self.BASE}, 'passed')):
+            with self.subTest(answer=answer, browser=browser):
+                result = self.run_baseline(self.evidence(browser=browser), answer)
+                self.assertEqual(result['visual']['status'], 'incomplete')
+        result = self.run_baseline(self.evidence(), {'verdict': 'unsure', 'inspected': self.HEAD + self.BASE})
+        self.assertEqual(result['browserBaseline']['verdict'], 'differs')
+
+
 class RecoveryTests(unittest.TestCase):
     def test_an_evidence_gap_replans_the_browser_with_the_missing_states(self):
         gap = {'status': 'complete', 'tests': [], 'limitations': [], 'screenshots': ['01.png'],
