@@ -1401,6 +1401,9 @@ def _gc(cfg, verbose=False):
         out.append('고아 컨테이너 %d개' % len(containers['removed']))
     if swept:
         out.append('워크트리·ref %d건' % swept)
+    shells = janitor.reap_handoff_shells()
+    if shells:
+        out.append("남은 에이전트 셸 %d개" % shells)
     ns, freed = janitor.sweep_sessions(g.get("sessionDays", 3))
     if ns:
         out.append("claude 세션 %d개 (%s)" % (ns, janitor.human(freed)))

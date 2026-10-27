@@ -634,6 +634,7 @@ review-bot forget --all                              # 전부
 | claude 자식 프로세스 | — | 시간 초과 때 **프로세스 그룹째**. 그냥 kill 하면 손자가 살아남습니다. |
 | 실행 증거 | `state/evidence/<repo>/<PR>/<head>/<실행>/` | **리뷰가 끝나면 즉시**, 체크포인트가 더는 가리키지 않는 같은 PR 의 이전 실행·이전 head 를 지웁니다. 체크포인트 저장 뒤에 생긴 실행(진행 중이거나 실패한 리뷰)은 원인을 볼 단서라 남깁니다. 나머지는 `gc.evidenceDays`(기본 14일) |
 | 일회용 컨테이너·DB·브라우저 | Docker 컨테이너 안 | 실행이 끝나면 컨테이너째(`rm -f -v`). 저장소 버전 Playwright 브라우저도 컨테이너 안에만 받으므로 호스트에 남지 않습니다. 이미지(Playwright·Postgres)는 다음 리뷰가 다시 받지 않도록 둡니다. |
+| 에이전트 인계 셸 | 앱이 iTerm 탭에 띄운 `zsh -lic …_review_bot_prompt…` | 탭이 닫혀 터미널·부모를 잃고 아무것도 실행하지 않은 채 10분 넘게 남은 것을 틱마다 종료합니다. 터미널이 붙어 있거나 에이전트가 돌고 있으면 건드리지 않습니다. |
 | 리뷰 초안 | `state/drafts/` | `gc.draftDays` (기본 14일) |
 | 실행 이력 | `state/runs.jsonl` | `gc.runsMaxLines`(기본 2000줄)를 넘으면 오래된 것부터 |
 | launchd 로그 | `state/bot.log`, `bot.err` | `gc.logMaxBytes`(기본 5MB)를 넘으면 `.1` 로 한 세대만 |

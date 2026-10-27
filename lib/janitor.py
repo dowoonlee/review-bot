@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
+import signal
 import time
 
 from lib import resources
@@ -40,6 +42,48 @@ def drop_session(wt_path):
         shutil.rmtree(d, ignore_errors=True)
         return size
     return 0
+
+
+def reap_handoff_shells(min_age=600, listing=None, kill=os.kill):
+    """Kill agent handoff shells the app left behind after their iTerm tab closed.
+
+    The app starts each agent as `zsh -lic '... _review_bot_prompt ...'` in an iTerm
+    tab. Such a shell that has lost its terminal and parent and runs nothing is dead
+    weight; one that still has a terminal or a running agent is somebody's session.
+    """
+    if listing is None:
+        proc = subprocess.run(['ps', '-axo', 'pid=,ppid=,tty=,etime=,command='],
+                              capture_output=True, text=True, timeout=10)
+        listing = proc.stdout if proc.returncode == 0 else ''
+    rows = []
+    parents = set()
+    for line in listing.splitlines():
+        parts = line.split(None, 4)
+        if len(parts) < 5:
+            continue
+        pid, ppid, tty, etime, command = parts
+        parents.add(ppid)
+        rows.append((pid, ppid, tty, etime, command))
+    reaped = 0
+    for pid, ppid, tty, etime, command in rows:
+        if (ppid != '1' or tty not in ('??', '?') or '_review_bot_prompt' not in command or
+                not command.startswith('/bin/zsh -lic') or pid in parents or _seconds(etime) < min_age):
+            continue
+        try:
+            kill(int(pid), signal.SIGTERM)
+            reaped += 1
+        except (ProcessLookupError, PermissionError, ValueError):
+            pass
+    return reaped
+
+
+def _seconds(etime):
+    """ps etime `[[dd-]hh:]mm:ss` in seconds."""
+    days, _, clock = etime.rpartition('-')
+    total = 0
+    for part in clock.split(':'):
+        total = total * 60 + int(part)
+    return total + int(days or 0) * 86400
 
 
 def sweep_sessions(keep_days=3):

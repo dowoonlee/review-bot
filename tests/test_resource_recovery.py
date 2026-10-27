@@ -153,6 +153,24 @@ class WorktreeRecoveryTests(unittest.TestCase):
         self.assertEqual(worktree.cleanup(base, path, ref), [])
 
 
+class HandoffShellTests(unittest.TestCase):
+    def test_only_orphaned_idle_handoff_shells_are_reaped(self):
+        listing = '\n'.join([
+            "101     1 ??       01-02:03:57 /bin/zsh -lic cd -- '/repo' || exit 1\\012_review_bot_prompt=$(cat x)",
+            "102     1 ttys003  01-02:03:57 /bin/zsh -lic cd -- '/repo' || exit 1\\012_review_bot_prompt=$(cat x)",
+            "103     1 ??       01-02:03:57 /bin/zsh -lic cd -- '/repo' || exit 1\\012_review_bot_prompt=$(cat x)",
+            "900   103 ??          10:00 codex --yolo prompt",
+            "104     1 ??             02:00 /bin/zsh -lic cd -- '/repo' || exit 1\\012_review_bot_prompt=$(cat x)",
+            "105   400 ??       01-02:03:57 /bin/zsh -lic cd -- '/repo' || exit 1\\012_review_bot_prompt=$(cat x)",
+            "106     1 ??       01-02:03:57 /bin/zsh -lic some other login shell"])
+        killed = []
+        count = janitor.reap_handoff_shells(listing=listing, kill=lambda pid, sig: killed.append(pid))
+        # 102 has a terminal, 103 runs an agent, 104 is new, 105 has a parent, 106 is not ours.
+        self.assertEqual((count, killed), (1, [101]))
+        self.assertEqual(janitor._seconds('01-02:03:57'), 93837)
+        self.assertEqual(janitor._seconds('10:00'), 600)
+
+
 class EvidenceRecoveryTests(unittest.TestCase):
     def test_superseded_runs_are_removed_right_after_a_newer_review_replaces_them(self):
         with tempfile.TemporaryDirectory() as tmp:
