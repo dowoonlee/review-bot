@@ -85,7 +85,7 @@ def failure_kind(result, browser=False):
     # assertion/traceback mentions TimeoutError or ConnectionError.
     if any(c.get('status') == 'failed' for c in result.get('cases', [])):
         return 'test'
-    if re.search(r'No test files found|no tests ran|command not found', output, re.I):
+    if re.search(r'No test files found|No tests found|no tests ran|command not found', output, re.I):
         return 'plan'
     if re.search(r'heap out of memory|ENOTFOUND|EAI_AGAIN', output, re.I):
         return 'infrastructure'

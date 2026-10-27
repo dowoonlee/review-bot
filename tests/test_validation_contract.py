@@ -49,6 +49,10 @@ class ValidationContractTests(unittest.TestCase):
         plan, _ = validation.preserve({'tests': [different], 'scenarios': []}, self.previous(kind='plan'))
         self.assertEqual(len(plan['tests']), 2)
 
+    def test_a_selector_that_matches_no_tests_is_a_plan_error(self):
+        # Playwright's wording for a --grep that selects nothing.
+        self.assertEqual(validation.failure_kind({'status': 'failed', 'output': 'Error: No tests found.\nMake sure'}), 'plan')
+
     def test_timeout_words_in_an_assertion_are_not_infrastructure_failure(self):
         self.assertEqual(validation.failure_kind({'status': 'failed', 'output': 'ConnectionError / TimeoutError',
                                                   'cases': [{'status': 'failed'}]}), 'test')
