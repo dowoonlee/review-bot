@@ -6,16 +6,26 @@ and approval cannot pass without a passing test that covers it. Because the chec
 are recomputed from the current head every run, a new commit neither inherits stale
 obligations nor escapes new ones.
 """
+import posixpath
 import re
+import shlex
+import subprocess
 from pathlib import Path
 
 MIGRATION = 'migration-roundtrip'
+CONFIG = 'config-contract'
 VISUAL = 'visual'
 
 MIGRATION_PATH = re.compile(r'(^|/)(alembic|migrations)/versions/[^/]+\.py$')
 _REVISION = re.compile(r'^revision(?:\s*:\s*[^=]+)?\s*=\s*(["\'])([0-9a-zA-Z_]+)\1', re.M)
 _DOWN_REVISION = re.compile(r'^down_revision(?:\s*:\s*[^=]+)?\s*=\s*(.+)$', re.M)
 _IDENTIFIER = re.compile(r'["\']([0-9a-zA-Z_]+)["\']')
+# Deployment and runtime configuration. Repositories usually pin these with static
+# contract tests that name the file; those tests are what proves such a change.
+CONFIG_PATH = re.compile(r'^(k8s|helm|charts|deploy)/|(^|/)(nginx[^/]*\.conf|docker-compose[^/]*\.ya?ml|Dockerfile[^/]*)$'
+                         r'|^\.github/workflows/')
+TEST_FILE = re.compile(r'(^|/)(test_[^/]+\.py|[^/]+_test\.py|[^/]+\.(test|spec)\.(js|jsx|ts|tsx|mjs))$')
+MAX_TEST_BYTES = 400_000
 
 
 def visual_required_paths(files):
@@ -58,8 +68,39 @@ def migration_revisions(files, cwd):
     return found
 
 
+def _tracked(cwd):
+    proc = subprocess.run(['git', '-C', str(cwd), 'ls-files', '-z'], capture_output=True, text=True, timeout=30)
+    return [] if proc.returncode else [p for p in proc.stdout.split('\0') if p]
+
+
+def config_contract_tests(files, cwd, tracked=None):
+    """Changed config files and the head's test files that name them by exact path."""
+    changed = [item['filename'] for item in files
+               if item.get('status') != 'removed' and CONFIG_PATH.search(item.get('filename') or '')]
+    if not changed:
+        return [], []
+    root = Path(cwd).resolve()
+    tests = []
+    for name in sorted(tracked if tracked is not None else _tracked(cwd)):
+        if not TEST_FILE.search(name):
+            continue
+        path = root / name
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_TEST_BYTES:
+            continue
+        text = path.read_text(errors='replace')
+        if any(f in text for f in changed):
+            tests.append(name)
+    return changed, tests
+
+
 def required_checks(files, cwd):
     checks = []
+    changed, tests = config_contract_tests(files, cwd)
+    if tests:
+        checks.append({
+            'kind': CONFIG, 'paths': changed, 'tests': tests,
+            'needs': '바뀐 설정 파일을 경로로 직접 가리키는 테스트 파일 전부를 required 테스트로 실행하세요. '
+                     '명령 인자에 각 파일(또는 그 상위 디렉터리)을 넣고 covers=["%s"] 를 적으세요.' % CONFIG})
     migrations = migration_revisions(files, cwd)
     if migrations:
         checks.append({
@@ -85,6 +126,30 @@ def _covering_tests(plan, check):
     return [t for t in plan.get('tests', []) if covers(t, check['kind']) and t.get('required', True)]
 
 
+def command_paths(command):
+    """Repository-relative path arguments of a shell command, following `cd`."""
+    paths, directory = set(), ''
+    for segment in re.split(r'\s*(?:&&|;|\|\|)\s*', command):
+        try:
+            words = shlex.split(segment)
+        except ValueError:
+            words = segment.split()
+        if words[:1] == ['cd'] and len(words) > 1:
+            directory = posixpath.normpath(posixpath.join(directory, words[1].replace('/work', '', 1).lstrip('/')))
+            continue
+        for word in words:
+            if word.startswith('-') or '=' in word:
+                continue
+            word = word.split('::', 1)[0]
+            target = word.replace('/work/', '', 1) if word.startswith('/work/') else posixpath.join(directory, word)
+            paths.add(posixpath.normpath(target).lstrip('/'))
+    return paths
+
+
+def _runs(test_file, paths):
+    return any(test_file == p or p == '.' or test_file.startswith(p.rstrip('/') + '/') for p in paths)
+
+
 def plan_gaps(plan, checks):
     """Why a plan does not satisfy the derived checks; empty when it does."""
     gaps = []
@@ -96,6 +161,12 @@ def plan_gaps(plan, checks):
         if not tests:
             gaps.append('%s 를 covers 로 선언한 required 테스트가 없습니다' % label)
             continue
+        if check['kind'] == CONFIG:
+            paths = set().union(*(command_paths(t.get('command') or '') for t in tests))
+            missing = [f for f in check.get('tests', []) if not _runs(f, paths)]
+            if missing:
+                gaps.append('%s: 이 테스트 파일이 명령에 없습니다: %s' % (label, ', '.join(missing[:12]) +
+                                                              (' 외 %d개' % (len(missing) - 12) if len(missing) > 12 else '')))
         if check['kind'] == MIGRATION:
             identifiers = set(check.get('revisions', [])) | set(check.get('downRevisions', []))
             for test in tests:

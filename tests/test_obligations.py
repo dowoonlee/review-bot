@@ -1,5 +1,6 @@
 """Required checks come from the head diff; a plan cannot omit them and approval needs them."""
 import copy
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -51,6 +52,58 @@ class DerivationTests(unittest.TestCase):
         checks = obligations.required_checks([{'filename': 'web/src/Picker.tsx'}], self.temp.name)
         self.assertEqual(checks, [{'kind': 'visual', 'paths': ['web/src/Picker.tsx'], 'needs': checks[0]['needs']}])
         self.assertEqual(runtime.visual_required_paths([{'filename': 'web/src/Picker.tsx'}]), ['web/src/Picker.tsx'])
+
+
+class ConfigContractTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        files = {'k8s/aws-prd/shared/configmap.yaml': 'FRONTEND_ORIGIN: x\n',
+                 'services/frontend/nginx.conf': 'server {}\n',
+                 'tests/test_origin.py': 'CONFIG = "k8s/aws-prd/shared/configmap.yaml"\n',
+                 'tests/test_other_env.py': 'CONFIG = "k8s/aws/shared/configmap.yaml"\n',
+                 'services/frontend/tests/test_headers.py': 'PATH = "services/frontend/nginx.conf"\n',
+                 'services/frontend/src/a.test.ts': "read('services/frontend/nginx.conf')\n",
+                 'docs/notes.md': 'k8s/aws-prd/shared/configmap.yaml\n'}
+        for name, text in files.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text(text)
+        subprocess.run(['git', 'init', '-q', str(root)], check=True)
+        subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
+        self.changed = [{'filename': 'k8s/aws-prd/shared/configmap.yaml'},
+                        {'filename': 'services/frontend/nginx.conf'},
+                        {'filename': 'k8s/old.yaml', 'status': 'removed'}]
+
+    def check(self):
+        return next(c for c in obligations.required_checks(self.changed, self.temp.name) if c['kind'] == 'config-contract')
+
+    def test_tests_that_name_a_changed_config_file_are_required(self):
+        check = self.check()
+        self.assertEqual(check['paths'], ['k8s/aws-prd/shared/configmap.yaml', 'services/frontend/nginx.conf'])
+        # Exact path only: another environment's configmap and docs do not count.
+        self.assertEqual(check['tests'], ['services/frontend/src/a.test.ts',
+                                          'services/frontend/tests/test_headers.py', 'tests/test_origin.py'])
+
+    def test_plan_must_run_every_referencing_test_file(self):
+        check = self.check()
+        def plan(*commands):
+            return {'services': [], 'tests': [{'name': str(i), 'command': c, 'required': True, 'covers': ['config-contract']}
+                                              for i, c in enumerate(commands)]}
+        self.assertTrue(obligations.plan_gaps(plan('uv run pytest tests/test_origin.py'), [check]))
+        self.assertEqual(obligations.plan_gaps(plan(
+            'uv run pytest tests/test_origin.py --junitxml=/work/r.xml',
+            'cd /work/services/frontend && PYTHONPATH=. uv run pytest tests && pnpm exec vitest run src/a.test.ts'), [check]), [])
+        self.assertEqual(obligations.plan_gaps(plan('uv run pytest . services'), [check]), [])
+
+    def test_config_change_without_referencing_tests_adds_no_obligation(self):
+        changed = [{'filename': 'k8s/new-only.yaml'}]
+        self.assertEqual([c['kind'] for c in obligations.required_checks(changed, self.temp.name)], [])
+
+    def test_command_paths_follow_cd_and_ignore_flags_and_assignments(self):
+        self.assertEqual(obligations.command_paths('cd /work/svc && X=1 uv run pytest tests/a.py::t -q --junitxml=/work/r.xml'),
+                         {'svc/uv', 'svc/run', 'svc/pytest', 'svc/tests/a.py'})
+        self.assertIn('.github/workflows/ci.yml', obligations.command_paths('pytest .github/workflows/ci.yml'))
 
 
 class PlanTests(unittest.TestCase):

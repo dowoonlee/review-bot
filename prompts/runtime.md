@@ -57,6 +57,9 @@ CI (테스트 이름이 관련 검증을 포함하는지 확인):
   downgrade 한 뒤 upgrade head 까지 되돌리는 명령이어야 합니다. 저장소 alembic 이 downgrade 를
   가드로 막더라도 명령에서 우회하지 마세요 — 봇이 그 명령에만 ALLOW_DESTRUCTIVE_MIGRATION=1 을
   넣습니다. 이 가드는 공용 DB 보호용이고 이 DB 는 일회용입니다.
+  config-contract 는 바뀐 설정 파일(k8s·helm·nginx·compose·Dockerfile·워크플로)을 경로로 직접
+  가리키는 테스트 파일 목록(tests)입니다. 그 파일 전부를 명령 인자로(또는 상위 디렉터리로) 실행하세요.
+  DB 마커가 붙은 파일은 postgres 서비스와 함께 실행합니다.
 - 변경 위험에 맞게 검증하세요. 문서·주석·설명 문구만 바뀌면 구현/계약 대조로 충분할 수 있습니다.
   인증·권한·과금·데이터 변경은 핵심 계약, 의존성·이미지 변경은 설치·빌드·호환성이 필요합니다.
 - tests의 required는 변경 핵심 검증이면 true, 무관한 기존 실패가 섞인 넓은 회귀 스위트면 false입니다.

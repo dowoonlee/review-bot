@@ -788,7 +788,7 @@ head에서 실패한 명령은 **PR이 갈라진 base(merge-base)에서 같은 �
 (`lib/obligations.py`, 증거의 `requiredChecks`). 계획이 그것을 빠뜨리면 실행 전에
 거부해 재계획하고, 실행 뒤에도 그것을 덮는(`covers`) 테스트가 통과하지 않으면
 승인하지 않습니다. 매 실행마다 현재 head 에서 다시 계산하므로 새 커밋이 낡은 의무를
-이어받지도, 새 위험을 피해 가지도 못합니다. 지금 규칙은 두 가지입니다.
+이어받지도, 새 위험을 피해 가지도 못합니다. 지금 규칙은 세 가지입니다.
 
 - `migration-roundtrip`: `alembic/versions/` 또는 `migrations/versions/` 의 리비전 파일이
   추가·수정되면, 일회용 Postgres 에서 새 리비전 아래로 downgrade 한 뒤 upgrade head 까지
@@ -796,6 +796,13 @@ head에서 실패한 명령은 **PR이 갈라진 base(merge-base)에서 같은 �
   읽어 계획자에게 주고, 명령이 그 식별자를 가리키는지 확인합니다. 저장소의 downgrade
   가드(`ALLOW_DESTRUCTIVE_MIGRATION`)는 공용 DB 보호용이므로 이 명령에만, 그리고 일회용
   DB 가 붙어 있을 때만 봇이 환경변수로 풉니다. setup·start 에는 넣지 않습니다.
+- `config-contract`: `k8s/`·`helm/`·`charts/`·`deploy/`, nginx 설정, docker-compose,
+  Dockerfile, `.github/workflows/` 파일이 바뀌면, head 의 테스트 파일 가운데 그 경로를
+  문자 그대로 담은 파일 전부를 required 테스트로 실행해야 합니다. 경로가 정확히 같아야
+  하므로 다른 환경의 같은 이름 파일이나 문서는 세지 않습니다. 참조하는 테스트가 없으면
+  의무도 만들지 않습니다. c2 의 최근 머지 PR 에서는 설정 변경 26건 중 25건에 이런
+  테스트가 있었습니다(중앙값 6개). Dockerfile 은 이미지를 빌드하지 않고 이 정적 계약
+  테스트로만 확인합니다.
 - `visual`: 아래의 `visualRequiredBy` 와 같습니다.
 
 CSS·JSX/TSX·Vue/Svelte 등 실제 화면 파일이 바뀌면 봇이 `visualRequiredBy`를 직접
