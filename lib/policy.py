@@ -11,6 +11,29 @@ def disposition(finding):
     return 'uncertain' if finding.get('severity') in ('blocking', 'suggestion') else 'optional'
 
 
+DROP_REASONS = ('duplicate', 'out-of-scope', 'speculation')
+
+
+def revive_verified_nits(findings, placements, drop_reasons):
+    """A verified P3 improvement is posted as optional, not dropped as a matter of taste.
+
+    Only nits that survived adversarial verification come back, and only when the
+    judge dropped them for a reason other than duplication, scope or speculation.
+    They become optional body notes, so they never block an approval.
+    """
+    revived = []
+    for index, finding in enumerate(findings):
+        verify = finding.get('_verify') or {}
+        if (placements.get(index) != 'drop' or drop_reasons.get(index) in DROP_REASONS or
+                verify.get('verdict') != 'TRUE_POSITIVE' or verify.get('error') or finding.get('severity') != 'nit'):
+            continue
+        placements[index] = 'body'
+        finding.update(disposition='optional',
+                       dispositionReason='반증을 통과한 선택적 개선입니다. 현재 동작을 깨뜨리지 않아 머지를 막지 않습니다.')
+        revived.append(index)
+    return revived
+
+
 def finding_block(event, findings):
     actions = [disposition(f) for f in findings]
     if event == 'APPROVE' and any(a != 'optional' for a in actions):

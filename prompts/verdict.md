@@ -105,8 +105,11 @@ false 인 항목은 inline 으로 지정해도 본문으로 갑니다.
 - nit(P3) 이 많으면 inline 을 남발하지 말고 body 로 묶으세요. 작성자가 인라인을
   하나하나 닫는 비용이 지적의 값보다 큽니다. altitude 는 항상 body 입니다.
 - **drop** — 같은 원인을 여러 리뷰어가 각자 말했으면 더 나은 하나만 남기고 나머지는 drop.
-  확신 없는 추측, 변경 범위 밖, 취향에 가까운 것도 drop. 틀린 지적 하나가 맞는 지적
-  열 개의 신뢰를 깎습니다.
+  확신 없는 추측, 변경 범위 밖도 drop. 틀린 지적 하나가 맞는 지적 열 개의 신뢰를 깎습니다.
+  drop 할 때는 dropReason 을 duplicate|out-of-scope|speculation 중 하나로 적으세요.
+- 반증을 통과(`검증: TRUE_POSITIVE`)했지만 현재 동작을 깨뜨리지 않는 개선(가독성·단순화·이름 등,
+  nit/P3)은 취향이라는 이유로 버리지 말고 disposition=optional 로 남기세요. 승인을 막지 않고
+  "선택" 으로 게시됩니다. 위 세 사유가 아닌 drop 은 봇이 optional 본문 지적으로 되살립니다.
 
 # 출력
 오직 아래 JSON 만 출력하세요. `reason` 은 리뷰 본문에 그대로 실리므로, PR 작성자가
@@ -118,7 +121,7 @@ false 인 항목은 inline 으로 지정해도 본문으로 갑니다.
   "reason": "왜 이 판정인지",
   "coverageExceptions": {{}},
   "findings": [
-    {{"id": 0, "placement": "inline|body|drop", "disposition": "required|optional|uncertain", "why": "재현 조건·영향 또는 선택적 개선인 이유"}}
+    {{"id": 0, "placement": "inline|body|drop", "disposition": "required|optional|uncertain", "why": "재현 조건·영향 또는 선택적 개선인 이유", "dropReason": "drop 일 때만: duplicate|out-of-scope|speculation"}}
   ]
 }}
 ```

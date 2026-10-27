@@ -69,6 +69,15 @@ class DecisionTests(unittest.TestCase):
             result = reviewer.judge(META, {}, [self.finding('optional')], ['APPROVE'])
         self.assertEqual(result['dispositions'][0]['disposition'], 'optional')
 
+    def test_judge_reports_why_a_finding_was_dropped(self):
+        out = {'event': 'APPROVE', 'findings': [
+            {'id': 0, 'placement': 'drop', 'dropReason': 'Duplicate'},
+            {'id': 1, 'placement': 'drop'},
+            {'id': 2, 'placement': 'inline', 'dropReason': 'duplicate'}]}
+        with mock.patch.object(reviewer, '_run', return_value=out):
+            result = reviewer.judge(META, {}, [self.finding('optional')] * 3, ['APPROVE'])
+        self.assertEqual(result['dropReasons'], {0: 'duplicate'})
+
 
 class TestEvidenceTests(unittest.TestCase):
     def test_large_reports_keep_full_results_but_bound_model_input(self):

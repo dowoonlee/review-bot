@@ -715,12 +715,14 @@ def judge(meta, payload, findings, allowed_events, model="sonnet", timeout=180):
             retry_cost += exc.cost or 0
             if attempt == 2:
                 raise ReviewError(str(exc), cost=retry_cost) from exc
-    places, dispositions = {}, {}
+    places, dispositions, drop_reasons = {}, {}, {}
     for p in out.get("findings") or []:
         if isinstance(p, dict) and isinstance(p.get("id"), int):
             pl = str(p.get("placement") or "").lower()
             if pl in PLACEMENTS:
                 places[p["id"]] = pl
+            if pl == "drop" and p.get("dropReason"):
+                drop_reasons[p["id"]] = str(p["dropReason"]).lower()
             if p.get('disposition') in policy.DISPOSITIONS and p.get('why'):
                 dispositions[p['id']] = {'disposition': p['disposition'],
                                          'dispositionReason': str(p['why'])}
@@ -728,6 +730,7 @@ def judge(meta, payload, findings, allowed_events, model="sonnet", timeout=180):
             "reason": (out.get("reason") or "").strip(),
             "placements": places,
             "dispositions": dispositions,
+            "dropReasons": drop_reasons,
             "coverageExceptions": out.get('coverageExceptions') if isinstance(out.get('coverageExceptions'), dict) else {},
             "cost_usd": (out.get("_meta") or {}).get("cost_usd")}
 

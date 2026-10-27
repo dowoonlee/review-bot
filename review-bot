@@ -808,6 +808,11 @@ def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge
     judge_event = verdict["event"] if pcfg.get("autonomous", True) and not verdict.get("failed") else None
     for index, finding in enumerate(candidates):
         finding.update((verdict.get("dispositions") or {}).get(index) or {})
+    placements = dict(verdict.get("placements") or {})
+    for index in policy.revive_verified_nits(candidates, placements, verdict.get("dropReasons") or {}):
+        _log("  선택 지적으로 되살림 (판정이 사유 없이 버린 반증 통과 P3): %s"
+             % (candidates[index].get("title") or "")[:60])
+    verdict["placements"] = placements
     payload["coverageExceptions"] = verdict.get("coverageExceptions") or {}
     inline, demoted, dropped = _apply_placements(candidates, inline,
                                                  verdict.get("placements") or {})
