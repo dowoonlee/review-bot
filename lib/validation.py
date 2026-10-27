@@ -15,6 +15,9 @@ DOCKER_UNAVAILABLE = re.compile(
     r"FileNotFoundError|review-bot: the validation sandbox provides no Docker daemon")
 
 
+BROWSER_MISSING = r"browserType\.launch: Executable doesn't exist at"
+
+
 def docker_unavailable_case(case):
     return bool(DOCKER_UNAVAILABLE.search(case.get('message') or ''))
 
@@ -66,7 +69,7 @@ def failure_kind(result, browser=False):
         return 'plan'
     output = result.get('output') or ''
     if browser:
-        if re.search(r"browserType\.launch|Executable doesn't exist at", output):
+        if re.search(r"browserType\.launch|" + BROWSER_MISSING, output):
             return 'infrastructure'
         if re.search(r'AssertionError', output):
             return 'test'
@@ -74,6 +77,10 @@ def failure_kind(result, browser=False):
             return 'plan'
     if docker_unavailable(result):
         return 'environment'
+    # A test runner whose browser is not installed never reached the product.
+    failed = [c for c in result.get('cases') or [] if c.get('status') == 'failed']
+    if failed and all(re.search(BROWSER_MISSING, c.get('message') or '') for c in failed):
+        return 'infrastructure'
     # A failure inside a test is not an infrastructure failure just because its
     # assertion/traceback mentions TimeoutError or ConnectionError.
     if any(c.get('status') == 'failed' for c in result.get('cases', [])):

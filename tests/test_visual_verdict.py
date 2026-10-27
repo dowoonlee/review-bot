@@ -28,12 +28,24 @@ class BrowserInfrastructureTests(unittest.TestCase):
                 runtime._provision(container, 'head', tmp, {}, plan, True)
         create = next(a for a in seen if a[:2] == ['docker', 'create'])
         self.assertIn('PLAYWRIGHT_SKIP_BROWSER_GC=1', create)
+        # The repository's own Playwright browsers are installed after setup, while
+        # the network is still connected.
+        scripts = [a[-1] for a in seen]
+        install = scripts.index(runtime.PLAYWRIGHT_BROWSERS)
+        self.assertGreater(install, scripts.index('pnpm exec playwright install chromium'))
+        disconnect = next(i for i, a in enumerate(seen) if a[:3] == ['docker', 'network', 'disconnect'])
+        self.assertLess(install, disconnect)
 
     def test_a_browser_that_cannot_start_is_recovered_not_blamed_on_the_product(self):
         self.assertEqual(validation.failure_kind({'status': 'failed', 'output': LAUNCH}, browser=True),
                          'infrastructure')
         self.assertEqual(validation.failure_kind({'status': 'failed', 'output': 'AssertionError: 2 != 3'},
                                                  browser=True), 'test')
+        # The repository's own e2e runner without its browser is not a product failure either.
+        missing = {'status': 'failed', 'message': 'Error: ' + LAUNCH}
+        self.assertEqual(validation.failure_kind({'status': 'failed', 'cases': [missing, missing]}), 'infrastructure')
+        self.assertEqual(validation.failure_kind({'status': 'failed', 'cases': [
+            missing, {'status': 'failed', 'message': 'expect(locator).toBeVisible() failed'}]}), 'test')
 
 
 class InspectionTests(unittest.TestCase):

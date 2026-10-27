@@ -25,7 +25,9 @@ databaseSetup은 네트워크 차단·DB 준비 후 실행합니다. 실제 저�
 Node/npm, Python, pip, uv, Chromium과 /opt/review-browser/node_modules/playwright가 제공됩니다.
 Python/pip는 /opt/review-python의 독립 환경이고 uv도 PATH에 있습니다.
 uv 프로젝트는 setup에서 uv sync --locked로 프로젝트 전용 .venv를 준비하세요.
-필요한 pnpm, 저장소 버전에 맞는 브라우저는 setup에서 설치하세요.
+필요한 pnpm은 setup에서 설치하세요. 저장소가 고정한 Playwright 버전의 Chromium은 setup이
+끝난 뒤 봇이 node_modules/.bin/playwright 로 직접 설치하므로 setup에 넣지 말고,
+executablePath·별도 config 로 브라우저를 바꿔 끼우지 마세요.
 패키지 매니저 버전은 package.json의 packageManager, CI workflow, Dockerfile을 읽어
 저장소와 동일하게 고정하세요. packageManager가 없다고 최신 버전을 쓰지 마세요.
 예를 들어 CI/Dockerfile이 `corepack prepare pnpm@10 --activate`를 쓴다면 setup에도

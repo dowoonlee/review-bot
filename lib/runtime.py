@@ -40,6 +40,19 @@ PYTHON_BOOTSTRAP = (
     'uv venv --seed /opt/review-python\n'
     'python --version && python -m pip --version && uv --version'
 )
+# Every project that pins its own Playwright gets that version's Chromium while the
+# network is still open. Browser GC is off, so the image's browsers for the bot's own
+# driver stay beside them; both disappear with the container.
+PLAYWRIGHT_BROWSERS = (
+    'status=0\n'
+    'while IFS= read -r -d "" manifest; do\n'
+    '  dir=$(dirname "$manifest")\n'
+    '  [ -x "$dir/node_modules/.bin/playwright" ] || continue\n'
+    '  grep -Eq \'"(@playwright/test|playwright)"[[:space:]]*:\' "$manifest" || continue\n'
+    '  echo "playwright browsers for $dir: $("$dir/node_modules/.bin/playwright" --version)"\n'
+    '  (cd "$dir" && ./node_modules/.bin/playwright install chromium) || status=1\n'
+    'done < <(find /work -maxdepth 4 -name package.json -not -path "*/node_modules/*" -print0)\n'
+    'exit $status')
 _LIVE_CONTAINERS = set()
 
 
@@ -644,6 +657,7 @@ def _provision(container, sha, cwd, cfg, plan, browser):
         container.shell('cd /opt/review-browser && npm install --no-audit --no-fund playwright@' + BROWSER_VERSION, setup_timeout)
     if plan['setup'].strip():
         evidence['setup'] = container.shell(plan['setup'], setup_timeout)
+    evidence['playwrightBrowsers'] = container.shell(PLAYWRIGHT_BROWSERS, setup_timeout, check=False)
     container.command(['docker', 'network', 'disconnect', 'bridge', container.name])
     if 'postgres' in plan.get('services', []):
         evidence['services'] = {'postgres': container.start_postgres()}
