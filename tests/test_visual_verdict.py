@@ -72,6 +72,40 @@ class InspectionTests(unittest.TestCase):
         self.assertEqual((result['status'], result['missing']), ('passed', []))
 
 
+class TriageTests(unittest.TestCase):
+    EVIDENCE = {'screenshots': ['/tmp/01.png', '/tmp/02.png'],
+                'browser': {'status': 'failed', 'output': "AssertionError: h1 스타일 적용 actual: ''"}}
+
+    def triage(self, answer):
+        plan = {'scenarios': ['h1 keeps display size'], 'browser': 'assert.ok(fs)'}
+        with mock.patch.object(reviewer, '_run', return_value=answer):
+            return runtime._triage(META, plan, self.EVIDENCE, '/tmp', {})
+
+    def test_a_wrong_script_is_cleared_only_with_screen_evidence_from_the_failure_screen(self):
+        script = {'cause': 'script', 'summary': 'read during re-render', 'screenEvidence': 'h1 visible at 600px',
+                  'repair': 'wait for layout', 'inspected': ['/tmp/01.png', '/tmp/02.png']}
+        self.assertEqual(self.triage(script)['cause'], 'script')
+        for change in ({'screenEvidence': ''}, {'inspected': ['/tmp/01.png']}, {'cause': 'unsure'},
+                       {'_meta': {'salvaged': True}}):
+            with self.subTest(change=change):
+                result = self.triage(dict(script, **change))
+                self.assertEqual((result['cause'], result['repair']), ('defect', ''))
+
+    def test_failed_assertion_is_replanned_only_when_cleared(self):
+        failed = {'status': 'complete', 'tests': [], 'limitations': [], 'screenshots': ['01.png'],
+                  'browser': {'status': 'failed', 'output': 'AssertionError', 'failureKind': 'plan',
+                              'triage': {'cause': 'script', 'screenEvidence': 'h1 visible', 'repair': 'wait'}}}
+        fixed = dict(failed, browser={'status': 'passed'}, visual={'status': 'passed', 'complete': True})
+        with mock.patch.object(runtime, '_collect_once', side_effect=[failed, fixed]) as collect:
+            runtime.collect(META, [], '/tmp', {})
+        self.assertEqual(collect.call_count, 2)
+        self.assertIn('h1 visible', collect.call_args.args[0]['_runtime_retry']['failures'])
+        defect = dict(failed, browser=dict(failed['browser'], failureKind='test', triage={'cause': 'defect'}))
+        with mock.patch.object(runtime, '_collect_once', return_value=defect) as collect:
+            runtime.collect(META, [], '/tmp', {})
+        self.assertEqual(collect.call_count, 1)
+
+
 class RecoveryTests(unittest.TestCase):
     def test_an_evidence_gap_replans_the_browser_with_the_missing_states(self):
         gap = {'status': 'complete', 'tests': [], 'limitations': [], 'screenshots': ['01.png'],
