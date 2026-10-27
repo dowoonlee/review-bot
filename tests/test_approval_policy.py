@@ -410,6 +410,17 @@ class RejudgeTests(unittest.TestCase):
         self.assertFalse(self.process()['posted'])
         self.post.assert_not_called()
 
+    def test_draft_records_who_requested_the_review(self):
+        self.cfg['post']['dryRun'] = True
+        self.snapshot['identity'] = checkpoints.identity(self.meta, self.cfg, 'me')
+        checkpoints.save('o/r', 1, self.snapshot)
+        self.stack.enter_context(mock.patch.object(store, 'DRAFTS', self.temp.name))
+        self.stack.enter_context(mock.patch.object(github, 'review_requester', return_value='alice'))
+        self.process()
+        draft = json.loads(Path(store.draft_payload_path('o/r', 1)).read_text())
+        self.assertEqual(draft['requestedBy'], 'alice')
+        self.assertEqual(draft['author'], 'author')
+
     def test_exhausted_reviewer_errors_are_not_retried_on_every_ci_change(self):
         self.snapshot['payload'].update(errors=['security: failed'], _meta={'agents': {'security': {'error': 'failed'}}})
         checkpoints.save('o/r', 1, self.snapshot)

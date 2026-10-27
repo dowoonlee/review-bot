@@ -358,6 +358,8 @@ struct DraftPayload: Decodable, Sendable, Identifiable {
     var costUSD: Double?
     var at: String?
     var overridden: DraftOverride?   // 사용자가 판정과 다른 이벤트로 바꿨을 때 원래 판정
+    var requestedBy: String?         // 나에게 리뷰를 요청한 사람. 이 필드 이전의 초안에는 없다.
+    var author: String?              // PR 작성자
 
     var id: String { "\(repo)#\(number)" }
     var label: String { "\(repo.split(separator: "/").last.map(String.init) ?? repo)#\(number)" }
@@ -382,7 +384,7 @@ struct DraftPayload: Decodable, Sendable, Identifiable {
 
     enum CodingKeys: String, CodingKey {
         case repo, number, title, sha, account, event, reason, body
-        case comments, inline, demoted, dropped, at
+        case comments, inline, demoted, dropped, at, requestedBy, author
         case costUSD = "cost_usd"
         case overridden = "override"
     }

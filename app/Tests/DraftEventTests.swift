@@ -33,6 +33,16 @@ final class DraftEventTests: XCTestCase {
         XCTAssertEqual(backAlready.switchableEvents, ["APPROVE", "REQUEST_CHANGES"])
     }
 
+    func testDraftCarriesRequesterAndAuthor() throws {
+        let draft = try decode(["repo": "o/r", "number": 1, "requestedBy": "alice", "author": "bob"])
+        XCTAssertEqual(draft.requestedBy, "alice")
+        XCTAssertEqual(draft.author, "bob")
+        // 이 필드가 생기기 전의 초안도 그대로 열린다.
+        let legacy = try decode(["repo": "o/r", "number": 1])
+        XCTAssertNil(legacy.requestedBy)
+        XCTAssertNil(legacy.author)
+    }
+
     func testEventLabelsMatchTheBot() {
         XCTAssertEqual(eventLabel("APPROVE"), "승인")
         XCTAssertEqual(eventLabel("COMMENT"), "코멘트")

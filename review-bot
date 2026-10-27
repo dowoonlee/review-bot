@@ -906,6 +906,8 @@ def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge
                             for f in dropped],
                 "cost_usd": result.get("cost_usd"),
                 "requestedAt": result.get("requestedAt"),
+                "requestedBy": requester,
+                "author": (meta.get("author") or {}).get("login"),
                 "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }, fp, ensure_ascii=False, indent=2)
         result["draft"] = path

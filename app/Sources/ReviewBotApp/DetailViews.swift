@@ -562,6 +562,14 @@ struct DraftDetailView: View {
             if let t = draft.title, !t.isEmpty {
                 Text(t).f(.callout).foregroundStyle(.secondary)
             }
+            HStack(spacing: 12) {
+                Label(draft.requestedBy ?? "요청자 확인 안 됨", systemImage: "person.badge.plus")
+                    .help("이 PR 의 리뷰를 나에게 요청한 사람")
+                if let author = draft.author {
+                    Label("\(author) 작성", systemImage: "person")
+                }
+            }
+            .f(.caption).foregroundStyle(.secondary)
             Text("인라인 \(draft.inline ?? 0) · 본문 \(draft.demoted ?? 0) · \(draft.at ?? "-") · 커밋 \(String((draft.sha ?? "-").prefix(12)))")
                 .f(.caption, mono: true).foregroundStyle(.secondary)
         }
