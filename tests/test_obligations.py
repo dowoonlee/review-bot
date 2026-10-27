@@ -172,6 +172,19 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(plan['tests'][0]['covers'], ['migration-roundtrip'])
 
 
+class OptionalPlanErrorTests(unittest.TestCase):
+    def test_an_optional_command_that_verified_nothing_does_not_block_approval(self):
+        evidence = {'status': 'complete', 'limitations': [], 'testsApplicable': True, 'visualApplicable': False,
+                    'tests': [{'name': 'unit', 'status': 'passed', 'command': 'pytest'},
+                              {'name': 'grep', 'status': 'failed', 'required': False, 'failureKind': 'plan',
+                               'command': 'playwright test --grep auto'}]}
+        self.assertEqual(runtime.approval_block(evidence), '')
+        for change in ({'failureKind': 'test'}, {'required': True}):
+            with self.subTest(change=change):
+                blocked = dict(evidence, tests=[evidence['tests'][0], dict(evidence['tests'][1], **change)])
+                self.assertTrue(runtime.approval_block(blocked))
+
+
 class ApprovalTests(unittest.TestCase):
     def evidence(self, **test):
         return {'status': 'complete', 'limitations': [], 'testsApplicable': True, 'visualApplicable': False,

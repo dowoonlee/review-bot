@@ -127,6 +127,16 @@ class BrowserBaselineTests(unittest.TestCase):
             runtime._browser_baseline(META, plan, evidence, '/tmp', {}, None, lambda *_: None)
         return evidence
 
+    def test_base_run_keeps_going_past_assertions_about_what_the_pr_added(self):
+        self.assertIn('const SOFT = true', runtime._browser_script('x', soft=True))
+        self.assertIn('const SOFT = false', runtime._browser_script('x'))
+        with tempfile.TemporaryDirectory() as tmp:
+            container = runtime.Container(tmp, {})
+            with mock.patch.object(container, 'shell', return_value={'status': 'passed', 'exitCode': 0, 'output': ''}), \
+                    mock.patch.object(container, 'copy'), mock.patch.object(runtime, '_screenshots', return_value=[]):
+                runtime._run_browser(container, {'start': '', 'browser': 'x'}, tmp, tmp, {}, soft=True)
+            self.assertIn('const SOFT = true', (Path(tmp) / 'browser.cjs').read_text())
+
     def test_only_an_unresolved_verdict_that_replanning_cannot_fix_is_compared(self):
         self.assertTrue(runtime._needs_browser_baseline(self.evidence()))
         self.assertFalse(runtime._needs_browser_baseline(self.evidence(visual={'status': 'passed'})))
