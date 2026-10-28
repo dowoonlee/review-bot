@@ -76,6 +76,9 @@ DEFAULTS = {
             "browserInstallTimeoutSec": 300,
             "installAttempts": 3,
             "installRetryDelaySec": 30,
+            # 마지막 복구 시도에서도 브라우저 단언이 스크립트 문제로 분류되면, 같은 컨테이너·
+            # 앱 서버에서 스크립트만 고쳐 한 번 더 돌린다. 설치·테스트는 다시 하지 않는다.
+            "browserRepair": True,
             "memory": "6g",
             "minFreeDiskGiB": 3,
             "cpus": 4,

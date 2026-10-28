@@ -242,6 +242,51 @@ class TriageTests(unittest.TestCase):
             runtime.collect(META, [], '/tmp', {})
         self.assertEqual(collect.call_count, 1)
 
+    def test_only_the_last_attempt_may_repair_the_script_in_place(self):
+        failed = {'status': 'incomplete', 'tests': [], 'limitations': ['x']}
+        with mock.patch.object(runtime, '_collect_once', return_value=failed) as collect:
+            runtime.collect(META, [], '/tmp', {})
+        self.assertEqual([c.kwargs['final'] for c in collect.call_args_list], [False, False, True])
+
+    def repair(self, answers, rerun=({'status': 'passed'}, ['/tmp/03.png'])):
+        plan = {'scenarios': ['refresh re-enables HTML'], 'browser': 'old', 'start': 'vite'}
+        evidence = {'cost_usd': 0, 'screenshots': ['/tmp/01.png', '/tmp/02.png'],
+                    'browser': {'status': 'failed', 'output': 'AssertionError', 'failureKind': 'plan',
+                                'triage': {'cause': 'script', 'summary': 'asserted mid-refresh',
+                                           'screenEvidence': 'refresh still loading', 'repair': 'wait until loaded'}}}
+        container = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(reviewer, '_run', side_effect=answers) as run, \
+                mock.patch.object(runtime, '_run_browser', return_value=rerun) as browser:
+            runtime._repair_browser(container, META, plan, evidence, Path(tmp), '/tmp', {}, lambda *_: None)
+        return plan, evidence, container, run, browser
+
+    def test_a_script_mistake_on_the_last_attempt_is_fixed_and_rerun_on_the_same_server(self):
+        plan, evidence, container, run, browser = self.repair([
+            {'browser': 'fixed', 'changes': 'waited for the refresh'},
+            {'passed': True, 'complete': True, 'inspected': ['/tmp/03.png']}])
+        self.assertIn('wait until loaded', run.call_args_list[0].args[0])
+        self.assertIn('refresh re-enables HTML', run.call_args_list[0].args[0])
+        self.assertEqual(plan['browser'], 'fixed')
+        rerun_plan = browser.call_args.args[1]
+        self.assertEqual((rerun_plan['browser'], rerun_plan['start']), ('fixed', ''))  # Server is still up.
+        self.assertEqual(plan['start'], 'vite')
+        container.shell.assert_called_once()
+        self.assertIn('rm -f /evidence/*.png', container.shell.call_args.args[0])
+        self.assertEqual(evidence['visual']['status'], 'passed')
+        self.assertEqual(evidence['browserRepair']['status'], 'passed')
+        self.assertEqual(evidence['browserRepair']['previous']['triage']['repair'], 'wait until loaded')
+
+    def test_no_usable_repair_leaves_the_failure_as_it_was(self):
+        for answer in ({'browser': ''}, {'browser': 'x', '_meta': {'salvaged': True}}):
+            with self.subTest(answer=answer):
+                plan, evidence, container, _, browser = self.repair([answer])
+                browser.assert_not_called()
+                container.shell.assert_not_called()
+                self.assertEqual(plan['browser'], 'old')
+                self.assertEqual(evidence['browserRepair']['status'], 'skipped')
+                self.assertEqual(evidence['browser']['status'], 'failed')
+
 
 class BrowserBaselineTests(unittest.TestCase):
     HEAD = ['/tmp/h/01.png', '/tmp/h/02.png']
