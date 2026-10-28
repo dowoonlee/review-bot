@@ -15,6 +15,7 @@ from pathlib import Path
 MIGRATION = 'migration-roundtrip'
 CONFIG = 'config-contract'
 VISUAL = 'visual'
+RUST = 'cargo-test'
 
 MIGRATION_PATH = re.compile(r'(^|/)(alembic|migrations)/versions/[^/]+\.py$')
 _REVISION = re.compile(r'^revision(?:\s*:\s*[^=]+)?\s*=\s*(["\'])([0-9a-zA-Z_]+)\1', re.M)
@@ -26,6 +27,7 @@ CONFIG_PATH = re.compile(r'^(k8s|helm|charts|deploy)/|(^|/)(nginx[^/]*\.conf|doc
                          r'|^\.github/workflows/')
 TEST_FILE = re.compile(r'(^|/)(test_[^/]+\.py|[^/]+_test\.py|[^/]+\.(test|spec)\.(js|jsx|ts|tsx|mjs))$')
 MAX_TEST_BYTES = 400_000
+RUST_PATH = re.compile(r'(\.rs|(^|/)Cargo\.(toml|lock)|(^|/)rust-toolchain(\.toml)?)$')
 
 
 def visual_required_paths(files):
@@ -66,6 +68,27 @@ def migration_revisions(files, cwd):
                 entry['downRevisions'] = _IDENTIFIER.findall(down.group(1))
         found.append(entry)
     return found
+
+
+def rust_crates(files, cwd):
+    """Changed Rust sources and the crates (nearest Cargo.toml) that build them."""
+    root = Path(cwd).resolve()
+    changed, crates = [], set()
+    for item in files:
+        name = item.get('filename') or ''
+        if not RUST_PATH.search(name):
+            continue
+        parent = posixpath.dirname(name)
+        while True:
+            manifest = root / parent / 'Cargo.toml'
+            if not manifest.is_symlink() and manifest.is_file():
+                crates.add(parent or '.')
+                changed.append(name)
+                break
+            if not parent:
+                break
+            parent = posixpath.dirname(parent)
+    return changed, sorted(crates)
 
 
 def _tracked(cwd):
@@ -111,6 +134,14 @@ def required_checks(files, cwd):
             'needs': '일회용 Postgres에서 새 리비전 아래로 downgrade 한 뒤 upgrade head 까지 되돌리는 왕복. '
                      'services=["postgres"], requires=["postgres"], required=true, covers=["%s"]. '
                      '봇이 이 명령에만 ALLOW_DESTRUCTIVE_MIGRATION=1 을 넣습니다.' % MIGRATION})
+    rust, crates = rust_crates(files, cwd)
+    if crates:
+        checks.append({
+            'kind': RUST, 'paths': rust, 'crates': crates,
+            'needs': '바뀐 Rust 크레이트마다 그 디렉터리에서 cargo test 를 실행하는 required 테스트. '
+                     'setup 에서 CI 가 고정한 툴체인을 rustup 으로 설치하고 cargo fetch --locked 로 의존성을 받은 뒤, '
+                     '테스트는 `cd <크레이트> && cargo test --locked --offline ...` 로 실행하고 covers=["%s"] 를 적으세요. '
+                     '봇이 rustup 과 C 링커를 준비하므로 툴체인 부재는 limitations 사유가 아닙니다.' % RUST})
     visual = visual_required_paths(files)
     if visual:
         checks.append({'kind': VISUAL, 'paths': visual,
@@ -167,6 +198,11 @@ def plan_gaps(plan, checks):
             if missing:
                 gaps.append('%s: 이 테스트 파일이 명령에 없습니다: %s' % (label, ', '.join(missing[:12]) +
                                                               (' 외 %d개' % (len(missing) - 12) if len(missing) > 12 else '')))
+        if check['kind'] == RUST:
+            commands = [t.get('command') or '' for t in tests if 'cargo test' in (t.get('command') or '')]
+            missing = [c for c in check.get('crates', []) if not any(c == '.' or c in command for command in commands)]
+            if missing:
+                gaps.append('%s: 이 크레이트에서 cargo test 를 실행하는 명령이 없습니다: %s' % (label, ', '.join(missing)))
         if check['kind'] == MIGRATION:
             identifiers = set(check.get('revisions', [])) | set(check.get('downRevisions', []))
             for test in tests:

@@ -106,6 +106,35 @@ class ConfigContractTests(unittest.TestCase):
         self.assertIn('.github/workflows/ci.yml', obligations.command_paths('pytest .github/workflows/ci.yml'))
 
 
+class RustTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        (root / 'services/collab/src/core').mkdir(parents=True)
+        (root / 'services/collab/Cargo.toml').write_text('[package]\nname = "collab"\n')
+
+    def test_changed_rust_sources_require_cargo_test_in_their_crate(self):
+        files = [{'filename': 'services/collab/src/core/names.rs', 'status': 'modified'},
+                 {'filename': 'services/collab/tests/names_contract.rs', 'status': 'modified'},
+                 {'filename': 'scripts/stray.rs', 'status': 'added'},
+                 {'filename': 'services/app/model.py', 'status': 'modified'}]
+        checks = obligations.required_checks(files, self.temp.name)
+        self.assertEqual([(c['kind'], c['crates']) for c in checks], [('cargo-test', ['services/collab'])])
+        self.assertEqual(checks[0]['paths'], [f['filename'] for f in files[:2]])
+
+    def test_plan_must_run_cargo_test_in_each_changed_crate(self):
+        checks = obligations.required_checks([{'filename': 'services/collab/src/lib.rs'}], self.temp.name)
+        test = {'name': 'rust', 'required': True, 'covers': ['cargo-test'],
+                'command': 'cd services/collab && cargo test --locked --offline --test names_contract'}
+        self.assertEqual(obligations.plan_gaps({'tests': [test]}, checks), [])
+        self.assertTrue(obligations.plan_gaps({'tests': []}, checks))
+        elsewhere = dict(test, command='cd services/other && cargo test --locked')
+        self.assertIn('services/collab', obligations.plan_gaps({'tests': [elsewhere]}, checks)[0])
+        build_only = dict(test, command='cd services/collab && cargo build --locked')
+        self.assertTrue(obligations.plan_gaps({'tests': [build_only]}, checks))
+
+
 class PlanTests(unittest.TestCase):
     def setUp(self):
         self.checks = [{'kind': 'migration-roundtrip', 'paths': ['alembic/versions/a.py'],
