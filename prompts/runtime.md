@@ -117,8 +117,16 @@ CI (테스트 이름이 관련 검증을 포함하는지 확인):
   재시도에서도 기존 scenarios는 유지됩니다. 실패한 시나리오를 지우거나 assertion을 약화해
   통과시키지 말고, 오류 화면·콘솔·원본 코드를 대조해 fixture와 선택자를 고치세요.
 - start는 포그라운드 서버 명령입니다 (127.0.0.1, 전용 컨테이너이므로 포트 충돌 없음).
-- browser는 async 함수 본문 JavaScript입니다. page, browser, assert(node:assert/strict),
-  capture(name)가 이미 제공됩니다. page.goto는 서버 준비 재시도를 직접 하세요.
+- browser는 async 함수 본문 JavaScript입니다. page, context, browser, assert(node:assert/strict),
+  capture(name), until(check, message, timeoutMs=15000)가 이미 제공됩니다. page.goto는 서버 준비 재시도를 직접 하세요.
+  보조 페이지가 필요하면 context.newPage()를 쓰세요.
+  클릭·제출·입력 뒤 비동기로 바뀌는 상태(버튼 활성/비활성, 요청 수, 표시 값, 로딩 안내)는
+  isEnabled()/isVisible()/count()를 곧바로 단언하지 마세요. 그 순간은 아직 중간 상태일 수 있습니다.
+  최종 상태는 `await until(() => page.getByRole('button', {{name: /HTML/}}).isEnabled(), '갱신이 끝나면 HTML 다운로드가 켜짐')`
+  처럼 기다려서 확인하세요. 오류·안내 하나가 사라졌다고 요청이 끝났다고 보지 마세요. 갱신을 시작하는 순간
+  이전 오류가 지워질 수 있습니다. 중간 상태(갱신 중 비활성 등)를 확인하려면 모의 응답을 지연시켜 그 상태가
+  유지되는 동안 단언하세요. 이 규칙은 시나리오의 모든 단계에 똑같이 적용하세요. 앞 단계에서 기다렸다고
+  뒤 단계를 빼먹지 마세요.
   Playwright API를 사용하세요. Testing Library의 getByDisplayValue/findByDisplayValue는
   Playwright에 없습니다. 입력값은 getByLabel(...).inputValue()나 input/textarea locator로 확인합니다.
   문자열 이름 선택자는 getByRole(..., {{name: '이름', exact: true}})처럼 정확하게 지정하고

@@ -562,9 +562,26 @@ const soften = fn => (...args) => {
 };
 const assert = SOFT ? Object.assign(soften(strict), Object.fromEntries(Object.keys(strict)
   .filter(k => typeof strict[k] === 'function').map(k => [k, soften(strict[k].bind(strict))]))) : strict;
+// State that changes after a click settles later; asserting it at once reads the
+// in-between screen (#8793: a cleared alert was taken for a finished refresh).
+const until = async (check, message, timeout = 15000) => {
+  const deadline = Date.now() + timeout;
+  let last;
+  for (;;) {
+    try { if (await check()) return; } catch (e) { last = e; }
+    if (Date.now() > deadline) {
+      const error = new strict.AssertionError({message: 'until: ' + message + (last ? ' — ' + last.message : '')});
+      if (SOFT) { console.error('soft-assert-failed:', error.message); return; }
+      throw error;
+    }
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+};
 (async () => {
  const browser = await chromium.launch({headless:true, args:['--no-sandbox']});
- const page = await browser.newPage({viewport:{width:1440,height:1000}, locale:''' + json.dumps(locale) + '''});
+ // An explicit context: a page from browser.newPage() refuses context().newPage().
+ const context = await browser.newContext({viewport:{width:1440,height:1000}, locale:''' + json.dumps(locale) + '''});
+ const page = await context.newPage();
  page.setDefaultTimeout(15000);
  page.on('pageerror', error => console.error('pageerror:', error.message));
  page.on('console', message => { if (message.type() === 'error') console.error('browser-console:', message.text()); });

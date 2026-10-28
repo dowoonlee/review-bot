@@ -264,6 +264,16 @@ class BrowserBaselineTests(unittest.TestCase):
             runtime._browser_baseline(META, plan, evidence, '/tmp', {}, None, lambda *_: None)
         return evidence
 
+    def test_scripts_get_a_context_and_a_settling_wait(self):
+        script = runtime._browser_script('await until(() => true, "ready")')
+        # #8793: context().newPage() failed on a page made by browser.newPage().
+        self.assertIn('const context = await browser.newContext(', script)
+        self.assertIn('const page = await context.newPage();', script)
+        # A timed-out wait is an assertion failure, so it is triaged and softened on base like one.
+        self.assertIn('new strict.AssertionError', script)
+        self.assertLess(script.index('const until'), script.index('await until(() => true'))
+        self.assertIn('until(check, message', runtime.Path(reviewer.ROOT, 'prompts/runtime.md').read_text())
+
     def test_base_run_keeps_going_past_assertions_about_what_the_pr_added(self):
         self.assertIn('const SOFT = true', runtime._browser_script('x', soft=True))
         self.assertIn('const SOFT = false', runtime._browser_script('x'))
