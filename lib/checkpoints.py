@@ -36,7 +36,8 @@ def identity(meta, cfg, account):
     runtime_cfg.pop('minFreeDiskGiB', None)  # Admission capacity does not change completed evidence.
     runtime_key = digest({'config': runtime_cfg,
                           'scope': {k: review_cfg.get(k) for k in ('includeExts', 'excludeGlobs')}},
-                         ('lib/runtime.py', 'lib/validation.py', 'lib/reviewer.py', 'review-bot', 'prompts/runtime.md'))
+                         ('lib/runtime.py', 'lib/validation.py', 'lib/obligations.py', 'lib/reviewer.py', 'review-bot',
+                          'prompts/runtime.md'))
     post_cfg = {k: v for k, v in cfg.get('post', {}).items()
                 if k not in ('dryRun', 'polish', 'note', 'summaryComment')}
     decision_key = digest({'review': review_key, 'runtime': runtime_key, 'post': post_cfg},
