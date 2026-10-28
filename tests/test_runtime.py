@@ -303,6 +303,53 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(result['plan']['scenarios'], ['select user', 'first Escape keeps modal'])
         runtime._LIVE_CONTAINERS.clear()
 
+    def test_rejected_plan_goes_back_to_the_planner_before_any_container_run(self):
+        spawn = {'id': 'graph', 'name': 'graph', 'command': 'cd /work && uv run --locked pytest tests/graph.py'}
+        previous = {'plan': dict(PLAN, tests=[spawn]),
+                    'tests': [dict(spawn, status='failed', failureKind='plan',
+                                   output='error: Failed to spawn: `pytest`')]}
+        fixed = dict(spawn, command='cd /work && uv run --locked --extra dev pytest tests/graph.py',
+                     repairReason='pytest lives in the dev extra')
+        broken = dict(copy.deepcopy(PLAN), tests=[spawn], services=['postgres'])
+        cases = (('repeated command', [dict(PLAN, tests=[spawn]), dict(PLAN, tests=[fixed])], '그대로 다시'),
+                 ('invalid plan', [broken, dict(PLAN, tests=[fixed])], 'databaseSetup'))
+        for label, plans, reason in cases:
+            with self.subTest(label), \
+                    mock.patch.object(runtime, '_plan', side_effect=copy.deepcopy(plans)) as planner, \
+                    mock.patch.object(runtime.Container, 'command', side_effect=OSError('offline')):
+                result = runtime._collect_once(META, [], self.temp.name, {}, previous=previous)
+            self.assertEqual(planner.call_count, 2)
+            self.assertNotIn('_plan_feedback', planner.call_args_list[0].args[0])
+            self.assertIn(reason, planner.call_args_list[1].args[0]['_plan_feedback'])
+            self.assertEqual(result['plan']['tests'][0]['command'], fixed['command'])
+            runtime._LIVE_CONTAINERS.clear()
+
+    def test_a_second_repeat_still_runs_rather_than_losing_the_attempt(self):
+        spawn = {'id': 'graph', 'name': 'graph', 'command': 'uv run pytest'}
+        previous = {'plan': dict(PLAN, tests=[spawn]),
+                    'tests': [dict(spawn, status='failed', failureKind='plan')]}
+        with mock.patch.object(runtime, '_plan', side_effect=lambda *a, **k: dict(copy.deepcopy(PLAN), tests=[dict(spawn)])) as planner, \
+                mock.patch.object(runtime.Container, 'command', side_effect=OSError('offline')):
+            result = runtime._collect_once(META, [], self.temp.name, {}, previous=previous)
+        self.assertEqual(planner.call_count, 2)
+        self.assertEqual(result['plan']['tests'][0]['command'], 'uv run pytest')
+        runtime._LIVE_CONTAINERS.clear()
+
+    def test_uv_spawn_failure_names_the_extra_that_provides_the_tool(self):
+        root = Path(self.temp.name)
+        (root / 'pyproject.toml').write_text('[project]\nname = "mono"\n'
+                                             '[project.optional-dependencies]\ndev = ["pytest>=8.0.0", "ruff"]\n'
+                                             '[dependency-groups]\nlint = ["mypy==1.0"]\n')
+        (root / 'services' / 'api').mkdir(parents=True)
+        failed = {'status': 'failed', 'output': 'error: Failed to spawn: `pytest`\n'}
+        for command in ('cd /work && uv run --locked pytest tests', 'cd /work/services/api && uv run pytest'):
+            hint = runtime.uv_tool_hint(dict(failed, command=command), self.temp.name)
+            self.assertIn('--extra dev', hint)
+        hint = runtime.uv_tool_hint(dict(failed, command='uv run mypy', output='Failed to spawn: `mypy`'), self.temp.name)
+        self.assertIn('--group lint', hint)
+        self.assertIsNone(runtime.uv_tool_hint(dict(failed, command='uv run x', output='Failed to spawn: `black`'), self.temp.name))
+        self.assertIsNone(runtime.uv_tool_hint(dict(failed, command='cd /work && npm test', output='1 failed'), self.temp.name))
+
     def test_script_mistake_is_repaired_in_place_before_spending_a_recovery_attempt(self):
         def command(args, *a, **kw):
             if args[0] == 'git':

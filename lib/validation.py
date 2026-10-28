@@ -85,7 +85,7 @@ def failure_kind(result, browser=False):
     # assertion/traceback mentions TimeoutError or ConnectionError.
     if any(c.get('status') == 'failed' for c in result.get('cases', [])):
         return 'test'
-    if re.search(r'No test files found|No tests found|no tests ran|command not found', output, re.I):
+    if re.search(r'No test files found|No tests found|no tests ran|command not found|Failed to spawn', output, re.I):
         return 'plan'
     if re.search(r'heap out of memory|ENOTFOUND|EAI_AGAIN', output, re.I):
         return 'infrastructure'
@@ -127,6 +127,16 @@ def command_core(command):
         if segment and not re.fullmatch(assignment, segment):
             segments.append(re.sub(r'\s+', ' ', segment))
     return ' && '.join(segments)
+
+
+def repeated_plan_failures(plan, previous=None):
+    """Planned commands that already failed as the bot's own command mistake, unchanged."""
+    failed = {check_id(t): t for t in (previous or {}).get('tests', [])
+              if t.get('status') == 'failed' and failure_kind(t) == 'plan'}
+    return [test for test in plan.get('tests', [])
+            if test.get('id') in failed and
+            command_core(test.get('command', '')) == command_core(failed[test['id']].get('command', '')) and
+            test.get('report') == failed[test['id']].get('report')]
 
 
 def preserve(plan, previous=None):

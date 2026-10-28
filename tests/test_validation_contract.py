@@ -53,6 +53,9 @@ class ValidationContractTests(unittest.TestCase):
         # Playwright's wording for a --grep that selects nothing.
         self.assertEqual(validation.failure_kind({'status': 'failed', 'output': 'Error: No tests found.\nMake sure'}), 'plan')
 
+    def test_a_runner_that_cannot_be_spawned_is_a_plan_error(self):
+        self.assertEqual(validation.failure_kind({'status': 'failed', 'output': 'error: Failed to spawn: `pytest`'}), 'plan')
+
     def test_timeout_words_in_an_assertion_are_not_infrastructure_failure(self):
         self.assertEqual(validation.failure_kind({'status': 'failed', 'output': 'ConnectionError / TimeoutError',
                                                   'cases': [{'status': 'failed'}]}), 'test')

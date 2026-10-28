@@ -108,6 +108,9 @@ def evidence_block(meta, for_judge=False):
             '무관한 기존 실패는 승인을 막지 않지만 필수 테스트의 baseline/skip은 미검증입니다. '
             'failed 에 baseline.exitCode 가 0 이면 '
             'base 에서는 통과했던 것, 즉 이 PR 이 깨뜨린 것입니다.\n'
+            'failureKind 가 plan 이면 봇이 만든 명령·설정이 틀려 테스트가 시작되지 못한 것입니다(diagnosis 가 있으면 그 원인). '
+            '"환경에 X 가 없다"로 쓰거나 PR 작성자에게 환경 준비를 요구하지 말고, 봇의 실행 명령 오류로 '
+            '그 테스트가 아직 실행되지 않았다고 쓰세요. 같은 명령이 base 에서 실패한 것도 PR 과 무관한 같은 명령 오류입니다.\n'
             + image_instruction +
             json.dumps(evidence, ensure_ascii=False))
 
@@ -501,6 +504,8 @@ def _plan(meta, files, cwd, cfg, requirements=None):
                    '\n원인을 읽고 setup/계획을 복구하세요. 필수 검증 범위를 줄이지 마세요. '
                    '"봇 관리 단계" 로 표시된 시간 초과·실패는 봇이 다시 시도하는 설치 문제이므로 '
                    '테스트 명령·범위·worker 수를 바꿔 대응하지 마세요.')
+    if meta.get('_plan_feedback'):
+        prompt += '\n방금 낸 계획은 실행 전에 거부됐습니다. 이 문제를 고친 계획을 다시 내세요:\n' + meta['_plan_feedback'] + '\n'
     plan = reviewer._run(prompt, cwd, cfg.get('model', 'sonnet'),
                          cfg.get('maxTurns', 40), cfg.get('planTimeoutSec', 600),
                          'runtime-plan', key='tests')
@@ -1028,6 +1033,74 @@ def _repair_browser(container, meta, plan, evidence, directory, cwd, cfg, status
     record['status'] = evidence['browser']['status']
 
 
+def _checked_plan(meta, files, cwd, cfg, requirements, previous, status):
+    """Send a rejected plan back to the planner once, before it costs a recovery attempt.
+
+    A malformed plan, or one that resubmits a command which already failed as the bot's
+    own mistake, would otherwise spend a whole container run to learn nothing new.
+    """
+    feedback, cost = None, 0
+    for attempt in range(2):
+        try:
+            plan = _plan(dict(meta, _plan_feedback=feedback) if feedback else meta,
+                         files, cwd, cfg, requirements=requirements)
+            cost += plan.get('_meta', {}).get('cost_usd') or 0
+            plan, required = validation.preserve(plan, previous)
+            validate_services(plan)
+        except (ExecutionError, validation.ContractError) as exc:
+            if attempt:
+                raise
+            feedback = str(exc)
+        else:
+            repeated = validation.repeated_plan_failures(plan, previous)
+            if not repeated or attempt:
+                return plan, required, cost
+            feedback = ('계획 오류로 실패한 명령을 그대로 다시 냈습니다. 이전 실패 출력의 원인을 고친 명령을 '
+                        '같은 id 와 repairReason 으로 내세요: ' + ', '.join(t['name'] for t in repeated))
+        status('실행 검증 계획 보완 — 실행 전 거부: ' + feedback[:120])
+
+
+def uv_tool_hint(test, cwd):
+    """Name the extra/group that provides a tool `uv run` could not spawn.
+
+    uv only installs optional dependencies that are asked for, so a test runner kept in
+    a `dev` extra is missing from `uv run` even though the lockfile has it.
+    """
+    match = re.search(r'Failed to spawn: `([^`]+)`', test.get('output') or '')
+    if not match or not cwd:
+        return None
+    tool = match.group(1)
+    place = re.match(r'\s*cd\s+/work/?(\S*)', test.get('command') or '')
+    root = Path(cwd).resolve()
+    directory = (root / (place.group(1) if place else '')).resolve()
+    try:
+        import tomllib
+    except ImportError:
+        return None
+    while directory == root or root in directory.parents:
+        manifest = directory / 'pyproject.toml'
+        if manifest.is_file():
+            try:
+                data = tomllib.loads(manifest.read_text())
+            except (OSError, ValueError):
+                return None
+            name = lambda requirement: re.split(r'[\s<>=!~;\[(]', str(requirement).strip(), 1)[0].lower()
+            where = str(manifest.relative_to(root))
+            for extra, items in ((data.get('project') or {}).get('optional-dependencies') or {}).items():
+                if any(name(i) == tool.lower() for i in items):
+                    return ('`%s` 는 %s 의 optional-dependencies `%s` 에만 있습니다. '
+                            '`uv run --locked --extra %s ...` 처럼 extra 를 켜야 실행됩니다.' % (tool, where, extra, extra))
+            for group, items in (data.get('dependency-groups') or {}).items():
+                if any(name(i) == tool.lower() for i in items if isinstance(i, str)):
+                    return ('`%s` 는 %s 의 dependency-groups `%s` 에만 있습니다. '
+                            '`uv run --locked --group %s ...` 처럼 group 을 켜야 실행됩니다.' % (tool, where, group, group))
+            return None
+        if directory == root:
+            return None
+        directory = directory.parent
+    return None
+
+
 def _collect_once(meta, files, cwd, cfg, progress=None, env=None, previous=None):
     if not cfg.get('enabled', True):
         return {'status': 'disabled'}
@@ -1048,13 +1121,11 @@ def _collect_once(meta, files, cwd, cfg, progress=None, env=None, previous=None)
             progress(message)
     try:
         status('실행 검증 계획')
-        plan = _plan(meta, files, cwd, cfg, requirements=evidence['requirements'])
-        plan, evidence['requirements'] = validation.preserve(plan, previous)
-        validate_services(plan)
+        plan, evidence['requirements'], evidence['cost_usd'] = _checked_plan(
+            meta, files, cwd, cfg, evidence['requirements'], previous, status)
         evidence['plan'] = plan
         evidence.update({k: plan[k] for k in ('testsApplicable', 'visualApplicable', 'limitations', 'scenarios')})
         evidence['notes'] = plan.get('notes') or []
-        evidence['cost_usd'] = plan.get('_meta', {}).get('cost_usd') or 0
         (directory / 'plan.json').write_text(json.dumps(plan, ensure_ascii=False, indent=2))
         if evidence['visualRequiredBy'] and not plan['visualApplicable']:
             raise ExecutionError('UI 변경의 화면 검증을 생략한 계획입니다. 실제 컴포넌트/모의 API로 브라우저 계획을 보완하세요: '
@@ -1142,8 +1213,12 @@ def collect(meta, files, cwd, cfg, progress=None, env=None, previous=None):
         evidence = _collect_once(current_meta, files, cwd, cfg, progress, env, previous)
         cost += evidence.get('cost_usd', 0)
         attempts.append({'directory': evidence.get('directory'), 'status': evidence['status']})
+        for test in evidence.get('tests', []):
+            hint = test['status'] == 'failed' and uv_tool_hint(test, cwd)
+            if hint:
+                test['diagnosis'] = hint
         diagnostic = '\n'.join(evidence.get('limitations', [])) + '\n' + '\n'.join(
-            t.get('output', '') + '\n' + t.get('reportError', '')
+            t.get('output', '') + '\n' + t.get('reportError', '') + '\n' + t.get('diagnosis', '')
             for t in evidence.get('tests', []) if t['status'] != 'passed')
         diagnostic += '\n' + (evidence.get('browser') or {}).get('output', '')
         triage = (evidence.get('browser') or {}).get('triage') or {}
