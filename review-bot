@@ -411,6 +411,10 @@ def _guard_event(event, findings, payload, pcfg, ci=None):
         return "COMMENT", "알 수 없는 판정 '%s' 이라 COMMENT 로 게시합니다." % event
     if event not in allowed:
         return "COMMENT", "설정상 %s 는 허용되지 않아 COMMENT 로 게시합니다." % event
+    blocking = [f for f in findings if policy.blocks_merge(f)]
+    if blocking and event != "REQUEST_CHANGES" and "REQUEST_CHANGES" in allowed:
+        return "REQUEST_CHANGES", ("머지 전 수정하거나 의도를 확인받아야 할 P1/P2 지적 %d건이 있어 변경을 요청합니다."
+                                   % len(blocking))
     blocked = policy.finding_block(event, findings)
     if blocked:
         return "COMMENT", blocked

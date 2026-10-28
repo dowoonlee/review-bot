@@ -84,10 +84,10 @@ class GuardTests(unittest.TestCase):
         self.guard = _bot()["_guard_event"]
         self.pcfg = {"allowedEvents": ["COMMENT", "APPROVE", "REQUEST_CHANGES"]}
 
-    def test_approve_with_remaining_p2_is_downgraded(self):
+    def test_approve_with_remaining_p2_requests_changes(self):
         event, why = self.guard("APPROVE", [finding(severity="suggestion")], {}, self.pcfg)
-        self.assertEqual(event, "COMMENT")
-        self.assertIn("확인", why)
+        self.assertEqual(event, "REQUEST_CHANGES")
+        self.assertIn("P1/P2", why)
 
     def test_approve_with_only_nits_passes(self):
         event, why = self.guard("APPROVE", [finding(severity="nit"),
@@ -97,7 +97,7 @@ class GuardTests(unittest.TestCase):
     def test_legacy_threshold_cannot_approve_an_unclassified_finding(self):
         pcfg = dict(self.pcfg, approveMaxSeverity="suggestion")
         event, _ = self.guard("APPROVE", [finding(severity="suggestion")], {}, pcfg)
-        self.assertEqual(event, "COMMENT")
+        self.assertEqual(event, "REQUEST_CHANGES")
 
     def test_ci_failure_blocks_approve(self):
         event, why = self.guard("APPROVE", [], {}, self.pcfg, ci="failure")

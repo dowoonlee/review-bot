@@ -34,11 +34,20 @@ def revive_verified_nits(findings, placements, drop_reasons):
     return revived
 
 
+def blocks_merge(finding):
+    """A P1/P2 the author must fix or answer before merging, confirmed or not.
+
+    An unresolved P2 posted as a comment leaves the merge open; the author has to
+    either fix it or show it is intended, and a change request is what asks for that.
+    """
+    return finding.get('severity') in ('blocking', 'suggestion') and disposition(finding) in ('required', 'uncertain')
+
+
 def finding_block(event, findings):
     actions = [disposition(f) for f in findings]
     if event == 'APPROVE' and any(a != 'optional' for a in actions):
         return '머지 전 수정 또는 확인이 필요한 지적이 남아 있어 승인하지 않습니다.'
-    if event == 'REQUEST_CHANGES' and 'required' not in actions:
+    if event == 'REQUEST_CHANGES' and 'required' not in actions and not any(blocks_merge(f) for f in findings):
         return '재현 조건과 영향이 확인된 수정 필요 지적이 없어 사람 확인으로 남깁니다.'
     return ''
 

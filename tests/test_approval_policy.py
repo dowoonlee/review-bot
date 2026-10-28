@@ -46,11 +46,19 @@ class DecisionTests(unittest.TestCase):
         self.assertLess(body.index('aws::render'), body.index('승인을 막을 공백'))
         self.assertNotIn('> **판정** — 승인을', body)
 
-    def test_confirmed_p2_can_request_changes_but_uncertain_cannot(self):
-        for action, expected in [('required', 'REQUEST_CHANGES'), ('optional', 'COMMENT'), ('uncertain', 'COMMENT')]:
+    def test_an_unresolved_p2_requests_changes_whether_confirmed_or_awaiting_intent(self):
+        for action, expected in [('required', 'REQUEST_CHANGES'), ('optional', 'COMMENT'), ('uncertain', 'REQUEST_CHANGES')]:
             self.assertEqual(self.bot['_guard_event']('REQUEST_CHANGES', [self.finding(action)], {}, self.cfg)[0], expected)
-        for action in ('required', 'uncertain'):
-            self.assertEqual(self.bot['_guard_event']('APPROVE', [self.finding(action)], {}, self.cfg)[0], 'COMMENT')
+        # A judge that approves or comments over an open P2 does not leave the merge open.
+        for event in ('APPROVE', 'COMMENT'):
+            for action in ('required', 'uncertain'):
+                self.assertEqual(self.bot['_guard_event'](event, [self.finding(action)], {}, self.cfg)[0], 'REQUEST_CHANGES')
+        p3 = dict(self.finding('uncertain'), severity='nit')
+        self.assertEqual(self.bot['_guard_event']('COMMENT', [p3], {}, self.cfg)[0], 'COMMENT')
+        self.assertEqual(self.bot['_guard_event']('APPROVE', [p3], {}, self.cfg)[0], 'COMMENT')
+        # Without permission to request changes, an open P2 still cannot be approved.
+        only_comment = {'allowedEvents': ['APPROVE', 'COMMENT']}
+        self.assertEqual(self.bot['_guard_event']('APPROVE', [self.finding('uncertain')], {}, only_comment)[0], 'COMMENT')
 
     def test_failed_role_requires_specific_successful_coverage(self):
         payload = {'errors': ['security: timeout'], 'coverage': {'complete': False},
@@ -406,7 +414,7 @@ class RejudgeTests(unittest.TestCase):
         self.judge.return_value = {'event': 'APPROVE', 'reason': 'green', 'placements': {},
                                   'dispositions': {0: {'disposition': 'required', 'dispositionReason': 'confirmed data loss'}}}
         result = self.process()
-        self.assertEqual(result['event'], 'COMMENT')
+        self.assertEqual(result['event'], 'REQUEST_CHANGES')
         self.assertIn('수정', self.post.call_args.args[3])
 
     def test_fresh_review_waits_then_reuses_all_code_and_test_evidence(self):
