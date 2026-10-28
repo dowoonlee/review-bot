@@ -53,6 +53,20 @@ PYTHON_BOOTSTRAP = (
     'uv venv --seed /opt/review-python\n'
     'python --version && python -m pip --version && uv --version'
 )
+# Only a plan that runs cargo gets Rust: the image has neither a toolchain nor the C
+# linker that build scripts (ring, libsqlite3-sys) need. The plan installs the toolchain
+# CI pins, as it does pnpm. Root without capabilities cannot write apt's _apt-owned
+# cache or drop to _apt, so archives go to /tmp and apt stays root.
+RUST_BOOTSTRAP = (
+    'mkdir -p /tmp/apt-archives/partial\n'
+    'apt-get -qq -o APT::Sandbox::User=root update\n'
+    'DEBIAN_FRONTEND=noninteractive apt-get -qq -o APT::Sandbox::User=root '
+    '-o Dir::Cache::Archives=/tmp/apt-archives install -y --no-install-recommends gcc libc6-dev >/dev/null\n'
+    'curl -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh\n'
+    'RUSTUP_VERSION=1.28.2 sh /tmp/rustup-init.sh -y --no-modify-path --profile minimal --default-toolchain none\n'
+    'rustup --version && cc --version | head -1'
+)
+RUST_USE = re.compile(r'\b(cargo|rustup)\b')
 # Every project that pins its own Playwright gets that version's Chromium while the
 # network is still open. Browser GC is off, so the image's browsers for the bot's own
 # driver stay beside them; both disappear with the container. When the image already
@@ -798,6 +812,12 @@ def _toolchain(container, sha, cwd, cfg):
             'source': 'config', 'repositoryPlaywright': version}
 
 
+def _uses_rust(plan):
+    commands = [plan.get('setup') or '', plan.get('databaseSetup') or '', plan.get('start') or '']
+    commands += [t.get('command') or '' for t in plan.get('tests') or []]
+    return any(RUST_USE.search(c) for c in commands)
+
+
 def _provision(container, sha, cwd, cfg, plan, browser):
     """소스를 넣고 의존성을 깐 뒤 네트워크를 끊는다.
 
@@ -807,7 +827,7 @@ def _provision(container, sha, cwd, cfg, plan, browser):
     evidence = {'image': _toolchain(container, sha, cwd, cfg)}
     trust_env = []
     if cfg.get('caBundle'):
-        for name in ('SSL_CERT_FILE', 'CURL_CA_BUNDLE', 'PIP_CERT', 'NODE_EXTRA_CA_CERTS'):
+        for name in ('SSL_CERT_FILE', 'CURL_CA_BUNDLE', 'PIP_CERT', 'NODE_EXTRA_CA_CERTS', 'CARGO_HTTP_CAINFO'):
             trust_env += ['--env', name + '=/tmp/review-ca.pem']
     container.command(['docker', 'create', '--name', container.name,
                        '--label', 'review-bot.runtime=true', '--label', 'review-bot.sha=' + sha,
@@ -819,7 +839,8 @@ def _provision(container, sha, cwd, cfg, plan, browser):
                        # image's browsers that the bot's own driver needs. They live and
                        # die with this container, so nothing is left on the host.
                        '--env', 'PLAYWRIGHT_SKIP_BROWSER_GC=1',
-                       '--env', 'PATH=/opt/review-python/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+                       '--env', 'CARGO_HOME=/opt/review-cargo', '--env', 'RUSTUP_HOME=/opt/review-rustup',
+                       '--env', 'PATH=/opt/review-python/bin:/opt/review-cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
                        '-w', '/work'] + container.ownership_labels() + trust_env + [evidence['image']['image'], 'sleep', 'infinity'],
                       cfg.get('setupTimeoutSec', 900), stage='컨테이너 생성' + BOT_STAGE)
     container.command(['docker', 'start', container.name])
@@ -834,6 +855,8 @@ def _provision(container, sha, cwd, cfg, plan, browser):
     container.shell('mkdir -p /work /evidence /opt/review-browser; tar -xf /tmp/source.tar -C /work; rm /tmp/source.tar', 120)
     setup_timeout = cfg.get('setupTimeoutSec', 900)
     evidence['toolchain'] = container.shell(PYTHON_BOOTSTRAP, setup_timeout, stage='Python 도구 설치' + BOT_STAGE)
+    if _uses_rust(plan):
+        evidence['rust'] = container.shell(RUST_BOOTSTRAP, setup_timeout, stage='Rust 도구 설치' + BOT_STAGE)
     if browser:
         # The driver matches the image so it finds the browsers the image ships.
         container.shell('cd /opt/review-browser && npm install --no-audit --no-fund playwright@' +

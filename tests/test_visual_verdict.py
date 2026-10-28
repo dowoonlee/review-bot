@@ -36,6 +36,38 @@ class BrowserInfrastructureTests(unittest.TestCase):
         disconnect = next(i for i, a in enumerate(seen) if a[:3] == ['docker', 'network', 'disconnect'])
         self.assertLess(install, disconnect)
 
+    def test_rust_is_installed_only_for_a_plan_that_runs_cargo_while_the_network_is_open(self):
+        def provision(plan):
+            with tempfile.TemporaryDirectory() as tmp:
+                container = runtime.Container(tmp, {'caBundle': __file__})
+                seen = []
+
+                def command(args, *a, **kw):
+                    seen.append(args)
+                    if args[0] == 'git':
+                        Path(next(arg[9:] for arg in args if arg.startswith('--output='))).touch()
+                    return {'status': 'passed', 'exitCode': 0, 'output': ''}
+                with mock.patch.object(container, 'command', side_effect=command):
+                    evidence = runtime._provision(container, 'head', tmp, {'caBundle': __file__},
+                                                  dict({'services': []}, **plan), False)
+            return evidence, seen
+        evidence, seen = provision({'setup': 'cd crate && rustup default 1.88.0 && cargo fetch --locked',
+                                    'tests': [{'command': 'cd crate && cargo test --locked --offline'}]})
+        scripts = [a[-1] for a in seen]
+        rust = scripts.index(runtime.RUST_BOOTSTRAP)
+        self.assertLess(rust, scripts.index('cd crate && rustup default 1.88.0 && cargo fetch --locked'))
+        disconnect = next(i for i, a in enumerate(seen) if a[:3] == ['docker', 'network', 'disconnect'])
+        self.assertLess(rust, disconnect)
+        self.assertIn('rust', evidence)
+        create = next(a for a in seen if a[:2] == ['docker', 'create'])
+        self.assertIn('CARGO_HOME=/opt/review-cargo', create)
+        self.assertIn('CARGO_HTTP_CAINFO=/tmp/review-ca.pem', create)
+        self.assertTrue(any('/opt/review-cargo/bin' in arg for arg in create if arg.startswith('PATH=')))
+
+        evidence, seen = provision({'setup': 'pnpm install', 'tests': [{'command': 'pnpm exec vitest run'}]})
+        self.assertNotIn(runtime.RUST_BOOTSTRAP, [a[-1] for a in seen])
+        self.assertNotIn('rust', evidence)
+
     def test_a_browser_that_cannot_start_is_recovered_not_blamed_on_the_product(self):
         self.assertEqual(validation.failure_kind({'status': 'failed', 'output': LAUNCH}, browser=True),
                          'infrastructure')

@@ -27,6 +27,12 @@ Python/pip는 /opt/review-python의 독립 환경이고 uv도 PATH에 있습니�
 uv 프로젝트는 setup에서 uv sync --locked로 프로젝트 전용 .venv를 준비하세요.
 pytest 같은 테스트 도구가 pyproject 의 optional-dependencies·dependency-groups 에만 있으면
 `uv run` 이 설치하지 않습니다. CI workflow 가 같은 경로를 실행하는 명령(`--extra dev`, `--group` 등)을 읽고 그대로 따르세요.
+Rust 크레이트가 바뀌면 cargo test 로 검증하세요. 계획의 명령에 cargo/rustup 이 있으면 봇이
+setup 전에 rustup(툴체인 없음)과 C 링커(gcc)를 준비하고 CARGO_HOME·PATH 를 잡아 둡니다.
+툴체인은 pnpm 처럼 CI workflow·rust-toolchain 파일이 고정한 버전을 setup에서 설치하세요
+(예: `rustup toolchain install 1.88.0 --profile minimal && rustup default 1.88.0`).
+이후 네트워크가 끊기므로 setup에서 `cargo fetch --locked` 로 git 의존성까지 받아 두고,
+테스트는 `cargo test --locked --offline` 으로 실행하세요. Rust 툴체인 부재는 limitations 사유가 아닙니다.
 필요한 pnpm은 setup에서 설치하세요. 저장소가 고정한 Playwright 버전의 Chromium은 setup이
 끝난 뒤 봇이 node_modules/.bin/playwright 로 직접 설치하므로 setup에 넣지 말고,
 executablePath·별도 config 로 브라우저를 바꿔 끼우지 마세요.
