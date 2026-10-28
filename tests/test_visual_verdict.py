@@ -242,12 +242,6 @@ class TriageTests(unittest.TestCase):
             runtime.collect(META, [], '/tmp', {})
         self.assertEqual(collect.call_count, 1)
 
-    def test_only_the_last_attempt_may_repair_the_script_in_place(self):
-        failed = {'status': 'incomplete', 'tests': [], 'limitations': ['x']}
-        with mock.patch.object(runtime, '_collect_once', return_value=failed) as collect:
-            runtime.collect(META, [], '/tmp', {})
-        self.assertEqual([c.kwargs['final'] for c in collect.call_args_list], [False, False, True])
-
     def repair(self, answers, rerun=({'status': 'passed'}, ['/tmp/03.png'])):
         plan = {'scenarios': ['refresh re-enables HTML'], 'browser': 'old', 'start': 'vite'}
         evidence = {'cost_usd': 0, 'screenshots': ['/tmp/01.png', '/tmp/02.png'],

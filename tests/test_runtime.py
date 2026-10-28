@@ -303,6 +303,29 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(result['plan']['scenarios'], ['select user', 'first Escape keeps modal'])
         runtime._LIVE_CONTAINERS.clear()
 
+    def test_script_mistake_is_repaired_in_place_before_spending_a_recovery_attempt(self):
+        def command(args, *a, **kw):
+            if args[0] == 'git':
+                Path(next(arg[9:] for arg in args if arg.startswith('--output='))).touch()
+            return {'status': 'passed', 'exitCode': 0, 'output': ''}
+        def screen(container, meta, plan, evidence, *a, **kw):
+            evidence['browser'] = {'status': 'failed', 'failureKind': 'plan',
+                                   'triage': {'cause': 'script', 'screenEvidence': 's', 'repair': 'wait'}}
+            evidence['screenshots'] = ['/tmp/01.png']
+        def repair(container, meta, plan, evidence, *a, **kw):
+            evidence['browser'] = {'status': 'passed'}
+            evidence['visual'] = {'status': 'passed', 'complete': True}
+        for enabled, attempts, repairs in ((True, 1, 1), (False, 3, 0)):
+            with self.subTest(enabled=enabled), \
+                    mock.patch.object(runtime, '_plan', return_value=copy.deepcopy(PLAN)) as planner, \
+                    mock.patch.object(runtime.Container, 'command', side_effect=command), \
+                    mock.patch.object(runtime.Container, 'shell', return_value={'status': 'passed', 'exitCode': 0}), \
+                    mock.patch.object(runtime, '_screen', side_effect=screen), \
+                    mock.patch.object(runtime, '_repair_browser', side_effect=repair) as repaired:
+                result = runtime.collect(META, [], self.temp.name, {'browserRepair': enabled})
+            self.assertEqual((planner.call_count, repaired.call_count), (attempts, repairs))
+            self.assertEqual(result['browser']['status'], 'passed' if enabled else 'failed')
+
     def test_failed_test_is_not_hidden_by_successful_browser_and_cleanup_runs(self):
         commands = []
         def command(args, *a, **kw):

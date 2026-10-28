@@ -987,11 +987,12 @@ def _screen(container, meta, plan, evidence, directory, cwd, cfg, status, serve=
 
 
 def _repair_browser(container, meta, plan, evidence, directory, cwd, cfg, status):
-    """The last attempt's script was wrong and the classifier said how; no recovery is left.
+    """The script was wrong and the classifier said how; fix it before spending an attempt.
 
     Rewriting only the script and rerunning it in the same container, against the app
-    server already running, costs one browser run instead of a full attempt (#8793 spent
-    three attempts on three different script mistakes). Scenarios stay fixed.
+    server already running, costs one browser run instead of a full attempt with fresh
+    install and tests (#8793 spent three attempts on three different script mistakes).
+    Scenarios stay fixed; a repair that still fails falls back to the regular replan.
     """
     previous = evidence['browser']
     triage = previous['triage']
@@ -1027,7 +1028,7 @@ def _repair_browser(container, meta, plan, evidence, directory, cwd, cfg, status
     record['status'] = evidence['browser']['status']
 
 
-def _collect_once(meta, files, cwd, cfg, progress=None, env=None, previous=None, final=False):
+def _collect_once(meta, files, cwd, cfg, progress=None, env=None, previous=None):
     if not cfg.get('enabled', True):
         return {'status': 'disabled'}
     directory = Path(reviewer.STATE_DIR, 'evidence',
@@ -1110,7 +1111,7 @@ def _collect_once(meta, files, cwd, cfg, progress=None, env=None, previous=None,
             prepare()
             status('앱 실행·브라우저 상호작용·화면 캡처')
             _screen(container, meta, plan, evidence, directory, cwd, cfg, status)
-            if final and ((evidence.get('browser') or {}).get('triage') or {}).get('cause') == 'script' \
+            if ((evidence.get('browser') or {}).get('triage') or {}).get('cause') == 'script' \
                     and cfg.get('browserRepair', True):
                 _repair_browser(container, meta, plan, evidence, directory, cwd, cfg, status)
             if _needs_browser_baseline(evidence):
@@ -1138,7 +1139,7 @@ def collect(meta, files, cwd, cfg, progress=None, env=None, previous=None):
     for attempt in range(last + 1):
         if attempt and progress:
             progress('검증 복구 %d/2 — 실패 원인에 맞춰 계획 보완' % attempt)
-        evidence = _collect_once(current_meta, files, cwd, cfg, progress, env, previous, final=attempt == last)
+        evidence = _collect_once(current_meta, files, cwd, cfg, progress, env, previous)
         cost += evidence.get('cost_usd', 0)
         attempts.append({'directory': evidence.get('directory'), 'status': evidence['status']})
         diagnostic = '\n'.join(evidence.get('limitations', [])) + '\n' + '\n'.join(
