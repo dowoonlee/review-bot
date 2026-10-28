@@ -228,6 +228,32 @@ class TriageTests(unittest.TestCase):
                 result = self.triage(dict(script, **change))
                 self.assertEqual((result['cause'], result['repair']), ('defect', ''))
 
+    def test_a_crash_in_an_unchanged_file_the_script_left_unmocked_is_a_fixture_to_repair(self):
+        # #8890: an unmocked notice API crashed the shared shell before the screen rendered.
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, 'src').mkdir()
+            Path(tmp, 'src/Popup.tsx').touch()
+            Path(tmp, 'src/Page.tsx').touch()
+            evidence = dict(self.EVIDENCE, changedFiles=['src/Page.tsx'])
+            fixture = {'cause': 'fixture', 'summary': 'notice API 404', 'crashFile': 'src/Popup.tsx',
+                       'repair': 'mock /api/v1/notices as []', 'inspected': ['/tmp/02.png']}
+
+            def triage(answer, evidence=evidence):
+                with mock.patch.object(reviewer, '_run', return_value=answer):
+                    return runtime._triage(META, {}, evidence, tmp, {})
+            result = triage(fixture)
+            self.assertEqual((result['cause'], result['kind'], result['repair']),
+                             ('script', 'fixture', 'mock /api/v1/notices as []'))
+            self.assertIn('src/Popup.tsx', result['screenEvidence'])
+            for change in ({'crashFile': 'src/Page.tsx'}, {'crashFile': 'src/Missing.tsx'},
+                           {'crashFile': '../src/Popup.tsx'}, {'crashFile': ''}, {'repair': ''},
+                           {'inspected': ['/tmp/01.png']}, {'_meta': {'salvaged': True}}):
+                with self.subTest(change=change):
+                    result = triage(dict(fixture, **change))
+                    self.assertEqual((result['cause'], result['repair']), ('defect', ''))
+            # Without the changed-file list the bot cannot tell, so the product keeps the blame.
+            self.assertEqual(triage(fixture, self.EVIDENCE)['cause'], 'defect')
+
     def test_failed_assertion_is_replanned_only_when_cleared(self):
         failed = {'status': 'complete', 'tests': [], 'limitations': [], 'screenshots': ['01.png'],
                   'browser': {'status': 'failed', 'output': 'AssertionError', 'failureKind': 'plan',
