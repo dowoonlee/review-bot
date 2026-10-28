@@ -126,11 +126,31 @@ class TestEvidenceTests(unittest.TestCase):
         test['cases'][1]['status'] = 'failed'
         self.assertTrue(runtime.approval_block(dict(GOOD, tests=[test])))
 
-    def test_different_failure_on_base_never_exempts_head(self):
-        head = {'status': 'failed', 'cases': self.cases('regression')}
+    def test_same_test_failing_on_base_for_another_reason_is_preexisting_and_kept_for_the_review(self):
+        # #7594: the PR cleared base's commit error, so the same broken test reached a later assertion.
+        head = {'status': 'failed', 'required': False, 'cases': self.cases('regression')}
         runtime.compare_cases(head, {'status': 'failed', 'cases': self.cases('old bug')})
+        self.assertEqual(head['status'], 'baseline')
+        case = head['cases'][1]
+        self.assertEqual(case['status'], 'baseline')
+        self.assertTrue(case['baselineDiffers'])
+        self.assertEqual(case['baselineMessage'], 'old bug')
+        self.assertEqual(case['message'], 'regression')
+        self.assertEqual(runtime.approval_block(dict(GOOD, tests=[{'status': 'passed'}, head])), '')
+        # Both messages reach the draft; the bounded model prompt carries only the flag.
+        self.assertNotIn('baselineMessage', runtime._prompt_evidence(dict(GOOD, tests=[head]))['tests'][0]['cases'][1])
+        # A required case is still unverified, whatever base did.
+        head.update(required=True, requiredCases=['contract::budget'])
+        self.assertIn('핵심', runtime.approval_block(dict(GOOD, tests=[head])))
+
+    def test_failure_absent_or_passing_on_base_still_blocks(self):
+        head = {'status': 'failed', 'cases': self.cases('regression')}
+        base = [dict(c, status='passed') for c in self.cases('regression')]
+        runtime.compare_cases(head, {'cases': base})
         self.assertEqual(head['status'], 'failed')
-        self.assertEqual(head['cases'][1]['status'], 'failed')
+        head = {'status': 'failed', 'cases': self.cases('regression')}
+        runtime.compare_cases(head, {'cases': self.cases('regression')[:1]})
+        self.assertEqual(head['status'], 'failed')
 
     def test_failure_signature_ignores_only_incidental_traceback_source_and_addresses(self):
         def report(address, code, message='DNS failure'):

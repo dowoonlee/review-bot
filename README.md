@@ -633,7 +633,7 @@ review-bot forget --all                              # 전부
 | **claude 세션 기록** | `~/.claude/projects/…-state-wt-…` | **성공하면 즉시.** 실패한 것은 원인을 볼 단서라 `gc.sessionDays`(기본 3일) 뒤에 |
 | claude 자식 프로세스 | — | 시간 초과 때 **프로세스 그룹째**. 그냥 kill 하면 손자가 살아남습니다. |
 | 실행 증거 | `state/evidence/<repo>/<PR>/<head>/<실행>/` | **리뷰가 끝나면 즉시**, 체크포인트가 더는 가리키지 않는 같은 PR 의 이전 실행·이전 head 를 지웁니다. 체크포인트 저장 뒤에 생긴 실행(진행 중이거나 실패한 리뷰)은 원인을 볼 단서라 남깁니다. 나머지는 `gc.evidenceDays`(기본 14일) |
-| 일회용 컨테이너·DB·브라우저 | Docker 컨테이너 안 | 실행이 끝나면 컨테이너째(`rm -f -v`). 저장소 버전 Playwright 브라우저도 컨테이너 안에만 받으므로 호스트에 남지 않습니다. 이미지(Playwright·Postgres)는 다음 리뷰가 다시 받지 않도록 둡니다. |
+| 일회용 컨테이너·DB·브라우저 | Docker 컨테이너 안 | 실행이 끝나면 컨테이너째(`rm -f -v`). 이미지가 저장소 버전과 달라 따로 받은 Playwright 브라우저도 컨테이너 안에만 있으므로 호스트에 남지 않습니다. 이미지(저장소 버전 Playwright·Postgres)는 다음 리뷰가 다시 받지 않도록 둡니다. |
 | 에이전트 인계 셸 | 앱이 iTerm 탭에 띄운 `zsh -lic …_review_bot_prompt…` | 탭이 닫혀 터미널·부모를 잃고 아무것도 실행하지 않은 채 10분 넘게 남은 것을 틱마다 종료합니다. 터미널이 붙어 있거나 에이전트가 돌고 있으면 건드리지 않습니다. |
 | 리뷰 초안 | `state/drafts/` | `gc.draftDays` (기본 14일) |
 | 실행 이력 | `state/runs.jsonl` | `gc.runsMaxLines`(기본 2000줄)를 넘으면 오래된 것부터 |
@@ -732,6 +732,11 @@ DB 검사에는 `requires: ["postgres"]`를 붙이며, 서비스 선언이나 �
 
 `review.runtime`의 `image`, `memory`, `cpus`, `setupTimeoutSec`, `testTimeoutSec`,
 `browserTimeoutSec`, `planTimeoutSec`, `model`로 실행 예산을 조절합니다.
+이미지 받기와 저장소 브라우저 설치는 전송 중에 멈출 수 있어 시도마다
+`imagePullTimeoutSec`(기본 900초)·`browserInstallTimeoutSec`(기본 300초)로 끊고,
+`installRetryDelaySec`(기본 30초) 쉬었다가 `installAttempts`(기본 3회)까지 다시 받습니다.
+시간 초과 기록에는 로그 번호와 함께 단계 이름(예: `저장소 Playwright 브라우저 설치 (봇 관리
+단계 — 실행 계획과 무관)`)이 남아, 복구 계획자가 설치 문제를 테스트 축소로 대응하지 않습니다.
 `repos["owner/repo"].runtime`으로 저장소별 덮어쓰기도 가능합니다.
 Python 검증에는 격리된 Python/pip 환경과 uv를 먼저 준비합니다. 사내 TLS 프록시를
 사용하면 `review.runtime.caBundle`에 공개 CA PEM 경로를 지정하세요. 기존 시스템 CA와
@@ -761,8 +766,11 @@ API 를 호출하면 표식이 붙은 `DockerException` 으로 실패하고 `env
 
 head에서 실패한 명령은 **PR이 갈라진 base(merge-base)에서 같은 절차로 한 번 더**
 실행합니다(`review.runtime.baseline`, 기본 `true`). pytest/vitest의 JUnit 보고서에서
-개별 테스트 식별자와 실패 내용을 비교하고, **같은 테스트가 같은 원인으로 실패한
-경우만** `baseline`으로 표시합니다. 보고서가 없거나 원인이 다르면 실패로 남습니다.
+개별 테스트 식별자를 비교해 **같은 테스트가 base 에서도 실패하면** `baseline`으로
+표시합니다. 실패 원인이 달라도 마찬가지입니다 — PR 이 앞선 오류를 걷어내 같은 테스트가
+뒤쪽 단언에서 실패하는 경우가 있기 때문입니다(#7594). 이런 기존 실패는 승인을 막지 않는
+대신 리뷰 본문의 "base 에서도 실패하는 테스트" 에 head·base 실패 메시지와 함께 지적합니다.
+보고서가 없으면 실패로 남습니다.
 파라미터화 테스트의 중복 이름은 개별 결과를 보존하되, 서로 대응하는 케이스를
 확정할 수 없으므로 해당 실패를 자동으로 baseline 처리하지 않습니다.
 
@@ -791,7 +799,12 @@ head에서 실패한 명령은 **PR이 갈라진 base(merge-base)에서 같은 �
 테스트 실패는 따로 승인을 막으므로, 그것 때문에 정상인 화면이 "미완료"로 흐려지지
 않습니다. 결함은 없지만 어떤 시나리오 상태가 스크린샷에 없으면 `missing` 으로 보고하고,
 봇은 이를 계획 문제로 보아 빠진 상태를 알려 주며 브라우저 계획을 다시 짜게 합니다
-(복구 한도 안에서). 저장소가 다른 버전의 Playwright 를 설치해도 이미지 브라우저가
+(복구 한도 안에서). Playwright 버전은 저장소를 따릅니다. 봇은 대상 커밋의 lockfile
+(`pnpm-lock.yaml`·`package-lock.json`·`yarn.lock`)에서 설치되는 `playwright` 버전을 읽고
+그 버전의 이미지(`mcr.microsoft.com/playwright:v<버전>-noble`)와 같은 버전의 봇 드라이버를
+씁니다. 이미지에 그 버전 브라우저가 들어 있어 실행마다 크게 받을 것이 없습니다. 저장소가
+고정하지 않았거나 그 이미지를 받지 못하면 `review.runtime.image` 로 돌아갑니다.
+저장소가 이미지와 다른 버전의 Playwright 를 설치해도 이미지 브라우저가
 지워지지 않도록 컨테이너에 `PLAYWRIGHT_SKIP_BROWSER_GC=1` 을 넣습니다. 반대로 저장소
 자체의 e2e(예: `@playwright/test` 1.61)가 쓸 브라우저는 setup 이 끝난 뒤 네트워크가 열려
 있을 때 봇이 각 프로젝트의 `node_modules/.bin/playwright install chromium` 으로 설치합니다.

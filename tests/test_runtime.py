@@ -198,7 +198,25 @@ class BaselineTests(unittest.TestCase):
         text = body({'findings': [], 'runtime': evidence, 'summary': ''}, [], [], None)
         self.assertIn('이 PR 탓이 아님', text)
         self.assertIn('이 PR 이 깨뜨림', text)
+        self.assertNotIn('base 에서도 실패하는 테스트', text)
         self.assertIn('base `base012345` 에서 실패한 명령 2개', text)
+
+    def test_preexisting_failures_are_pointed_out_with_both_causes(self):
+        body = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'review-bot'))['_summary_body']
+        evidence = dict(GOOD, tests=[{'name': 'full', 'command': 'pytest', 'status': 'baseline', 'cases': [
+            {'id': 'svc::test_dispatch', 'status': 'baseline', 'message': "KeyError: 'event_id'",
+             'baselineDiffers': True,
+             'baselineMessage': 'Traceback\nE   sqlalchemy.exc.OperationalError: cannot commit\nE   (Background)'},
+            {'id': 'svc::test_same', 'status': 'baseline', 'message': 'boom'},
+            {'id': 'svc::test_ok', 'status': 'passed'}]}])
+        text = body({'findings': [], 'runtime': evidence, 'summary': ''}, [], [], None)
+        section = text[text.index('### base 에서도 실패하는 테스트'):text.index('### 검증 범위')]
+        self.assertIn("`svc::test_dispatch` (full)", section)
+        self.assertIn("head: `KeyError: 'event_id'`", section)
+        self.assertIn('base: `sqlalchemy.exc.OperationalError: cannot commit` — 실패 원인이 head 와 다름', section)
+        self.assertIn('`svc::test_same`', section)
+        self.assertEqual(section.count('base:'), 1)
+        self.assertNotIn('test_ok', section)
 
 
 class RetentionTests(unittest.TestCase):

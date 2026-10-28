@@ -20,7 +20,7 @@ databaseSetup은 네트워크 차단·DB 준비 후 실행합니다. 실제 저�
 파일 mtime 을 재는 테스트도 컨테이너 파일시스템에서는 어긋날 수 있습니다.
 전체 스위트를 넣을 때는 변경 대상 테스트와 **별도 항목**으로 두어, 환경 실패가
 대상 테스트의 증거를 가리지 않게 하세요. head 에서 실패한 명령은 봇이 base 에서
-한 번 더 돌려 같은 테스트·같은 실패 원인인지 비교합니다. 명령 전체 실패만으로 baseline으로 간주하지 않습니다.
+한 번 더 돌려 같은 테스트가 base 에서도 실패하는지 비교합니다(실패 원인이 달라도 기존 실패로 봅니다). 테스트별 JUnit 보고서 없이 명령 전체 실패만으로 baseline으로 간주하지 않습니다.
 작업 디렉터리는 /work이고 모든 shell은 bash -e -o pipefail입니다.
 Node/npm, Python, pip, uv, Chromium과 /opt/review-browser/node_modules/playwright가 제공됩니다.
 Python/pip는 /opt/review-python의 독립 환경이고 uv도 PATH에 있습니다.
@@ -77,7 +77,7 @@ CI (테스트 이름이 관련 검증을 포함하는지 확인):
   requiredCases를 쓰면 scopeReason은 필수입니다. 예: AWS 전용 overlay 변경이며 aws 렌더와
   공통 OFF 계약을 검증한다. SKPC Helm과 local Tilt는 변경·공통 의존성 영향이 없어 제외한다.
   공통 템플릿/정책 변경이면 다른 환경도 영향을 받을 수 있으므로 함께 필수로 검증하세요.
-  필수 케이스는 baseline(동일 원인의 base 실패)이나 skip이어도 미검증이므로 승인을 막습니다.
+  필수 케이스는 baseline(base 에서도 실패)이나 skip이어도 미검증이므로 승인을 막습니다.
   필수 밖의 baseline/skip은 차단하지 않지만 새 실패는 계속 차단합니다.
   이 범위는 실행 전에 정하고 재시도에서 실패 결과를 보고 축소하지 마세요.
   승인을 위해 필요한 테스트를 제외하지 마세요.

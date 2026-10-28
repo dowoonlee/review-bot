@@ -67,7 +67,15 @@ DEFAULTS = {
             "testTimeoutSec": 900,
             "browserTimeoutSec": 300,
             "browserLocale": "ko-KR",
+            # 저장소 lockfile 이 Playwright 를 고정하면 그 버전의 이미지를 쓴다(봇은
+            # 저장소를 따라간다). 이 값은 고정이 없거나 그 이미지를 받지 못했을 때만 쓴다.
             "image": "mcr.microsoft.com/playwright:v1.58.2-noble",
+            # 이미지 받기·브라우저 설치는 전송 중에 멈출 수 있다. 시도마다 시간을 제한하고
+            # 실패하면 잠시 쉬었다가 다시 받는다.
+            "imagePullTimeoutSec": 900,
+            "browserInstallTimeoutSec": 300,
+            "installAttempts": 3,
+            "installRetryDelaySec": 30,
             "memory": "6g",
             "minFreeDiskGiB": 3,
             "cpus": 4,

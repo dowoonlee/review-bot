@@ -48,6 +48,143 @@ class BrowserInfrastructureTests(unittest.TestCase):
             missing, {'status': 'failed', 'message': 'expect(locator).toBeVisible() failed'}]}), 'test')
 
 
+class RepositoryToolchainTests(unittest.TestCase):
+    """The repository decides the Playwright version; installs are bounded and retried."""
+
+    def provision(self, tmp, sha, outcomes=None, shell_error=None, cfg=None):
+        container = runtime.Container(tmp, {})
+        seen = []
+        outcomes = outcomes or {}
+
+        def command(args, *a, **kw):
+            seen.append(args)
+            if args[0] == 'git' and 'archive' in args:
+                Path(next(arg[9:] for arg in args if arg.startswith('--output='))).touch()
+            for key, outcome in outcomes.items():
+                if args[:len(key)] == list(key):
+                    if isinstance(outcome, Exception):
+                        raise outcome
+                    return dict({'status': 'passed', 'exitCode': 0, 'output': ''}, **outcome)
+            if shell_error and args[-1] == runtime.PLAYWRIGHT_BROWSERS:
+                raise shell_error
+            return {'status': 'passed', 'exitCode': 0, 'output': ''}
+        with mock.patch.object(container, 'command', side_effect=command), \
+                mock.patch.object(runtime.time, 'sleep') as sleep:
+            evidence = runtime._provision(container, sha, tmp, cfg or {}, {'setup': '', 'services': []}, True)
+        return evidence, seen, sleep
+
+    def repository(self, tmp):
+        def git(*args):
+            return runpy_git(tmp, *args)
+        git('init', '-q')
+        Path(tmp, 'web').mkdir()
+        Path(tmp, 'web/pnpm-lock.yaml').write_text(
+            "packages:\n\n  '@playwright/test@1.61.0':\n    resolution: {}\n\n  playwright-core@1.61.0:\n"
+            "    resolution: {}\n\n  playwright@1.61.0:\n    resolution: {}\n")
+        Path(tmp, 'desktop').mkdir()
+        Path(tmp, 'desktop/package-lock.json').write_text(
+            '{"packages": {"node_modules/playwright": {"version": "1.59.1"}}}')
+        git('add', '.')
+        git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'lock')
+        return git('rev-parse', 'HEAD').strip()
+
+    def test_image_and_driver_follow_the_repositorys_newest_pinned_playwright(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sha = self.repository(tmp)
+            self.assertEqual(runtime.repository_playwright(tmp, sha), '1.61.0')
+            evidence, seen, _ = self.provision(tmp, sha, {('docker', 'image', 'inspect'): {'exitCode': 1}})
+        image = 'mcr.microsoft.com/playwright:v1.61.0-noble'
+        self.assertEqual(evidence['image'], {'image': image, 'playwright': '1.61.0', 'source': 'repository'})
+        self.assertIn(['docker', 'pull', image], seen)
+        self.assertIn(image, next(a for a in seen if a[:2] == ['docker', 'create']))
+        self.assertTrue(any(a[-1].endswith('playwright@1.61.0') for a in seen if a[:2] == ['docker', 'exec']))
+
+    def test_a_stalled_pull_is_retried_after_a_pause_then_falls_back_to_the_configured_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sha = self.repository(tmp)
+            evidence, seen, sleep = self.provision(tmp, sha, {
+                ('docker', 'image', 'inspect'): {'exitCode': 1},
+                ('docker', 'pull'): runtime.ExecutionError('시간 초과: 002.log — 이미지 받기 (900s)')})
+        self.assertEqual(sum(1 for a in seen if a[:2] == ['docker', 'pull']), 3)
+        self.assertEqual([c.args for c in sleep.call_args_list], [(30,), (30,)])
+        self.assertEqual(evidence['image']['source'], 'config')
+        self.assertEqual(evidence['image']['repositoryPlaywright'], '1.61.0')
+        self.assertIn(runtime.DEFAULT_IMAGE, next(a for a in seen if a[:2] == ['docker', 'create']))
+        self.assertTrue(any(a[-1].endswith('playwright@' + runtime.BROWSER_VERSION) for a in seen))
+
+    def test_a_release_without_an_image_is_not_retried(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sha = self.repository(tmp)
+            _, seen, sleep = self.provision(tmp, sha, {
+                ('docker', 'image', 'inspect'): {'exitCode': 1},
+                ('docker', 'pull'): {'exitCode': 1, 'output': 'manifest unknown'}})
+        self.assertEqual(sum(1 for a in seen if a[:2] == ['docker', 'pull']), 1)
+        sleep.assert_not_called()
+
+    def test_a_browser_install_that_outlives_its_retries_does_not_abort_the_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            evidence, seen, _ = self.provision(tmp, 'head', shell_error=runtime.ExecutionError('시간 초과'))
+        self.assertEqual(evidence['playwrightBrowsers']['status'], 'failed')
+        self.assertTrue(any(a[:3] == ['docker', 'network', 'disconnect'] for a in seen))
+        install = next(a for a in seen if a[-1] == runtime.PLAYWRIGHT_BROWSERS)
+        for env in ('REVIEW_BROWSER_ATTEMPTS=3', 'REVIEW_BROWSER_TIMEOUT=300', 'REVIEW_BROWSER_RETRY_DELAY=30'):
+            self.assertIn(env, install)
+
+    def test_timeouts_name_the_stage_and_mark_bot_stages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            container = runtime.Container(tmp, {})
+            with mock.patch.object(runtime.subprocess, 'run',
+                                   side_effect=runtime.subprocess.TimeoutExpired('docker', 1)):
+                with self.assertRaises(runtime.ExecutionError) as caught:
+                    container.shell('x', 1, stage='저장소 Playwright 브라우저 설치' + runtime.BOT_STAGE)
+        self.assertEqual(str(caught.exception),
+                         '시간 초과: 001.log — 저장소 Playwright 브라우저 설치 (봇 관리 단계 — 실행 계획과 무관) (1s)')
+
+    def test_install_script_retries_a_stalled_download_and_moves_on(self):
+        """Runs where it really runs: bash and coreutils `timeout` of the runtime image."""
+        image = runtime.DEFAULT_IMAGE
+        try:
+            present = runtime.subprocess.run(['docker', 'image', 'inspect', image], capture_output=True,
+                                             timeout=30).returncode == 0
+        except (OSError, runtime.subprocess.SubprocessError):
+            present = False
+        if not present:
+            self.skipTest('runtime image is not available locally')
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp, 'app')
+            (project / 'node_modules/.bin').mkdir(parents=True)
+            (project / 'package.json').write_text('{"devDependencies": {"@playwright/test": "1.61.0"}}')
+            fake = project / 'node_modules/.bin/playwright'
+            # The first install stalls past the per-attempt limit; the second succeeds.
+            fake.write_text('#!/bin/bash\n[ "$1" = --version ] && { echo 1.61.0; exit 0; }\n'
+                            'n=$(cat /work/count 2>/dev/null || echo 0); echo $((n+1)) > /work/count\n'
+                            '[ "$n" = 0 ] && sleep 30\nexit 0\n')
+            fake.chmod(0o755)
+            proc = runtime.subprocess.run(
+                ['docker', 'run', '--rm', '-v', tmp + ':/work', '-e', 'REVIEW_BROWSER_ATTEMPTS=3',
+                 '-e', 'REVIEW_BROWSER_TIMEOUT=2', '-e', 'REVIEW_BROWSER_RETRY_DELAY=1', image,
+                 'bash', '-e', '-o', 'pipefail', '-c', runtime.PLAYWRIGHT_BROWSERS],
+                capture_output=True, text=True, timeout=120)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn('attempt 1/3', proc.stdout)
+            self.assertNotIn('attempt 2/3', proc.stdout)
+            self.assertEqual(Path(tmp, 'count').read_text().strip(), '2')
+            # Every attempt failing reports failure instead of hanging.
+            fake.write_text('#!/bin/bash\n[ "$1" = --version ] && { echo 1.61.0; exit 0; }\nsleep 30\n')
+            proc = runtime.subprocess.run(
+                ['docker', 'run', '--rm', '-v', tmp + ':/work', '-e', 'REVIEW_BROWSER_ATTEMPTS=2',
+                 '-e', 'REVIEW_BROWSER_TIMEOUT=1', '-e', 'REVIEW_BROWSER_RETRY_DELAY=0', image,
+                 'bash', '-e', '-o', 'pipefail', '-c', runtime.PLAYWRIGHT_BROWSERS],
+                capture_output=True, text=True, timeout=120)
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            self.assertIn('attempt 2/2', proc.stdout)
+
+
+def runpy_git(cwd, *args):
+    return runtime.subprocess.run(['git', '-C', cwd] + list(args), check=True,
+                                  capture_output=True, text=True).stdout
+
+
 class InspectionTests(unittest.TestCase):
     def inspect(self, answer):
         plan = {'scenarios': ['limit row'], 'browser': "await capture('x')", 'start': '', 'tests': [{'command': 'pytest'}]}

@@ -223,6 +223,14 @@ def _loc(f):
     return loc
 
 
+def _one_line(message, limit=240):
+    """The deciding line of a test failure — the first `E ` line pytest prints, else the first line."""
+    lines = [l.strip() for l in str(message).splitlines() if l.strip()]
+    errors = [l[1:].strip() for l in lines if l.startswith("E ")]
+    text = (errors[0] if errors else lines[0] if lines else "(메시지 없음)").replace("`", "'")
+    return "`%s`" % (text if len(text) <= limit else text[:limit - 1] + "…")
+
+
 def _comment_body(f):
     body = f["body"]
     if f.get("severity") == "altitude":
@@ -273,6 +281,22 @@ def _summary_body(payload, inline, demoted, verdict=None, note=None):
             where = "인라인 참고" if f in inline else f["body"].replace("\n", "\n  ")
             parts.append("- **[%s]** `%s` — %s\n  %s" % (_label(f), _loc(f), f["title"], where))
 
+    # Not this PR's doing, but broken before it: pointed out instead of blocking.
+    preexisting = [(test, case) for test in (payload.get("runtime") or {}).get("tests") or []
+                   for case in test.get("cases") or [] if case.get("status") == "baseline"]
+    if preexisting:
+        parts += ["", "### base 에서도 실패하는 테스트",
+                  "", "이 PR 이 만든 실패는 아니지만 base 에서도 깨져 있어 따로 확인이 필요합니다.", ""]
+        for test, case in preexisting[:10]:
+            line = "- `%s` (%s)" % (case["id"], test.get("name", ""))
+            if case.get("message"):
+                line += "\n  - head: " + _one_line(case["message"])
+            if case.get("baselineDiffers"):
+                line += "\n  - base: " + _one_line(case.get("baselineMessage") or "") + " — 실패 원인이 head 와 다름"
+            parts.append(line)
+        if len(preexisting) > 10:
+            parts.append("- 그 외 %d건" % (len(preexisting) - 10))
+
     if payload.get("summary"):
         parts += ["", "### 리뷰어 요약", "", payload["summary"]]
 
@@ -295,7 +319,7 @@ def _summary_body(payload, inline, demoted, verdict=None, note=None):
             label = test["status"]
             base = test.get("baseline") or {}
             if test["status"] == "baseline":
-                label = "baseline — 같은 테스트·같은 원인으로 base 에서도 실패, 이 PR 탓이 아님"
+                label = "baseline — 같은 테스트가 base 에서도 실패, 이 PR 탓이 아님"
             elif test["status"] == "failed" and base.get("exitCode") == 0:
                 label = "failed — base 에서는 통과, 이 PR 이 깨뜨림"
             counts = {}
