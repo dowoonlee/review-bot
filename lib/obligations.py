@@ -7,6 +7,7 @@ are recomputed from the current head every run, a new commit neither inherits st
 obligations nor escapes new ones.
 """
 import posixpath
+import json
 import re
 import shlex
 import subprocess
@@ -208,7 +209,10 @@ def plan_gaps(plan, checks):
             for test in tests:
                 command = test.get('command') or ''
                 if 'postgres' not in plan.get('services', []) or 'postgres' not in (test.get('requires') or []):
-                    gaps.append('%s: services 와 requires 에 postgres 가 필요합니다' % label)
+                    gaps.append('%s: 계획의 services 배열과 이 테스트 항목("%s")의 requires 배열 양쪽에 "postgres" 가 '
+                                '있어야 합니다 (현재 services=%s, 이 항목의 requires=%s)'
+                                % (label, test.get('name', ''), json.dumps(plan.get('services', [])),
+                                   json.dumps(test.get('requires') or [])))
                 if 'downgrade' not in command or 'upgrade' not in command:
                     gaps.append('%s: 명령에 downgrade 와 upgrade 가 모두 있어야 합니다' % label)
                 if identifiers and not any(i in command for i in identifiers):

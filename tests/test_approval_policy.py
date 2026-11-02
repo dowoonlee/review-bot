@@ -95,7 +95,9 @@ class TestEvidenceTests(unittest.TestCase):
         compact = runtime._prompt_evidence(evidence)
         test = compact['tests'][0]
         self.assertEqual(test['caseCounts'], {'passed': 2000, 'baseline': 1})
-        self.assertEqual(test['requiredMissingCount'], 1)
+        # Without a planner-declared scope, a case failing on base for the same cause was
+        # never run against this PR; it is counted for the judge, not required of the PR.
+        self.assertEqual(test['requiredMissingCount'], 0)
         self.assertEqual(len(test['cases']), 40)
         self.assertEqual(len(evidence['tests'][0]['cases']), 2001)
 
@@ -176,6 +178,83 @@ class TestEvidenceTests(unittest.TestCase):
         self.assertEqual(head['status'], 'failed')
         head = {'status': 'passed', 'cases': [{'id': 'a', 'status': 'skipped'}]}
         self.assertTrue(runtime.approval_block(dict(GOOD, tests=[head])))
+
+    def test_auto_scope_excludes_designed_skips_and_same_cause_base_failures(self):
+        # #8535: a 210-case config suite with 2 pre-existing failures and 4 pytest.skip
+        # parameters (environments without Azure login) must not block an approval.
+        xml = b'''<testsuite><testcase classname="c" name="aws"/>
+            <testcase classname="c" name="core"><skipped type="pytest.skip" message="Core: Azure login absent"/></testcase>
+            <testcase classname="c" name="deploy"><failure type="AssertionError" message="old"/></testcase></testsuite>'''
+        head = {'name': 'contract', 'status': 'failed', 'required': True, 'cases': runtime.parse_junit(xml)}
+        self.assertEqual(head['cases'][1]['skipReason'], 'Core: Azure login absent')
+        runtime.compare_cases(head, {'status': 'failed', 'cases': runtime.parse_junit(xml)})
+        self.assertEqual(head['status'], 'baseline')
+        self.assertEqual(runtime.required_case_ids(head), {'c::aws'})
+        self.assertEqual(runtime.approval_block(dict(GOOD, tests=[head])), '')
+        self.assertTrue(validation.satisfied(dict(head, status='passed')))
+        # The saved obligation records only executed cases, so a later run is held to those.
+        saved = validation.obligations({'plan': {'tests': [{'name': 'contract', 'command': 'pytest'}]},
+                                        'tests': [dict(head, command='pytest')]})
+        self.assertEqual(saved[0]['requiredCases'], ['c::aws'])
+        # A base failure with a different cause is still this PR's to explain.
+        head['cases'][2].update(baselineDiffers=True)
+        self.assertIn('c::deploy (baseline)', runtime.approval_block(dict(GOOD, tests=[head])))
+        # A suite with nothing executed verified nothing.
+        nothing = {'name': 'contract', 'status': 'passed', 'required': True,
+                   'cases': [{'id': 'c::core', 'status': 'skipped', 'skipReason': 'no env'}]}
+        self.assertIn('통과한 케이스가 없음', runtime.approval_block(dict(GOOD, tests=[nothing])))
+        self.assertFalse(validation.satisfied(nothing))
+
+    def test_command_without_report_failing_identically_on_base_is_preexisting(self):
+        # #8991: an optional type-check whose only errors already exist on base.
+        errors = "src/__tests__/old.test.tsx(71,52): error TS2345: Argument of type 'x' is not assignable.\n"
+        head = {'name': 'type-check', 'status': 'failed', 'required': False, 'exitCode': 2,
+                'output': '> tsc --noEmit\n' + errors + ' ELIFECYCLE  Command failed with exit code 2.\n'}
+        runtime.compare_cases(head, {'status': 'failed', 'exitCode': 2, 'output': errors + 'ELIFECYCLE Command failed with exit code 2.'})
+        self.assertEqual(head['status'], 'baseline')
+        self.assertNotIn('baselineDiffers', head)
+        self.assertEqual(runtime.approval_block(dict(GOOD, tests=[{'status': 'passed'}, head])), '')
+        # A new error line is this PR's regression even when the old one is still there.
+        head = {'status': 'failed', 'exitCode': 2, 'output': errors + 'src/new.ts(1,1): error TS2322: boom\n'}
+        runtime.compare_cases(head, {'status': 'failed', 'exitCode': 2, 'output': errors})
+        self.assertEqual(head['status'], 'failed')
+        # Base passing, or no error line to compare, keeps the failure.
+        head = {'status': 'failed', 'exitCode': 2, 'output': errors}
+        runtime.compare_cases(head, {'status': 'passed', 'exitCode': 0, 'output': errors})
+        self.assertEqual(head['status'], 'failed')
+        head = {'status': 'failed', 'exitCode': 1, 'output': 'done\n'}
+        runtime.compare_cases(head, {'status': 'failed', 'exitCode': 1, 'output': 'done\n'})
+        self.assertEqual(head['status'], 'failed')
+
+    def test_per_run_temporary_directory_names_do_not_make_a_base_failure_differ(self):
+        # #8535: pytest numbers its tmp_path per run, so the same render failure carried
+        # pytest-1 on base and pytest-2 on head and looked like a different cause.
+        def report(run):
+            return runtime.parse_junit((
+                '<testsuite><testcase classname="c" name="render"><failure type="AssertionError" '
+                'message="kubectl kustomize failed: /tmp/pytest-of-root/pytest-%d/test_render0/overlay '
+                'stderr=error: unable to run helm HELM_CACHE_HOME=/tmp/kustomize-helm-%d/.cache\n'
+                ' +  where 1 = CompletedProcess(args=[/tmp/pytest-of-root/pytest-%d/test_rend...ize-helm-%d)"/>'
+                '</testcase></testsuite>' % (run, run * 123456789, run, run * 123456789)).encode())
+        head = {'name': 'config', 'status': 'failed', 'required': True, 'cases': report(2)}
+        runtime.compare_cases(head, {'status': 'failed', 'cases': report(1)})
+        self.assertEqual(head['status'], 'baseline')
+        self.assertNotIn('baselineDiffers', head['cases'][0])
+        self.assertEqual(runtime.required_case_ids(head), set())
+        # Evidence recorded before the normalization keeps the flag; the kept messages decide.
+        stale = dict(head['cases'][0], baselineDiffers=True, baselineMessage=report(1)[0]['message'])
+        self.assertFalse(validation.executed(stale))
+        self.assertTrue(validation.executed(dict(stale, baselineMessage='a different cause')))
+
+    def test_a_passing_rewrite_covers_a_command_that_fails_identically_on_base(self):
+        # #8990: the planner fixed a migration command's working directory without a
+        # repairReason, so the original ran beside the rewrite and failed on base too.
+        original = {'id': 'test-1', 'name': '마이그레이션 왕복', 'status': 'baseline', 'required': True,
+                    'failureKind': 'infrastructure', 'exitCode': 1}
+        rewrite = {'id': 'test-2', 'name': '마이그레이션 왕복', 'status': 'passed', 'required': True}
+        self.assertEqual(runtime.approval_block(dict(GOOD, tests=[original, rewrite])), '')
+        self.assertIn('통과 근거 없음', runtime.approval_block(dict(GOOD, tests=[original])))
+        self.assertIn('통과 근거 없음', runtime.approval_block(dict(GOOD, tests=[original, dict(rewrite, name='다른 검사')])))
 
     def test_reports_reject_entities_and_unrepresented_collection_error(self):
         for xml in (b'<!DOCTYPE x><testsuite/>', b'<testsuite errors="1"><testcase name="a"/></testsuite>'):

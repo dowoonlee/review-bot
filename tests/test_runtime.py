@@ -23,6 +23,32 @@ GOOD = {'status': 'complete', 'testsApplicable': True, 'visualApplicable': True,
         'visual': {'status': 'passed', 'complete': True}, 'limitations': []}
 
 
+class RejectedPlanTests(unittest.TestCase):
+    def test_rejected_plans_are_kept_with_their_reason(self):
+        # #8990: three refusals left only a truncated log line; the plan itself was gone.
+        plans = [dict(PLAN, services=['postgres']), dict(PLAN, services=[])]
+        def planner(meta, files, cwd, cfg, requirements=None):
+            plan = plans.pop(0)
+            exc = runtime.ExecutionError('변경 유형별 필수 검증이 계획에 없습니다: migration-roundtrip')
+            exc.plan = plan
+            raise exc
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(runtime, '_plan', planner):
+            with self.assertRaises(runtime.ExecutionError):
+                runtime._checked_plan(META, [], tmp, {}, [], None, lambda m: None, directory=tmp)
+            saved = sorted(Path(tmp).glob('plan-rejected-*.json'))
+            self.assertEqual([p.name for p in saved], ['plan-rejected-0.json', 'plan-rejected-1.json'])
+            first = json.loads(saved[0].read_text())
+            self.assertIn('migration-roundtrip', first['reason'])
+            self.assertEqual(first['plan']['services'], ['postgres'])
+        # A plan that fails the shape check inside _plan carries itself on the error.
+        bad = dict(PLAN, tests=[{'name': 'unit', 'command': ''}])
+        with mock.patch.object(reviewer, '_run', return_value=bad), \
+                mock.patch.object(runtime, 'repository_context', return_value={}):
+            with self.assertRaises(runtime.ExecutionError) as caught:
+                runtime._plan(META, [], '/tmp', {})
+            self.assertIs(caught.exception.plan, bad)
+
+
 class EvidenceTests(unittest.TestCase):
     def test_junit_work_path_is_normalized_but_paths_outside_work_are_rejected(self):
         for supplied, expected in [('/work/results/test.xml', 'results/test.xml'),

@@ -63,7 +63,8 @@ CI (테스트 이름이 관련 검증을 포함하는지 확인):
 규칙:
 - 봇이 diff 에서 도출한 requiredChecks(아래 데이터)는 생략할 수 없습니다. 각 kind 마다 그것을
   검증하는 required 테스트에 covers=["<kind>"] 를 적으세요. migration-roundtrip 은
-  services=["postgres"]·requires=["postgres"] 항목으로, 새 리비전 아래(그 down_revision)로
+  services=["postgres"] 와 함께, 그 테스트 항목 자체에 "requires": ["postgres"] 배열을 가진
+  항목으로, 새 리비전 아래(그 down_revision)로
   downgrade 한 뒤 upgrade head 까지 되돌리는 명령이어야 합니다. 저장소 alembic 이 downgrade 를
   가드로 막더라도 명령에서 우회하지 마세요 — 봇이 그 명령에만 ALLOW_DESTRUCTIVE_MIGRATION=1 을
   넣습니다. 이 가드는 공용 DB 보호용이고 이 DB 는 일회용입니다.
@@ -157,7 +158,7 @@ CI (테스트 이름이 관련 검증을 포함하는지 확인):
 JSON만 출력:
 {{"testsApplicable": true, "visualApplicable": true, "services": [], "databaseSetup": "",
   "setup": "cd services/frontend && ...",
-  "tests": [{{"name": "관련 단위 테스트", "command": "cd services/frontend && ...", "required": true, "scopeReason": "변경 동작과 공통 소비처를 검증하는 범위", "report": "results/unit.xml", "covers": [], "ciChecks": [], "ciReason": ""}}],
+  "tests": [{{"name": "관련 단위 테스트", "command": "cd services/frontend && ...", "required": true, "scopeReason": "변경 동작과 공통 소비처를 검증하는 범위", "report": "results/unit.xml", "requires": [], "covers": [], "ciChecks": [], "ciReason": ""}}],
   "start": "cd services/frontend && ...",
   "browser": "await page.goto('http://127.0.0.1:5173/...'); ...",
   "scenarios": ["실제 변경 동작과 기대 결과"],

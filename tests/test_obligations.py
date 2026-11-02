@@ -143,6 +143,14 @@ class PlanTests(unittest.TestCase):
     def test_a_covering_postgres_roundtrip_satisfies_the_check(self):
         self.assertEqual(obligations.plan_gaps(PLAN, self.checks), [])
 
+    def test_missing_requires_names_the_test_item_and_current_values(self):
+        plan = copy.deepcopy(PLAN)
+        plan['tests'][0].pop('requires', None)
+        gap = obligations.plan_gaps(plan, self.checks)[0]
+        self.assertIn('이 테스트 항목("%s")의 requires 배열' % plan['tests'][0]['name'], gap)
+        self.assertIn('services=["postgres"]', gap)
+        self.assertIn('requires=[]', gap)
+
     def test_missing_cover_wrong_service_or_wrong_command_is_a_gap(self):
         for change in ({'covers': []}, {'required': False}, {'requires': []},
                        {'command': 'uv run alembic upgrade head'},

@@ -44,14 +44,42 @@ def satisfied(test):
         return True
     required = required_cases(test)
     passed = {c['id'] for c in test['cases'] if c['status'] == 'passed'}
-    return required <= passed
+    return bool(passed) and required <= passed
+
+
+def executed(case):
+    """A case that actually exercised this PR's code and said something about it.
+
+    A case the suite skipped by design (pytest.skip with its reason) or one that fails
+    on base for the same cause was not run against the change; it is reported, not
+    required. A base failure with a different cause may be the PR's doing (#7594).
+    """
+    status = case.get('status')
+    if status in ('passed', 'failed'):
+        return True
+    if status != 'baseline' or not case.get('baselineDiffers'):
+        return False
+    # A flag recorded before incidental differences were normalized is re-checked
+    # against the kept messages, so an older run's evidence carries the same meaning.
+    head, base = case.get('message'), case.get('baselineMessage')
+    return not (head and base and without_incidentals(head) == without_incidentals(base))
+
+
+def without_incidentals(text):
+    """Object addresses, per-run temporary directory names and the middle of a value pytest
+    elided with "..." differ between two runs of the same failing test; none of them says
+    the cause differs."""
+    text = re.sub(r' at 0x[0-9a-fA-F]+', ' at <address>', text)
+    text = re.sub(r'/tmp/\S+', lambda path: re.sub(r'\d+', 'N', path.group()), text)
+    return re.sub(r'\S*\.\.\.\S*', '<elided>', text)
 
 
 def required_cases(test):
+    """Case ids the test must pass: the planner's explicit scope, else every executed case."""
     cases = test.get('cases') or []
     requested = test.get('requiredCases')
     if not requested:
-        return {case['id'] for case in cases}
+        return {case['id'] for case in cases if executed(case)}
     lookup = {}
     for case in cases:
         lookup.setdefault(case['id'], set()).add(case['id'])
@@ -105,7 +133,16 @@ def obligations(previous):
         identity = check_id(test)
         if identity in saved and test.get('cases') and saved[identity].get('required', True):
             # Once concrete cases have been observed, selecting fewer cases is not a repair.
-            saved[identity]['requiredCases'] = saved[identity].get('requiredCases') or [c['id'] for c in test['cases']]
+            # A saved list that names every observed case is the whole run, not a planner's
+            # subset: it is re-derived so a designed skip or a same-cause base failure
+            # recorded under an older rule does not stay required.
+            listed = saved[identity].get('requiredCases')
+            if listed and {c['id'] for c in test['cases']} <= set(listed):
+                saved[identity].pop('requiredCases', None)
+                listed = None
+            observed = sorted(required_cases({'cases': test['cases']}))
+            if observed:
+                saved[identity]['requiredCases'] = listed or observed
     return list(saved.values())
 
 
