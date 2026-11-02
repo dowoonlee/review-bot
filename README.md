@@ -18,6 +18,90 @@ $ review-bot tick
 그중 코드 리뷰 하나를 골라 **대신 해 주는** 도구입니다. overseer 는 아무것도 고치지
 않는다는 원칙이 있어, 쓰기가 필요한 이 일은 별도 도구로 뺐습니다.
 
+## 빠른 시작
+
+처음 쓰는 분은 이 순서대로 따라 하면 됩니다. 각 단계의 배경은 뒤 섹션에 있습니다.
+
+### 0. 준비물
+
+| 필요한 것 | 확인 | 비고 |
+|---|---|---|
+| macOS | — | launchd · 메뉴바 앱 · 알림이 macOS 전제입니다 |
+| Python 3.9+ | `python3 --version` | 표준 라이브러리만 씁니다. `pip install` 할 것이 없습니다 |
+| `git` | `git --version` | PR head 를 별도 worktree 로 펼칩니다 |
+| `gh` 로그인 | `gh auth status` | 리뷰 요청 조회와 게시. **게시할 계정으로** 로그인해 두세요 |
+| `claude` CLI 로그인 | `claude auth status` | 리뷰어 · 검증자 · 판정이 전부 `claude -p` 로 돕니다. 과금 방식은 [요금과 사용량](#요금과-사용량) |
+| Docker Desktop (선택) | `docker info` | PR 별 로컬 테스트 · 화면 검증에만 필요. 없으면 `review.runtime.enabled: false` 로 끄세요 |
+| Xcode Command Line Tools (선택) | `swift --version` | 메뉴바 앱을 빌드할 때만 |
+
+### 1. 설치
+
+```bash
+git clone https://github.com/dowoonlee/review-bot ~/.dev/review-bot
+cd ~/.dev/review-bot
+./review-bot setup                                         # 번들 리뷰어 → ~/.claude/agents/, config.json 생성
+ln -s ~/.dev/review-bot/review-bot ~/.local/bin/review-bot  # 어디서나 부르기 (선택)
+```
+
+### 2. 감시할 저장소와 게시 계정 등록
+
+```bash
+review-bot repo add owner/repo --path ~/dev/repo   # 로컬 클론이 있으면 --path. 없으면 봇이 캐시에 클론합니다
+review-bot account set <gh 계정>                    # 게시에 쓸 계정. gh 토큰 주인과 같아야 합니다
+review-bot doctor                                   # 모든 줄이 ✓ 인지 확인
+```
+
+`doctor` 에 ❌ 가 보이면 그 줄부터 해결하세요. 저장소 화이트리스트가 비어 있으면
+아무것도 리뷰하지 않습니다.
+
+### 3. 한 건 돌려 보기 (초안 모드)
+
+`setup` 이 만든 `config.json` 은 `post.dryRun: true` 라 GitHub 에 아무것도 올리지
+않습니다. 먼저 초안의 질을 눈으로 확인하세요.
+
+```bash
+review-bot review owner/repo#123              # PR 하나를 지금 리뷰 (PR URL 도 됩니다)
+review-bot drafts                             # 게시를 기다리는 초안 목록
+cat state/drafts/owner__repo-123.md           # 초안 읽기
+review-bot publish owner/repo#123 --dry-run   # 무엇이 나갈지 미리 보기
+review-bot publish owner/repo#123             # 납득되면 그대로 게시
+```
+
+리뷰 한 건은 보통 15분 넘게 걸립니다. 진행 로그는 `state/bot.log` 에 남습니다.
+
+### 4. 자동 실행
+
+```bash
+review-bot mode auto                          # 초안 없이 판정대로 바로 게시 (post.dryRun=false)
+review-bot setup --launchd --interval 15      # 이 설치 위치로 launchd plist 생성
+launchctl load ~/Library/LaunchAgents/com.review-bot.agent.plist
+review-bot status                             # 대기 요청 · 게시 모드 · 처리 이력
+```
+
+이제 15분마다 `review-bot tick` 이 돌며 나에게 온 리뷰 요청을 처리합니다.
+잠깐 멈추려면 `review-bot pause`, 다시 켜려면 `review-bot resume` 입니다.
+
+### 5. 메뉴바 앱 (선택)
+
+```bash
+app/build.sh                          # ReviewBot.app 빌드
+cp -R app/ReviewBot.app /Applications/
+open -a ReviewBot
+```
+
+상태 · 초안 · 라이브 세션 · 설정을 한 화면에서 봅니다. 자세한 것은 [메뉴바 앱](#메뉴바-앱).
+
+### 자주 바꾸는 것
+
+| 하고 싶은 것 | 방법 |
+|---|---|
+| 봇이 내 이름으로 **승인**하지 않게 | `config.json` 의 `post.allowedEvents` 에서 `APPROVE` 를 뺍니다 |
+| 리뷰 관점 늘리기 | `review-bot agent add ~/path/security-reviewer.md --model opus` |
+| 사소한 지적 줄이기 | `post.minSeverity` 를 `suggestion` 으로 |
+| 메모리가 부족해 죽는다 | `review.parallel: false` |
+| 틱 주기 · 틱당 건수 | `review-bot interval 30` · `review-bot cap 4` |
+| 설치 위치가 `~/.dev/review-bot` 이 아니다 | 메뉴바 앱에 `REVIEW_BOT_ROOT` 환경변수로 알려 줍니다 |
+
 ## 무엇을 하나
 
 1. **감시** — `gh search prs --review-requested=@me` 로 나에게 리뷰 요청이 온 열린
@@ -85,9 +169,11 @@ $ review-bot tick
 
    여러 환경이 섞인 테스트는 계획 단계에서 `requiredCases`(JUnit 케이스 ID)와
    `scopeReason`(변경과 필수·제외 범위의 관계)을 지정하거나 실행 명령을 분리합니다.
-   생략하면 모든 케이스가 필수이며, 재시도에서 필수 범위를 축소할 수 없습니다.
-   필수 밖의 skip·동일 원인의 base 실패는 승인을 막지 않지만, 새로운 실패와 필수
-   케이스의 미검증은 차단합니다. 차단 시 테스트 ID·상태·범위 근거를 표시하고,
+   생략하면 그 명령이 **실제로 실행한** 케이스(통과·실패·원인이 다른 base 실패)가
+   필수이며, 재시도에서 필수 범위를 축소할 수 없습니다. 테스트가 설계상 skip 한
+   케이스(`skipReason`)와 동일 원인의 base 실패는 승인을 막지 않고 판정자에게 건수로
+   보고됩니다. 통과한 케이스가 하나도 없는 필수 명령, 새로운 실패, `requiredCases` 로
+   지정한 케이스의 skip·baseline 은 차단합니다. 차단 시 테스트 ID·상태·범위 근거를 표시하고,
    본문에서는 최종 판정을 먼저, AI의 원래 의견은 참고 의견으로 구분합니다.
 
    실패한 리뷰는 최대 두 번 재시도하고 성공한 묶음은 재사용합니다. 재시도 후에도
@@ -423,26 +509,62 @@ Apple Development. 그 뒤 `./build.sh` 를 다시 돌리면 그 신원을 알�
 
 ## 명령
 
+`review-bot --help` 와 `review-bot <명령> --help` 로 같은 내용을 볼 수 있습니다.
+
+**처음 한 번**
+
 | 명령 | 하는 일 |
 |---|---|
-| `review-bot tick` | 한 번 훑는다 — 감지 → 리뷰 → 게시. launchd 가 부르는 것. |
-| `review-bot review owner/repo#123` | PR 하나를 지금 리뷰 (이미 리뷰했어도 다시). PR URL 도 됩니다. |
-| `review-bot review … --agents <이름>` | 이번만 그 리뷰어들로. 빠진 관점만 보완할 때 |
+| `review-bot setup` | 번들 리뷰어를 `~/.claude/agents/` 에 설치하고 `config.json` 을 예시에서 만듭니다. `--force` 는 리뷰어 정의 덮어쓰기 |
+| `review-bot setup --launchd --interval 15` | 이 설치 위치로 launchd plist 를 만듭니다 (분 단위) |
+| `review-bot repo add owner/repo [--path 클론] [--account 계정]` | 감시 저장소 등록. `list` · `remove` · `enable` · `disable` 도 있습니다 |
+| `review-bot account set <gh 계정>` | 게시에 쓸 gh 계정 고정. `list` · `clear` |
+| `review-bot agent add <정의.md> [--name 이름] [--model 모델]` | 리뷰어 등록. `list` · `remove` · `model` (모델 변경) · `diff` (설치본과 번들 비교) · `export` (설치본을 번들로) |
+| `review-bot doctor` | 의존성 · 인증 · Docker · 정찰 · 저장소 · 리뷰어 점검 |
+
+**리뷰**
+
+| 명령 | 하는 일 |
+|---|---|
+| `review-bot tick` | 한 번 훑는다 — 감지 → 리뷰 → 게시. launchd 가 부르는 것 |
+| `review-bot review owner/repo#123` | PR 하나를 지금 리뷰 (이미 리뷰했어도 다시). PR URL 도 됩니다 |
+| `review-bot review … --agents <이름,이름>` | 이번만 그 리뷰어들로. 빠진 관점만 보완할 때 |
 | `review-bot review … --note "…"` | 요약 본문 맨 위에 안내를 답니다 — 왜 또 리뷰가 올라왔는지 |
-| `review-bot status` | 대기 중인 리뷰 요청, 게시 모드, 처리 이력 |
-| `review-bot status --json` | 같은 내용을 JSON 으로 — 메뉴바 앱이 읽는 계약 |
-| `review-bot review <PR> --rejudge` | 동일 base/head의 검토를 재사용하고 누락 검증·최종 판정만 갱신 |
-| `review-bot runs -n 20` | 최근 실행 이력 (판정·건수·실패 사유) |
-| `review-bot forget <PR> --artifacts [--dry-run]` | 해당 PR의 초안·검증 자료·체크포인트·이력 정리. `--dry-run`은 대상 미리보기 |
-| `review-bot forget <PR>` | 그 PR 의 이력 삭제. `--at <시각>` 하나만, `--all` 전체, `--older-than <일>` |
-| `review-bot mode [auto\|draft]` | 게시 모드 조회·전환. `draft` 면 초안만 남기고 사람이 게시 |
-| `review-bot interval [분]` | 틱 주기 조회·변경. launchd job 을 다시 올립니다 (기본 15분) |
-| `review-bot cap [건수]` | 틱당 리뷰 상한 조회·변경 (1~20). 도는 틱은 이전 상한으로 끝내고 다음 틱부터 적용 |
-| `review-bot drafts` | 게시를 기다리는 초안 목록 |
-| `review-bot drafts event owner/repo#123 APPROVE` | 초안의 리뷰 이벤트를 바꿈 (`APPROVE`/`COMMENT`/`REQUEST_CHANGES`). GitHub 에는 나가지 않음 |
-| `review-bot publish owner/repo#123` | 초안을 리뷰 없이 그대로 게시. `--dry-run` 으로 미리보기 |
+| `review-bot review … --rejudge` | 동일 base/head 의 검토를 재사용하고 누락 검증 · 최종 판정만 갱신 |
+| `review-bot review … --force-size` | 크기 상한을 무시하고 리뷰. 승인 제한은 그대로 |
 | `review-bot pause [사유]` / `resume` | 자동 리뷰 정지 / 재개 |
-| `review-bot doctor` | 의존성·인증·설정 점검 |
+
+**게시**
+
+| 명령 | 하는 일 |
+|---|---|
+| `review-bot mode [auto\|draft]` | 게시 모드 조회 · 전환. `draft` 면 초안만 남기고 사람이 게시 |
+| `review-bot drafts` | 게시를 기다리는 초안 목록 |
+| `review-bot drafts event owner/repo#123 APPROVE` | 초안의 리뷰 이벤트를 바꿈 (`APPROVE` / `COMMENT` / `REQUEST_CHANGES`). GitHub 에는 나가지 않음 |
+| `review-bot publish owner/repo#123` | 초안을 리뷰 없이 그대로 게시. `--dry-run` 으로 미리보기 |
+
+**상태와 이력**
+
+| 명령 | 하는 일 |
+|---|---|
+| `review-bot status` | 대기 중인 리뷰 요청, 게시 모드, 처리 이력. `--json` 은 메뉴바 앱이 읽는 계약, `--fast` 는 PR 별 추가 조회 생략 |
+| `review-bot runs -n 20` | 최근 실행 이력 (판정 · 건수 · 실패 사유) |
+| `review-bot verify-log -n 30 [-v] [--json]` | 반증 검증 기록 — 지적이 어떤 사유로 살고 죽었는지 |
+| `review-bot forget <PR>` | 그 PR 의 이력 삭제. `--at <시각>` 하나만, `--all` 전체, `--older-than <일>` |
+| `review-bot forget <PR> --artifacts [--dry-run]` | 초안 · 검증 자료 · 체크포인트 · 이력까지 정리. `--dry-run` 은 대상 미리보기 |
+| `review-bot forget <PR> --reset` | 처리 지문까지 지워 다음 틱에 다시 리뷰하게 함 (비용 발생) |
+| `review-bot gc` | 부산물 정리 — 워크트리 · claude 세션 · 초안 · 이력 · 로그. 틱마다 자동으로도 돕니다 |
+
+**운영 설정**
+
+| 명령 | 하는 일 |
+|---|---|
+| `review-bot interval [분]` | 틱 주기 조회 · 변경. launchd job 을 다시 올립니다 (기본 15분) |
+| `review-bot cap [건수]` | 틱당 리뷰 상한 조회 · 변경 (1~20). 도는 틱은 이전 상한으로 끝내고 다음 틱부터 적용 |
+| `review-bot insights status\|enable\|disable\|check\|model\|workspace` | [Claude 요청 분석](#claude-요청-분석) 설정. API 키는 앱 설정에서 등록 |
+| `review-bot task start\|complete\|reopen\|cancel\|stop <대상>` | 홈 할 일의 작업 상태 변경. 메뉴바 앱이 부릅니다 |
+
+모든 명령에 `--config <경로>` 를 앞에 붙이면 다른 설정 파일로 돕니다.
 
 ## 설정
 
@@ -473,7 +595,10 @@ Apple Development. 그 뒤 `./build.sh` 를 다시 돌리면 그 신원을 알�
 ## 요구사항
 
 macOS · `claude` CLI · `gh` (인증 완료) · `git` · Python 3.9+ (표준 라이브러리만).
-로컬 실행 검증에는 실행 중인 Docker와 이미지·의존성 다운로드가 필요합니다.
+로컬 실행 검증(`review.runtime.enabled`, 기본 켜짐)에는 실행 중인 Docker 와 이미지·의존성
+다운로드가 필요합니다. Docker 가 없으면 `doctor` 가 알려 주며, 그 단계가 필요 없으면
+`false` 로 끄세요. 메뉴바 앱 빌드에만 Xcode Command Line Tools(Swift)가 듭니다.
+`review-bot doctor` 가 이 전부를 한 번에 점검합니다.
 
 ### 대형 PR 리뷰
 
@@ -770,16 +895,25 @@ head에서 실패한 명령은 **PR이 갈라진 base(merge-base)에서 같은 �
 표시합니다. 실패 원인이 달라도 마찬가지입니다 — PR 이 앞선 오류를 걷어내 같은 테스트가
 뒤쪽 단언에서 실패하는 경우가 있기 때문입니다(#7594). 이런 기존 실패는 승인을 막지 않는
 대신 리뷰 본문의 "base 에서도 실패하는 테스트" 에 head·base 실패 메시지와 함께 지적합니다.
-보고서가 없으면 실패로 남습니다.
+type-check·빌드처럼 보고서가 없는 명령은 출력에서 오류를 말하는 줄을 모아 비교합니다 —
+head 의 오류 줄이 모두 base 출력에도 있으면 `baseline`, 새 오류 줄이 하나라도 있거나
+오류 줄 자체가 없으면 실패로 남습니다(#8991). 실패 메시지를 비교할 때 객체 주소,
+`/tmp` 아래 실행마다 바뀌는 디렉터리 번호, pytest 가 `...` 로 줄인 값의 차이는 원인 차이로
+보지 않습니다(#8535). 보고서 없는 필수 명령이 base 에서도 같게 실패했고 같은 이름의
+수정 명령이 통과했다면, 그 수정 명령이 검증 근거이며 원래 명령은 승인을 막지 않습니다(#8990).
 파라미터화 테스트의 중복 이름은 개별 결과를 보존하되, 서로 대응하는 케이스를
 확정할 수 없으므로 해당 실패를 자동으로 baseline 처리하지 않습니다.
 
 한 명령에 실패가 섞여 있어도 통과한 개별 테스트 결과는 보존합니다. 실행 계획의
 `required`는 핵심 검증 여부이며, `requiredCases`는 필수 테스트의 JUnit 식별자
-(`classname::name`)입니다. 생략하면 해당 명령의 모든 테스트가 필수입니다.
-핵심 테스트의 실패·skip·baseline은 미검증으로 남습니다. 넓은 회귀 스위트의 기존
-실패는 관련 핵심 검증을 마쳤다면 승인을 막지 않습니다. lint/빌드처럼 개별 보고서가
-없는 명령은 종료 코드로 평가하고, 실패 원인이 같다고 자동 면제하지 않습니다.
+(`classname::name`)입니다. 생략하면 해당 명령이 실제로 실행한 테스트가 필수입니다 —
+설계상 skip 된 파라미터(예: Azure 로그인이 없는 오버레이)와 같은 원인으로 base 에서도
+실패하는 케이스는 그 PR 을 검증한 적이 없으므로 요구하지 않고 건수로만 보고합니다(#8535).
+`requiredCases` 로 지정한 케이스의 실패·skip·baseline 은 미검증으로 남습니다. 다만 이전
+실행이 관측한 케이스 전부를 필수로 저장한 목록은 계획의 부분 범위가 아니라 전체 실행이므로,
+이어받을 때 실행된 케이스로 다시 도출합니다. 넓은 회귀
+스위트의 기존 실패는 관련 핵심 검증을 마쳤다면 승인을 막지 않습니다. lint/빌드처럼 개별
+보고서가 없는 명령은 종료 코드와 오류 줄 비교로 평가합니다.
 
 ## 검증 복구와 재판정
 
@@ -896,8 +1030,9 @@ CI 진행 중에는 `PENDING`(검증 대기)으로 기록하고 GitHub에 최종
 봇 코드가 바뀌어 같은 head 의 이전 실행 결과를 재사용할 수 없을 때도 필수 검증
 목록은 체크포인트에서 이어받습니다(`checkpoints.obligations`). 이전 결과는 봇 코드에
 따라 달라지지만, 이 PR 이 증명해야 할 범위는 그렇지 않기 때문입니다. 실제 테스트 실패는 다른 실행 명령으로
-바꾸거나 계획에서 빼지 못하고, 이미 통과한 명령은 재사용합니다. 필수 케이스가 skip된
-명령은 완료한 캐시로 취급하지 않습니다. 테스트 traceback 안의 TimeoutError 문구만으로
+바꾸거나 계획에서 빼지 못하고, 이미 통과한 명령은 재사용합니다. 통과한 케이스가 없거나
+필수 케이스가 skip된 명령은 완료한 캐시로 취급하지 않습니다. 실행 전에 거부된 계획은
+그 사유와 함께 증거 디렉터리의 `plan-rejected-N.json` 에 남습니다. 테스트 traceback 안의 TimeoutError 문구만으로
 환경 오류를 판정하지 않습니다.
 
 실행 전에 Docker 엔진 연결, 호스트 작업 디스크 여유, Docker 엔진에 할당된 메모리·CPU가
