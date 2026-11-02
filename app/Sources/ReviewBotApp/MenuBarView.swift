@@ -132,6 +132,8 @@ struct MenuBarView: View {
                 HStack(spacing: 6) {
                     if r.failed {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(.red).f(.caption)
+                    } else if r.movedOn {
+                        Image(systemName: "arrow.clockwise.circle.fill").foregroundStyle(.orange).f(.caption)
                     } else if r.partial {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange).f(.caption)
@@ -141,6 +143,8 @@ struct MenuBarView: View {
                     Text(r.prLabel).f(.caption, .medium)
                     if r.failed {
                         Text("실패").f(.caption2).foregroundStyle(.red)
+                    } else if r.movedOn {
+                        Text("다시 리뷰").f(.caption2).foregroundStyle(.orange)
                     } else {
                         EventBadge(event: r.event)
                         Text("인라인 \(r.inline ?? 0)").f(.caption2).foregroundStyle(.secondary)

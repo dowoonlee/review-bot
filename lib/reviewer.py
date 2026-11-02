@@ -90,6 +90,11 @@ class ReviewError(Exception):
         self.cost = cost or 0.0
 
 
+class HeadMovedError(ReviewError):
+    """리뷰 도중 PR 의 base/head 가 바뀌었다. 지금까지의 결과는 낡은 커밋의 것이라 버리고
+    다음 틱에 새 head 로 다시 본다 — 봇의 실패가 아니라 설계된 재시작이다."""
+
+
 # 턴 예산이 끝난 세션을 툴 없이 한 턴 이어 붙일 때 주는 지시.
 FINISH_PROMPT = (
     "턴 예산이 끝났습니다. 더 이상 파일을 읽을 수 없습니다. 지금까지 확인한 것만으로 "

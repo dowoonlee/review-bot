@@ -379,6 +379,8 @@ struct DashboardView: View {
             HStack(spacing: 5) {
                 if r.failed {
                     Text("실패").f(.caption2).foregroundStyle(.red)
+                } else if r.movedOn {
+                    Text("다시 리뷰").f(.caption2).foregroundStyle(.orange)
                 } else {
                     EventBadge(event: r.event)
                     Text((r.posted ?? false) ? "게시" : r.event == "PENDING" ? "대기" : "초안")

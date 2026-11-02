@@ -714,8 +714,8 @@ def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge
             # CI may finish while the isolated execution is running.
             refreshed = gh.pr_meta(repo, number, account=acct)
             if refreshed.get("headRefOid") != sha or refreshed.get("baseRefOid") != meta.get("baseRefOid"):
-                raise reviewer.ReviewError("실행 검증 중 base/head가 바뀌어 다시 리뷰해야 합니다.",
-                                           cost=meta["_runtime"].get("cost_usd"))
+                raise reviewer.HeadMovedError("실행 검증 중 base/head가 바뀌어 다시 리뷰해야 합니다.",
+                                              cost=meta["_runtime"].get("cost_usd"))
             meta["_ci"] = gh.ci_state(refreshed)
             meta["_ci_evidence"] = gh.ci_evidence(refreshed)
             try:
@@ -956,7 +956,7 @@ def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge
 
     latest = gh.pr_meta(repo, number, account=acct)
     if latest.get("headRefOid") != sha or latest.get("baseRefOid") != meta.get("baseRefOid"):
-        raise reviewer.ReviewError("리뷰 중 base/head가 바뀌어 게시하지 않았습니다.", cost=result.get("cost_usd"))
+        raise reviewer.HeadMovedError("리뷰 중 base/head가 바뀌어 게시하지 않았습니다.", cost=result.get("cost_usd"))
 
     latest_ci = gh.ci_evidence(latest)
     snapshot.update(ci=latest_ci, watchCI=latest_ci['state'] in ('pending', 'failure'))
@@ -1503,6 +1503,19 @@ def _accounts(cfg):
     return groups
 
 
+def _failure_line(pr, e, indent="  "):
+    """PR 처리가 예외로 끝났을 때 찍는 한 줄. PR 을 반드시 적는다.
+
+    틱 로그는 `· owner/repo#N` 헤더 아래로 줄을 들여 쓰는데, 실패는 그 PR 의 마지막
+    줄이라 바로 다음 PR 헤더와 붙어 보인다 — #9105 의 head 변경이 #9088 의 에러로
+    읽힌 적이 있다. head 가 바뀐 것은 실패가 아니라 다음 틱에 새 head 로 다시 보는
+    것이므로 '실패' 라벨도 붙이지 않는다 (앱은 `—` 앞의 '실패' 로 빨간 줄을 정한다)."""
+    label = "%s#%s" % (pr["repo"], pr["number"])
+    if isinstance(e, reviewer.HeadMovedError):
+        return "%s다시 리뷰 %s — %s" % (indent, label, str(e)[:200])
+    return "%s실패 %s — %s" % (indent, label, str(e)[:200])
+
+
 def _tick(cfg):
     for error in drafts_mod.reconcile(cfg, locked=True):
         _log(error)
@@ -1592,9 +1605,10 @@ def _tick(cfg):
             try:
                 r = process_pr(pr, cfg, state, mcp=mcp)
             except (gh.GhError, worktree.WorktreeError, reviewer.ReviewError) as e:
-                _log("  실패: %s" % str(e)[:200])
+                _log(_failure_line(pr, e))
                 store.log_run({"repo": pr["repo"], "number": pr["number"],
-                               "error": str(e)[:300]})
+                               "error": str(e)[:300],
+                               "headMoved": isinstance(e, reviewer.HeadMovedError)})
                 continue
             if r.get("skipped"):
                 _log("  건너뜀 — %s" % r["skipped"])
@@ -1684,8 +1698,9 @@ def cmd_review(args, cfg):
                                force_size=getattr(args, "force_size", False),
                                rejudge=getattr(args, "rejudge", False))
             except (gh.GhError, worktree.WorktreeError, reviewer.ReviewError) as e:
-                _log("실패: %s" % str(e)[:300])
-                store.log_run({"repo": repo, "number": number, "error": str(e)[:300]})
+                _log(_failure_line(pr, e, indent=""))
+                store.log_run({"repo": repo, "number": number, "error": str(e)[:300],
+                               "headMoved": isinstance(e, reviewer.HeadMovedError)})
                 return 1
             if r.get("skipped"):
                 _log("건너뜀 — %s" % r["skipped"])

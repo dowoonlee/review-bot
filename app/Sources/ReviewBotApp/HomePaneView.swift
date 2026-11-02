@@ -217,6 +217,8 @@ struct HomePaneView: View {
                             Text(r.prLabel).f(.callout).lineLimit(1)
                             if r.failed {
                                 Text("실패").f(.caption2).foregroundStyle(.red)
+                            } else if r.movedOn {
+                                Text("다시 리뷰").f(.caption2).foregroundStyle(.orange)
                             } else if let e = r.event {
                                 EventBadge(event: e)
                             }

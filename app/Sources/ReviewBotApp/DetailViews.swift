@@ -13,6 +13,7 @@ struct RunDetailView: View {
                 head
                 if run.wasSkipped { skippedBox }
                 if run.failed { failureBox }
+                if run.movedOn { movedOnBox }
                 if run.partial { partialBox }
                 if let decision = run.decision { decisionBox(decision) }
                 else if let reason = run.reason, !reason.isEmpty { verdictBox(reason) }
@@ -35,6 +36,7 @@ struct RunDetailView: View {
                 Text(run.prLabel).f(.title2, .semibold)
                 if run.wasSkipped { Text("건너뜀").f(.caption).foregroundStyle(.orange) }
                 else if run.failed { Text("실패").f(.caption).foregroundStyle(.red) }
+                else if run.movedOn { Text("다시 리뷰").f(.caption).foregroundStyle(.orange) }
                 else { EventBadge(event: run.event) }
                 if run.degraded == true {
                     Text("강등 게시").f(.caption2).foregroundStyle(.orange)
@@ -80,6 +82,11 @@ struct RunDetailView: View {
 
     private var failureBox: some View {
         box(.red, "리뷰가 실패했습니다", run.error ?? "")
+    }
+
+    private var movedOnBox: some View {
+        box(.orange, "리뷰 도중 커밋이 바뀌어 중단했습니다 — 다음 틱에 새 head 로 다시 리뷰합니다",
+            run.error ?? "")
     }
 
     private var partialBox: some View {

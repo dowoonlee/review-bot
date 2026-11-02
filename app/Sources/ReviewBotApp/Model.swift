@@ -101,6 +101,8 @@ struct RunRecord: Decodable, Identifiable, Sendable {
     var lostAnchors: Int?
     var degraded: Bool?
     var postError: String?
+    /// 리뷰 도중 base/head 가 바뀌어 중단한 기록. 봇의 실패가 아니라 다음 틱의 재리뷰다.
+    var headMoved: Bool?
     /// 크기 상한에 걸려 리뷰하지 않은 경우의 사유. 리뷰 기록과 같은 파일에 섞인다.
     var skipped: String?
     var files: Int?
@@ -111,7 +113,7 @@ struct RunRecord: Decodable, Identifiable, Sendable {
     enum CodingKeys: String, CodingKey {
         case repo, number, title, account, sha, inline, demoted, dropped
         case event, reason, decision, summary, draft, posted, at, error, degraded
-        case reviewDecision, lostAnchors, skipped, files, churn
+        case reviewDecision, lostAnchors, skipped, files, churn, headMoved
         case costUSD = "cost_usd"
         case agentErrors = "agent_errors"
         case postError = "post_error"
@@ -119,7 +121,9 @@ struct RunRecord: Decodable, Identifiable, Sendable {
 
     var prLabel: String { "\(repo?.split(separator: "/").last.map(String.init) ?? "?")#\(number ?? 0)" }
     var findingCount: Int { (inline ?? 0) + (demoted ?? 0) }
-    var failed: Bool { error != nil }
+    var failed: Bool { error != nil && !movedOn }
+    /// head 가 바뀌어 중단한 기록인가. 실패 목록·빨간 표시에서 뺀다.
+    var movedOn: Bool { headMoved ?? false }
     var wasSkipped: Bool { skipped != nil }
     var partial: Bool { !(agentErrors ?? []).isEmpty }
     var date: Date? { RunRecord.stamp.date(from: at ?? "") }
