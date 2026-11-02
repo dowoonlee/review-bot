@@ -8,6 +8,12 @@ import Observation
 @MainActor
 @Observable
 final class BotStore {
+    let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "개발 빌드"
+    var updateSnapshot: UpdateSnapshot?
+    var updateError: String?
+    var checkingUpdates = false
+    var lastUpdateCheckAttempt: Date?
+    private var updateCheckTask: Task<Void, Never>?
     var runs: [RunRecord] = []
     var logLines: [LogLine] = []
     /// 지금 보고 있는 날짜. 기본은 오늘 — 지난 로그는 사용자가 고를 때만 읽는다.
@@ -87,9 +93,19 @@ final class BotStore {
         seenPRs = UserDefaults.standard.stringArray(forKey: "seenPRs").map(Set.init)
         Notifier.shared.prepare()
         readLaunchdInterval()
+        if FileManager.default.fileExists(atPath: BotPaths.state.appending(path: "update-request.json").path) {
+            Task {
+                _ = await Shell.detach([BotPaths.executable.path, "update", "--apply-pending"], cwd: BotPaths.root.path)
+            }
+        }
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 self?.refreshLocal()
+                if let self, !self.checkingUpdates,
+                   Date().timeIntervalSince1970 - max(self.updateSnapshot?.checkedAt ?? 0,
+                                                     self.lastUpdateCheckAttempt?.timeIntervalSince1970 ?? 0) > 86400 {
+                    self.updateCheckTask = Task { [weak self] in await self?.checkUpdates() }
+                }
                 if let self, self.shouldRefetchStatus(), !self.isRefreshingStatus {
                     self.statusPollTask = Task { [weak self] in await self?.refreshStatus() }
                 }
@@ -101,6 +117,7 @@ final class BotStore {
     func stop() {
         pollTask?.cancel(); pollTask = nil
         statusPollTask?.cancel(); statusPollTask = nil
+        updateCheckTask?.cancel(); updateCheckTask = nil
     }
 
     private func shouldRefetchStatus() -> Bool {
@@ -200,6 +217,7 @@ final class BotStore {
     }
 
     func refreshLocal() {
+        readUpdates()
         readHomeTasks()
         readRuns()
         readLog()

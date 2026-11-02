@@ -140,6 +140,25 @@ class EvidenceTests(unittest.TestCase):
         with mock.patch.object(reviewer, '_run', return_value={'passed': True, 'complete': True, 'inspected': []}):
             result = runtime._inspect(META, PLAN, GOOD, '/tmp', {})
         self.assertFalse(result['complete'])
+        self.assertTrue(result['missing'])
+
+    def test_confirmed_visual_defect_has_a_distinct_approval_reason(self):
+        self.assertIn('결함이 확인', runtime.approval_block(dict(
+            GOOD, visual={'status': 'failed', 'complete': True})))
+
+    def test_product_assertion_failure_is_not_retried_as_a_visual_gap(self):
+        evidence = {'cost_usd': 0}
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(runtime, '_run_browser', return_value=(
+                    {'status': 'failed', 'failureKind': 'test'}, ['/tmp/01.png'])), \
+                mock.patch.object(runtime, '_triage', return_value={
+                    'cause': 'defect', 'summary': 'wrong value', 'cost_usd': 0}):
+            runtime._screen(mock.Mock(), META, PLAN, evidence, Path(tmp), tmp, {}, lambda m: None)
+        self.assertEqual(evidence['visual']['status'], 'failed')
+        evidence.update(status='complete', tests=[], limitations=[])
+        with mock.patch.object(runtime, '_collect_once', return_value=evidence) as collect:
+            runtime.collect(META, [], '/tmp', {})
+        self.assertEqual(collect.call_count, 1)
 
 
 class BaselineTests(unittest.TestCase):
@@ -398,6 +417,47 @@ class CollectionTests(unittest.TestCase):
                 result = runtime.collect(META, [], self.temp.name, {'browserRepair': enabled})
             self.assertEqual((planner.call_count, repaired.call_count), (attempts, repairs))
             self.assertEqual(result['browser']['status'], 'passed' if enabled else 'failed')
+
+    def test_visual_gap_is_recaptured_in_same_container_without_rerunning_tests(self):
+        def command(args, *a, **kw):
+            if args[0] == 'git':
+                Path(next(arg[9:] for arg in args if arg.startswith('--output='))).touch()
+            return {'status': 'passed', 'exitCode': 0, 'output': ''}
+        def screen(container, meta, plan, evidence, *a, **kw):
+            evidence.update(browser={'status': 'passed'}, screenshots=['/tmp/01.png'],
+                            visual={'status': 'incomplete', 'summary': 'wait for modal',
+                                    'missing': ['settled modal']})
+        def repair(container, meta, plan, evidence, *a, **kw):
+            self.assertTrue(kw['visual'])
+            evidence['visual'] = {'status': 'passed', 'complete': True}
+        with mock.patch.object(runtime, '_plan', return_value=copy.deepcopy(PLAN)) as planner, \
+                mock.patch.object(runtime.Container, 'command', side_effect=command), \
+                mock.patch.object(runtime.Container, 'shell', return_value={'status': 'passed', 'exitCode': 0}) as shell, \
+                mock.patch.object(runtime, '_screen', side_effect=screen), \
+                mock.patch.object(runtime, '_repair_browser', side_effect=repair) as repaired:
+            result = runtime.collect(META, [], self.temp.name, {})
+        self.assertEqual(planner.call_count, 1)
+        self.assertEqual(repaired.call_count, 1)
+        self.assertEqual(sum(c.args[0] == 'npm test' for c in shell.call_args_list), 1)
+        self.assertEqual(result['visual']['status'], 'passed')
+
+    def test_visual_repair_preserves_scenarios_and_records_reinspection_result(self):
+        evidence = dict(copy.deepcopy(GOOD), cost_usd=0, browser={'status': 'passed'},
+                        visual={'status': 'incomplete', 'summary': 'animation', 'missing': ['settled modal']})
+        plan = copy.deepcopy(PLAN)
+        container = mock.Mock()
+        def screen(*args, **kwargs):
+            self.assertFalse(kwargs['serve'])
+            evidence['visual'] = {'status': 'failed', 'complete': True}
+        with mock.patch.object(reviewer, '_run', return_value={'browser': 'await capture("stable")',
+                                                              'changes': 'wait for final state'}) as run, \
+                mock.patch.object(runtime, '_screen', side_effect=screen):
+            runtime._repair_browser(container, META, plan, evidence, Path(self.temp.name),
+                                    self.temp.name, {}, lambda m: None, visual=True)
+        self.assertIn('settled modal', run.call_args.args[0])
+        self.assertEqual(plan['scenarios'], PLAN['scenarios'])
+        self.assertEqual(evidence['visualRepair']['previousVisual']['status'], 'incomplete')
+        self.assertEqual(evidence['visualRepair']['status'], 'failed')
 
     def test_failed_test_is_not_hidden_by_successful_browser_and_cleanup_runs(self):
         commands = []

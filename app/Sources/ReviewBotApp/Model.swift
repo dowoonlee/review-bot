@@ -79,6 +79,7 @@ struct DecisionRecord: Decodable, Sendable {
 }
 
 struct RunRecord: Decodable, Identifiable, Sendable {
+    var botVersion: String?
     var repo: String?
     var number: Int?
     var title: String?
@@ -111,7 +112,7 @@ struct RunRecord: Decodable, Identifiable, Sendable {
     var id: String { "\(repo ?? "?")#\(number ?? 0)@\(at ?? "?")" }
 
     enum CodingKeys: String, CodingKey {
-        case repo, number, title, account, sha, inline, demoted, dropped
+        case repo, number, title, account, sha, inline, demoted, dropped, botVersion
         case event, reason, decision, summary, draft, posted, at, error, degraded
         case reviewDecision, lostAnchors, skipped, files, churn, headMoved
         case costUSD = "cost_usd"
@@ -347,6 +348,7 @@ struct LiveSession: Identifiable, Sendable {
 
 /// state/drafts/<repo>-<n>.json — 리뷰를 다시 돌리지 않고 그대로 올릴 수 있는 사본.
 struct DraftPayload: Decodable, Sendable, Identifiable {
+    var botVersion: String?
     var repo: String
     var number: Int
     var title: String?
@@ -387,7 +389,7 @@ struct DraftPayload: Decodable, Sendable, Identifiable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case repo, number, title, sha, account, event, reason, body
+        case repo, number, title, sha, account, event, reason, body, botVersion
         case comments, inline, demoted, dropped, at, requestedBy, author
         case costUSD = "cost_usd"
         case overridden = "override"

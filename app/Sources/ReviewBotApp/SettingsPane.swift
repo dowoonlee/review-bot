@@ -33,6 +33,8 @@ struct SettingsPaneView: View {
                 Color.clear.frame(height: 1).id("top")
                 appearance
                 Divider()
+                UpdateSettingsView()
+                Divider()
                 posting
                 Divider()
                 InsightSettingsView()

@@ -7,7 +7,9 @@ dryRun 이 켜져 있어 게시도 하지 않는다. 설정 파일 없이 실행
 import json
 import os
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from lib.paths import HOME
+
+ROOT = str(HOME)
 
 DEFAULTS = {
     # 봇이 조회·게시에 쓸 gh 계정. null 이면 그 순간 활성인 전역 gh 계정을 따라간다 —

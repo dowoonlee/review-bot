@@ -101,9 +101,11 @@ class RepositoryToolchainTests(unittest.TestCase):
                 raise shell_error
             return {'status': 'passed', 'exitCode': 0, 'output': ''}
         with mock.patch.object(container, 'command', side_effect=command), \
-                mock.patch.object(runtime.time, 'sleep') as sleep:
+                mock.patch.object(runtime, 'time', wraps=runtime.time) as clock:
+            # Do not mock subprocess's own polling sleep through the shared module.
+            clock.sleep = mock.Mock()
             evidence = runtime._provision(container, sha, tmp, cfg or {}, {'setup': '', 'services': []}, True)
-        return evidence, seen, sleep
+        return evidence, seen, clock.sleep
 
     def repository(self, tmp):
         def git(*args):
@@ -232,10 +234,13 @@ class InspectionTests(unittest.TestCase):
         self.assertNotIn('exit 1', prompt)
         self.assertIn('limit row', prompt)
 
-    def test_missing_states_are_kept_only_when_no_defect_was_seen(self):
+    def test_uncertain_screens_are_distinct_from_confirmed_defects(self):
         result, _ = self.inspect({'passed': True, 'complete': False, 'missing': ['limit row not on screen']})
         self.assertEqual((result['status'], result['missing']), ('incomplete', ['limit row not on screen']))
         result, _ = self.inspect({'passed': False, 'complete': False, 'missing': ['limit row not on screen']})
+        self.assertEqual((result['status'], result['missing']), ('incomplete', ['limit row not on screen']))
+        result, _ = self.inspect({'passed': False, 'complete': True, 'missing': ['ignored']})
+        self.assertEqual(result['status'], 'failed')
         self.assertEqual(result['missing'], [])
         result, _ = self.inspect({'passed': True, 'complete': True, 'missing': ['ignored']})
         self.assertEqual((result['status'], result['missing']), ('passed', []))
@@ -423,10 +428,20 @@ class RecoveryTests(unittest.TestCase):
 
     def test_a_product_defect_on_screen_is_not_replanned(self):
         defect = {'status': 'complete', 'tests': [], 'limitations': [], 'screenshots': ['01.png'],
-                  'browser': {'status': 'passed'}, 'visual': {'status': 'incomplete', 'missing': []}}
+                  'browser': {'status': 'passed'}, 'visual': {'status': 'failed', 'complete': True, 'missing': []}}
         with mock.patch.object(runtime, '_collect_once', return_value=defect) as collect:
             runtime.collect(META, [], '/tmp', {})
         self.assertEqual(collect.call_count, 1)
+
+    def test_incomplete_screen_without_missing_list_still_retries_with_summary(self):
+        gap = {'status': 'complete', 'tests': [], 'limitations': [],
+               'browser': {'status': 'passed'},
+               'visual': {'status': 'incomplete', 'missing': [], 'summary': 'transition not settled'}}
+        with mock.patch.object(runtime, '_collect_once', return_value=gap) as collect:
+            result = runtime.collect(META, [], '/tmp', {'recoveryAttempts': 1})
+        self.assertEqual(collect.call_count, 2)
+        self.assertIn('transition not settled', collect.call_args.args[0]['_runtime_retry']['failures'])
+        self.assertEqual(result['visual']['status'], 'incomplete')
 
 
 if __name__ == '__main__':

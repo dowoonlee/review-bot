@@ -16,7 +16,9 @@ import time
 
 from lib import resources
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from lib.paths import HOME
+
+ROOT = str(HOME)
 STATE_DIR = os.path.join(ROOT, "state")
 WT_DIR = os.path.join(STATE_DIR, "wt")
 DRAFTS = os.path.join(STATE_DIR, "drafts")

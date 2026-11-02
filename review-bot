@@ -24,6 +24,20 @@ from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Keep the original installation path stable for launchd, shells, and the app.
+# A running process stays on one release; only the next invocation follows this.
+if __name__ == '__main__' and os.environ.get('REVIEW_BOT_NO_REDIRECT') != '1':
+    from lib import paths as _paths
+    _pointer = _paths.HOME / '.review-bot-current'
+    if _pointer.is_symlink():
+        _target = _pointer.resolve()
+        if (_target.parent != (_paths.HOME / 'state/releases').resolve()
+                or not (_target / 'review-bot').is_file()):
+            raise SystemExit('업데이트 실행 경로가 손상됐습니다. state/update.log를 확인하세요.')
+        if _target != _paths.CODE:
+            os.environ['REVIEW_BOT_HOME'] = str(_paths.HOME)
+            os.execv(sys.executable, [sys.executable, str(_target / 'review-bot')] + sys.argv[1:])
+
 from lib import agents as agents_mod
 from lib import config as cfg_mod
 from lib import github as gh
@@ -47,6 +61,8 @@ from lib import issues as issues_mod
 from lib import home_tasks
 from lib import store
 from lib import worktree
+from lib import paths
+from lib import updates
 
 SEV = cfg_mod.SEVERITY_ORDER
 MARKER = "<!-- review-bot -->"
@@ -948,6 +964,7 @@ def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge
                 "requestedBy": requester,
                 "author": (meta.get("author") or {}).get("login"),
                 "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "botVersion": paths.version(),
             }, fp, ensure_ascii=False, indent=2)
         result["draft"] = path
         result["draftPayload"] = payload_path
@@ -1403,6 +1420,10 @@ def cmd_tick(args, cfg):
     # 무관하다. stdout 이 bot.log 로 리다이렉트돼 있으면 launchd 가 띄운 것이다.
     if _same_file_as_stdout(store.LOG_TEXT):
         store.set_schedule_anchor("launchd-tick", _interval_sec())
+    if updates.pending():
+        updates.wake()
+        _log('업데이트 예약이 있어 새 틱을 시작하지 않습니다.')
+        return 0
     if store.is_paused():
         _log("일시정지 상태입니다 (state/PAUSED). `review-bot resume` 으로 해제하세요.")
         return 0
@@ -1592,6 +1613,9 @@ def _tick(cfg):
             return 1
 
     for pr in targets:
+        if updates.pending():
+            _log('업데이트 예약 — 현재 PR 처리를 마쳐 다음 PR은 업데이트 후 실행합니다.')
+            break
         if reviewed >= cap:
             _log("틱당 상한 %d건 도달 — 나머지는 다음 틱에" % cap)
             break
@@ -1677,6 +1701,10 @@ def cmd_review(args, cfg):
     버리고, 같은 PR 을 둘이 리뷰해 같은 지적을 두 번 게시하기 때문이다.
     일시정지(PAUSED)는 보지 않는다 — 손으로 부르는 명령은 사람의 의도다.
     """
+    if updates.pending():
+        updates.wake()
+        _log('업데이트가 예약되어 있습니다. 적용 완료 후 리뷰를 다시 실행하세요.')
+        return 1
     repo, number = _parse_target(args.target)
     cfg = _narrow(cfg, getattr(args, "agents", None), getattr(args, "note", None))
     if not store.acquire_lock():
@@ -2105,7 +2133,7 @@ def _agent_summary(name, model_cfg):
             "description": (meta.get("description") or "")[:100]}
 
 
-BUNDLED_AGENTS = os.path.join(cfg_mod.ROOT, "agents")
+BUNDLED_AGENTS = str(paths.CODE / 'agents')
 
 
 def cmd_setup(args, cfg):
@@ -2136,7 +2164,7 @@ def cmd_setup(args, cfg):
     # 2) config.json 이 없으면 예시에서 만든다
     cfg_path = args.config or os.path.join(cfg_mod.ROOT, "config.json")
     if not os.path.exists(cfg_path):
-        example = os.path.join(cfg_mod.ROOT, "config.example.json")
+        example = str(paths.CODE / 'config.example.json')
         if os.path.exists(example):
             shutil.copyfile(example, cfg_path)
             steps.append("설정 %s (예시에서 복사 — repos 를 채우세요)" % cfg_path)
@@ -2651,12 +2679,53 @@ def cmd_insights(args, cfg):
     return 0
 
 
+def cmd_update(args, cfg):
+    try:
+        if args.self_check:
+            # Imports above validate the CLI engine without executing user code or network calls.
+            print(json.dumps({'version': paths.version(), 'protocol': updates.PROTOCOL,
+                              'stateSchema': updates.STATE_SCHEMA}))
+            return 0
+        if args.apply_pending:
+            updates.apply_pending()
+            return 0
+        if args.check:
+            result = updates.check()
+        elif args.status:
+            result = updates.status()
+        elif args.cancel:
+            result = updates.cancel()
+        else:
+            result = updates.request(args.version, args.app_path, rollback=args.rollback)
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False))
+        else:
+            print('설치 버전: ' + result['installedVersion'])
+            if result.get('latest'):
+                print('최신 릴리스: ' + result['latest']['version'])
+            print(result.get('message') or ('새 버전이 있습니다.' if result.get('available') else '최신 버전입니다.'))
+        return 0
+    except (updates.UpdateError, OSError, ValueError, KeyError) as exc:
+        print(json.dumps({'error': str(exc)}, ensure_ascii=False) if args.json else str(exc))
+        return 1
+
+
 def main():
     _install_signal_handlers()
     ap = argparse.ArgumentParser(prog="review-bot", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", help="설정 파일 경로")
+    ap.add_argument('--version', action='version', version='review-bot ' + paths.version())
     sub = ap.add_subparsers(dest="cmd")
+    update = sub.add_parser('update', help='정식 릴리스 확인·현재 PR 완료 후 업데이트')
+    actions = update.add_mutually_exclusive_group()
+    for flag in ('check', 'status', 'cancel', 'rollback', 'apply-pending', 'self-check'):
+        actions.add_argument('--' + flag, action='store_true',
+                             help=argparse.SUPPRESS if flag in ('apply-pending', 'self-check') else None)
+    update.add_argument('--version', help='설치할 정식 릴리스 태그 (생략하면 최신 버전)')
+    update.add_argument('--app-path', help='함께 업데이트할 ReviewBot.app 경로')
+    update.add_argument('--json', action='store_true')
+    update.set_defaults(fn=cmd_update)
     sub.add_parser("tick").set_defaults(fn=cmd_tick)
     task = sub.add_parser("task", help="홈 할 일의 작업 시작·완료·다시 열기")
     task.add_argument("action", choices=["start", "complete", "reopen", "cancel", "stop"])
@@ -2764,7 +2833,7 @@ def main():
     if not getattr(args, "fn", None):
         ap.print_help()
         return 0
-    return args.fn(args, cfg_mod.load(args.config))
+    return args.fn(args, {} if args.cmd == 'update' else cfg_mod.load(args.config))
 
 
 if __name__ == "__main__":

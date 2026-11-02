@@ -11,13 +11,27 @@ APP="ReviewBot.app"
 SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
 SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"
 BUILD_ARGS=(--build-system native --sdk "$SDK_PATH" -c "$CONFIG")
-BIN="$(xcrun swift build "${BUILD_ARGS[@]}" --show-bin-path)/ReviewBotApp"
 
 echo "▸ 빌드 ($CONFIG, native, SDK $SDK_VERSION)"
-xcrun swift build "${BUILD_ARGS[@]}"
+if [ "${REVIEW_BOT_UNIVERSAL:-0}" = "1" ]; then
+    # --arch switches recent SwiftPM back to swiftbuild, which stamps SDK 14.0.
+    # Explicit triples keep the native driver for both slices before lipo merges them.
+    SLICES=()
+    for ARCH in arm64 x86_64; do
+        TRIPLE="$ARCH-apple-macosx14.0"
+        xcrun swift build "${BUILD_ARGS[@]}" --triple "$TRIPLE"
+        SLICES+=("$(xcrun swift build "${BUILD_ARGS[@]}" --triple "$TRIPLE" --show-bin-path)/ReviewBotApp")
+    done
+    mkdir -p .build/review-bot-universal
+    BIN="$(pwd)/.build/review-bot-universal/ReviewBotApp"
+    xcrun lipo -create "${SLICES[@]}" -output "$BIN"
+else
+    BIN="$(xcrun swift build "${BUILD_ARGS[@]}" --show-bin-path)/ReviewBotApp"
+    xcrun swift build "${BUILD_ARGS[@]}"
+fi
 
 # Check the linked artifact before replacing either the bundle or installed app.
-BUILT_SDK="$(xcrun otool -l "$BIN" | awk '/LC_BUILD_VERSION/ { found=1 } found && $1 == "sdk" { print $2; exit }')"
+BUILT_SDK="$(xcrun otool -l "$BIN" | awk '/LC_BUILD_VERSION/ { found=1 } found && $1 == "sdk" { print $2; found=0 }')"
 python3 - "$SDK_VERSION" "$BUILT_SDK" <<'PYSDK'
 import sys
 
@@ -26,7 +40,8 @@ def version(value):
     return tuple((parts + [0, 0])[:3])
 
 try:
-    matches = version(sys.argv[1]) == version(sys.argv[2])
+    slices = sys.argv[2].split()
+    matches = bool(slices) and all(version(sys.argv[1]) == version(sdk) for sdk in slices)
 except ValueError:
     matches = False
 if not matches:
@@ -67,6 +82,17 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+python3 - "$APP/Contents/Info.plist" ../VERSION <<'PYVERSION'
+import plistlib, sys
+from pathlib import Path
+target = Path(sys.argv[1])
+data = plistlib.loads(target.read_bytes())
+version = Path(sys.argv[2]).read_text().strip()
+data['CFBundleShortVersionString'] = version
+data['CFBundleVersion'] = version
+target.write_bytes(plistlib.dumps(data))
+PYVERSION
+
 # 서명 신원은 좋은 것부터 고른다. Apple 이 발급한 인증서가 있으면 알림 센터까지 열리고,
 # 자체 서명이면 신원만 안정된다(빌드마다 권한이 초기화되지 않는다). 둘 다 없으면 ad-hoc.
 pick_identity() {
@@ -76,14 +102,17 @@ pick_identity() {
     done
     echo "-"
 }
-IDENTITY="$(pick_identity)"
+IDENTITY="${REVIEW_BOT_SIGN_IDENTITY:-$(pick_identity)}"
 if [ "$IDENTITY" = "-" ]; then
     echo "▸ 서명: ad-hoc (신원 없음 — ./setup-signing.sh 로 만들 수 있습니다)"
 else
     echo "▸ 서명: $IDENTITY"
 fi
-codesign --force --deep --sign "$IDENTITY" "$APP" >/dev/null 2>&1 \
-    || echo "  (서명 실패 — 서명 없이 진행합니다)"
+SIGN_ARGS=(--force --deep --sign "$IDENTITY")
+case "$IDENTITY" in
+    "Developer ID Application"*) SIGN_ARGS+=(--options runtime --timestamp) ;;
+esac
+codesign "${SIGN_ARGS[@]}" "$APP"
 
 # /Applications 에 이미 설치돼 있으면 거기까지 갱신한다. 빌드본과 설치본이 갈라져서
 # "고쳤는데 그대로다" 가 되는 것을 막는다. --no-install 로 끌 수 있다.

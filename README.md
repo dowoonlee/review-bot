@@ -91,6 +91,58 @@ open -a ReviewBot
 
 상태 · 초안 · 라이브 세션 · 설정을 한 화면에서 봅니다. 자세한 것은 [메뉴바 앱](#메뉴바-앱).
 
+### 업데이트
+
+설정의 **업데이트**에서 앱·봇 버전과 새 릴리스의 변경 사항을 확인하고 **업데이트 예약**을
+누릅니다. 앱은 하루 한 번 최신 정식 릴리스를 확인하지만 설치는 사용자가 선택할 때만 합니다.
+실행 중이면 현재 PR을 끝낸 뒤 다음 PR에 들어가기 전에 적용합니다. 앱을 닫아도 예약은 유지됩니다.
+적용 후 **앱 다시 시작**을 누르면 새 앱으로 열립니다.
+
+```bash
+review-bot --version
+review-bot update --check                  # 최신 정식 릴리스 확인
+review-bot update                          # 최신 버전 예약 (실행 중이면 현재 PR 완료 후)
+review-bot update --version v1.2.0          # 확인한 특정 새 버전 예약
+review-bot update --status --json          # 준비·대기·적용·실패 상태
+review-bot update --cancel                 # 적용 전 예약 취소
+review-bot update --rollback               # 이전 앱과 봇으로 복구
+```
+
+로컬 수정·추가 파일이 있는 Git 설치본과 변경된 배포 파일은 자동으로 덮어쓰지 않습니다.
+설정(`config.json`), 이력·초안(`state/`), `~/.claude/agents/`의 사용자 리뷰어 정의는 유지합니다.
+업데이트는 `state/releases/`에 준비한 코드로 `.review-bot-current` 실행 경로를 전환합니다.
+기존 CLI·launchd 경로는 그대로 사용하며, 실패하면 앱과 실행 경로를 이전 상태로 돌립니다.
+진행 로그는 `state/update.log`에 남습니다. 데이터 형식 변경이 필요한 릴리스는 자동 적용을 거절합니다.
+
+초안과 실행 이력에는 생성한 봇 버전이 표시됩니다. **업데이트만으로 이전 초안이 다시 생성되지는 않습니다.**
+예전 초안에 버전 기록이 없으면 추정하지 않고 표시합니다.
+
+업데이트 기능이 없는 기존 설치는 깨끗한 Git 작업 트리에서 한 번 `git pull --ff-only`로
+이 기능이 포함된 버전을 받고 메뉴바 앱을 다시 빌드·설치해야 합니다. 이후에는 위 업데이트 흐름을 씁니다.
+공개된 정식 Release와 배포 파일이 아직 없다면 업데이트할 수 없습니다.
+
+### 배포자: 새 버전 준비
+
+`VERSION`을 올리고 변경·테스트를 커밋한 깨끗한 체크아웃에서 준비합니다. 아래 명령은
+빌드·패키징만 하며 GitHub에 게시하지 않습니다.
+
+```bash
+REVIEW_BOT_UNIVERSAL=1 app/build.sh release --no-install
+python3 scripts/package-release.py
+```
+
+패키지는 `dist/review-bot-macos-universal.zip`과 SHA256 파일입니다. 봇·프롬프트·번들 리뷰어·앱을
+한 묶음으로 만들고 앱과 봇의 버전 일치를 확인합니다. 설정·실행 자료와 Git 미추적 파일은 넣지 않습니다.
+공개 배포는 Developer ID 서명·공증을 마친 앱으로 패키징하세요. 빌드 신원은
+`REVIEW_BOT_SIGN_IDENTITY`로 지정할 수 있습니다. 배포 방식은
+[Apple의 서명·공증 안내](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)를 따릅니다.
+로컬 ad-hoc 빌드는 개발 검증용이며, 다른 Mac에서의 Gatekeeper 통과를 보장하지 않습니다.
+
+버전과 일치하는 `vX.Y.Z` 태그의 GitHub Release를 만들고 ZIP을 첨부한 뒤 정식으로 공개합니다.
+업데이터는 `dowoonlee/review-bot`의 공개된 정식 릴리스만 사용하고, 다운로드를
+[GitHub Release 자산의 SHA256 digest](https://github.blog/changelog/2025-06-03-releases-now-expose-digests-for-release-assets/)와 대조합니다.
+초안·시험판·버전 불일치·지원하지 않는 데이터 형식은 설치하지 않습니다.
+
 ### 자주 바꾸는 것
 
 | 하고 싶은 것 | 방법 |
@@ -516,6 +568,12 @@ Apple Development. 그 뒤 `./build.sh` 를 다시 돌리면 그 신원을 알�
 | 명령 | 하는 일 |
 |---|---|
 | `review-bot setup` | 번들 리뷰어를 `~/.claude/agents/` 에 설치하고 `config.json` 을 예시에서 만듭니다. `--force` 는 리뷰어 정의 덮어쓰기 |
+| `review-bot --version` | 현재 실행하는 봇 버전 |
+| `review-bot update [--version vX.Y.Z]` | 현재 PR 완료 후 새 정식 버전 적용 예약 |
+| `review-bot update --check` | 최신 정식 릴리스·변경 사항 확인 |
+| `review-bot update --status [--json]` | 업데이트 진행 상태 |
+| `review-bot update --cancel` | 적용 전 예약 취소 |
+| `review-bot update --rollback` | 이전 앱·봇으로 복구 예약 |
 | `review-bot setup --launchd --interval 15` | 이 설치 위치로 launchd plist 를 만듭니다 (분 단위) |
 | `review-bot repo add owner/repo [--path 클론] [--account 계정]` | 감시 저장소 등록. `list` · `remove` · `enable` · `disable` 도 있습니다 |
 | `review-bot account set <gh 계정>` | 게시에 쓸 gh 계정 고정. `list` · `clear` |
@@ -931,7 +989,12 @@ head 의 오류 줄이 모두 base 출력에도 있으면 `baseline`, 새 오류
 
 화면 검증자는 브라우저 실행 결과와 스크린샷만 받고 화면만 판정합니다. 단위·백엔드
 테스트 실패는 따로 승인을 막으므로, 그것 때문에 정상인 화면이 "미완료"로 흐려지지
-않습니다. 결함은 없지만 어떤 시나리오 상태가 스크린샷에 없으면 `missing` 으로 보고하고,
+않습니다. 캡처에는 Playwright의 `animations: 'disabled'`를 적용해 전환 중간 화면을 줄입니다.
+확인된 화면 결함은 `visual.status=failed`, 촬영 시점이나 빠진 화면 때문에 판단할 수 없는 경우는
+`incomplete`로 구분합니다. 증거 부족은 브라우저 실행이 성공했어도 같은 환경에서 스크립트를
+한 번 보완해 재촬영합니다(`browserRepair`). 그래도 미완료이면 `missing` 목록이 비었더라도
+복구 한도 안에서 재계획하며, 끝내 확인하지 못하면 승인을 계속 막습니다.
+결함은 없지만 어떤 시나리오 상태가 스크린샷에 없으면 `missing` 으로 보고하고,
 봇은 이를 계획 문제로 보아 빠진 상태를 알려 주며 브라우저 계획을 다시 짜게 합니다
 (복구 한도 안에서). 브라우저 단언이 스크립트 문제로 분류되면 복구 시도로 넘어가기 전에
 (`review.runtime.browserRepair`, 기본 `true`), 같은 컨테이너와 이미 떠 있는 앱 서버에서 스크립트만

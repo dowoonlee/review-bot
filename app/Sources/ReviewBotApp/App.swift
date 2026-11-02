@@ -19,6 +19,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct ReviewBotEntry {
     @MainActor static func main() async {
         let args = CommandLine.arguments
+        if args.count == 2 && args[1] == "--version" {
+            print(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unversioned")
+            return
+        }
         if args.count > 1 && args[1] == "--insight-key-fd" { exit(2) }
         if args.count > 1 && ["--insight-api", "--jev-api"].contains(args[1]) {
             guard args.count == 2 else { exit(2) }

@@ -129,6 +129,38 @@ class ReviewTests(unittest.TestCase):
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_empty_added_file_is_covered_but_binary_and_missing_diff_are_not(self):
+        import subprocess
+        from lib import policy
+        with tempfile.TemporaryDirectory() as directory:
+            def git(*args):
+                return subprocess.check_output(['git', '-C', directory, '-c', 'core.hooksPath=/dev/null',
+                    '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', *args],
+                    stderr=subprocess.DEVNULL, text=True).strip()
+            git('init')
+            git('commit', '--allow-empty', '-m', 'base')
+            base = git('rev-parse', 'HEAD')
+            (Path(directory) / '__init__.py').touch()
+            (Path(directory) / 'binary.dat').write_bytes(b'\x00binary')
+            git('add', '.')
+            git('commit', '-m', 'head')
+            head = git('rev-parse', 'HEAD')
+            files = [dict(filename=name, status='added', additions=0, deletions=0,
+                          _patch_error='old error')
+                     for name in ('__init__.py', 'binary.dat', 'missing.py')]
+            recovered = worktree.complete_patches(directory, head, base, files)
+            self.assertIn('new file mode', recovered[0]['patch'])
+            self.assertNotIn('_patch_error', recovered[0])
+            self.assertEqual(github.added_lines(recovered[0]['patch']), set())
+            self.assertEqual(worktree.complete_patches(directory, head, base, recovered), recovered)
+            _, missing = batches.plan(recovered)
+            self.assertEqual([f['path'] for f in missing], ['binary.dat', 'missing.py'])
+            _, empty_missing = batches.plan(recovered[:1])
+            self.assertEqual(empty_missing, [])
+            self.assertEqual(policy.coverage_block({'coverage': {'complete': True,
+                                                                     'unavailable': empty_missing}}), '')
+            self.assertTrue(policy.coverage_block({'coverage': {'unavailable': missing}}))
+
     def test_missing_and_truncated_patches_are_recovered_from_pinned_git(self):
         import subprocess
         with tempfile.TemporaryDirectory() as directory:

@@ -145,6 +145,7 @@ struct RunDetailView: View {
         VStack(alignment: .leading, spacing: 3) {
             Divider().padding(.vertical, 4)
             metaRow("시각", run.at ?? "-")
+            metaRow("생성한 봇", run.botVersion ?? "버전 기록 없음")
             metaRow("계정", run.account ?? "-")
             metaRow("커밋", String((run.sha ?? "-").prefix(12)))
             if let d = run.reviewDecision { metaRow("PR 유효 판정", d.isEmpty ? "없음" : d) }
@@ -579,6 +580,12 @@ struct DraftDetailView: View {
             .f(.caption).foregroundStyle(.secondary)
             Text("인라인 \(draft.inline ?? 0) · 본문 \(draft.demoted ?? 0) · \(draft.at ?? "-") · 커밋 \(String((draft.sha ?? "-").prefix(12)))")
                 .f(.caption, mono: true).foregroundStyle(.secondary)
+            Text("생성한 봇: \(draft.botVersion ?? "버전 기록 없음") · 현재 설치: \(store.installedBotVersion)")
+                .f(.caption).foregroundStyle(.secondary)
+            if let version = draft.botVersion, version != store.installedBotVersion {
+                Text("현재 설치와 다른 버전에서 만든 초안입니다. 업데이트만으로 초안이 다시 생성되지는 않습니다.")
+                    .f(.caption).foregroundStyle(.orange)
+            }
         }
     }
 

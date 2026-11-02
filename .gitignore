@@ -2,8 +2,11 @@ state/
 config.json
 __pycache__/
 *.pyc
+.review-bot-current*
+dist/
 
-# 앱 빌드 산출물 — 절대경로가 박혀 있어 배포하면 안 된다
+# 앱 빌드 산출물 — Git 대신 검증된 릴리스 ZIP으로 배포한다
+.build/
 app/.build/
 app/*.app/
 

@@ -19,7 +19,9 @@ import urllib.request
 
 from lib import secrets
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from lib.paths import HOME
+
+ROOT = str(HOME)
 STATE_DIR = os.path.join(ROOT, "state")
 CONFIG_PATH = os.path.join(STATE_DIR, "mcp-repomind.json")
 

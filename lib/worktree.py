@@ -13,7 +13,9 @@ import subprocess
 
 from lib import resources
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from lib.paths import HOME
+
+ROOT = str(HOME)
 WT_DIR = os.path.join(ROOT, "state", "wt")
 CACHE_DIR = os.path.join(ROOT, "state", "repos")
 
@@ -258,7 +260,17 @@ def complete_patches(base, head_sha, base_sha, files, env=None):
         start = next((i for i, line in enumerate(lines) if HEADER.match(line)), None)
         recovered = dict(item, patch=''.join(lines[start:]) if start is not None else '')
         if start is None:
-            recovered['_patch_error'] = ('바이너리 diff' if 'Binary files ' in raw else '텍스트 hunk 없음 (이름·모드 변경 등)')
+            # Empty package markers have a real diff, but no text hunk. Verify
+            # the pinned blob before treating the metadata as complete evidence.
+            empty_added = (item.get('status') == 'added'
+                           and item.get('additions') == 0 and item.get('deletions') == 0
+                           and any(line.startswith('new file mode ') for line in lines)
+                           and _git(base, ['cat-file', '-s', head_sha + ':' + item['filename']]) == '0')
+            if empty_added:
+                recovered['patch'] = raw
+                recovered.pop('_patch_error', None)
+            else:
+                recovered['_patch_error'] = ('바이너리 diff' if 'Binary files ' in raw else '텍스트 hunk 없음 (이름·모드 변경 등)')
         elif not complete(recovered):
             raise WorktreeError('API 파일 통계와 고정 커밋 diff가 다릅니다: ' + item['filename'])
         result.append(recovered)

@@ -5,7 +5,9 @@ import os
 import time
 from contextlib import contextmanager
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from lib.paths import HOME
+
+ROOT = str(HOME)
 STATE_DIR = os.path.join(ROOT, "state")
 REVIEWED = os.path.join(STATE_DIR, "reviewed.json")
 LOG = os.path.join(STATE_DIR, "runs.jsonl")
@@ -216,6 +218,8 @@ def read_day_log(day=None, max_lines=4000):
 def log_run(record):
     _ensure()
     record = dict(record)
+    from lib.paths import version
+    record.setdefault('botVersion', version())
     record.setdefault("at", time.strftime("%Y-%m-%dT%H:%M:%S"))
     with open(LOG, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")

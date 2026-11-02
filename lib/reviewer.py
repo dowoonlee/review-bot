@@ -22,9 +22,11 @@ from lib import agents as agents_mod
 from lib import config as cfg_mod
 from lib import policy
 
+from lib.paths import HOME
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROMPT_PATH = os.path.join(ROOT, "prompts", "review.md")
-STATE_DIR = os.path.join(ROOT, "state")
+STATE_DIR = os.path.join(str(HOME), "state")
 
 # 리뷰는 읽기만 한다.
 #
