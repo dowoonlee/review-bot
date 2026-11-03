@@ -546,7 +546,17 @@ struct DraftDetailView: View {
             Button(publishLabel, role: .destructive) { Task { await store.publish(draft) } }
             Button("취소", role: .cancel) {}
         } message: {
-            Text("\(publishConsequence)\n\n여기 보이는 그대로 \(draft.repo)#\(String(draft.number)) 에 올라갑니다. 리뷰를 다시 돌리지는 않습니다. 초안을 만든 뒤 새 커밋이 올라왔다면 봇이 게시를 거절합니다.")
+            Text("\(publishConsequence)\n\n여기 보이는 그대로 \(draft.repo)#\(String(draft.number)) 에 올라갑니다. 리뷰를 다시 돌리지는 않습니다. 초안을 만든 뒤 새 커밋이 올라왔다면 게시가 실패하고, 다시 리뷰할지 묻습니다.")
+        }
+        // 게시가 새 커밋 때문에 실패했다 — 낡은 좌표로 올리지 않고 새 head 로 다시 리뷰할지 묻는다.
+        .confirmationDialog("게시 실패 — 새 커밋이 올라왔습니다", isPresented: staleAsked) {
+            Button("새 커밋으로 다시 리뷰") {
+                store.stalePublish = nil
+                Task { await store.review(draft.repo, draft.number) }
+            }
+            Button("나중에", role: .cancel) { store.stalePublish = nil }
+        } message: {
+            Text("초안을 만든 뒤 \(draft.repo)#\(String(draft.number)) 에 새 커밋이 올라와 인라인 좌표가 어긋날 수 있어 게시하지 않았습니다.\n\n새 커밋 기준으로 다시 리뷰해 초안을 맞출까요? 게시 방식을 바꿔 두었다면 그 방식으로 방향을 정한 채 다시 리뷰합니다.")
         }
     }
 
@@ -663,6 +673,9 @@ struct DraftDetailView: View {
                 Task { await store.review(draft.repo, draft.number) }
             } label: { Label("다시 리뷰", systemImage: "arrow.clockwise") }
                 .disabled(store.busy != nil || store.health == .running)
+                .help(draft.overridden != nil
+                      ? "바꿔 둔 게시 방식(\(eventLabel(draft.event ?? "COMMENT")))으로 방향을 정한 채 다시 리뷰합니다"
+                      : "")
 
             // 읽어 보니 봇의 판정과 다르게 올리고 싶을 때 — 승인·코멘트·변경 요청 중
             // 지금 것을 뺀 나머지를 고른다. 파일만 바뀌고 올라가는 건 여전히 위의
@@ -685,6 +698,14 @@ struct DraftDetailView: View {
             if store.busy != nil { ProgressView().controlSize(.small) }
         }
         .buttonStyle(.bordered)
+    }
+
+    private var staleAsked: Binding<Bool> {
+        Binding(
+            get: { store.stalePublish?.repo == draft.repo && store.stalePublish?.number == draft.number },
+            set: { if !$0, store.stalePublish?.repo == draft.repo, store.stalePublish?.number == draft.number {
+                store.stalePublish = nil
+            } })
     }
 
     private var reviewingThisPR: Bool {

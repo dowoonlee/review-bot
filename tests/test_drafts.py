@@ -116,5 +116,26 @@ class DraftEventTests(DraftReconciliationTests):
         self.assertEqual(draft['decision']['judgeEvent'], 'COMMENT')
 
 
+class DraftIntentTests(DraftReconciliationTests):
+    def test_only_a_person_chosen_event_is_carried_into_a_rereview(self):
+        self.assertIsNone(drafts.user_intent('o/r', 1))          # 초안 없음
+        self.draft(1)
+        self.assertIsNone(drafts.user_intent('o/r', 1))          # 봇 판정 그대로
+        drafts.set_event('o/r', 1, 'REQUEST_CHANGES')
+        self.assertEqual(drafts.user_intent('o/r', 1), 'REQUEST_CHANGES')
+        drafts.set_event('o/r', 1, 'COMMENT')                      # 봇 판정으로 되돌림
+        self.assertIsNone(drafts.user_intent('o/r', 1))
+
+    def test_carried_intent_is_kept_for_the_next_rereview_until_reverted(self):
+        path = self.draft(2)
+        d = json.loads(path.read_text())
+        d.update(event='COMMENT', intent='COMMENT',
+                 override={'from': 'REQUEST_CHANGES', 'reason': 'guard', 'decision': {}})
+        path.write_text(json.dumps(d))
+        self.assertEqual(drafts.user_intent('o/r', 2), 'COMMENT')
+        drafts.set_event('o/r', 2, 'REQUEST_CHANGES')               # 봇 결론으로 되돌림
+        self.assertIsNone(drafts.user_intent('o/r', 2))
+
+
 if __name__ == '__main__':
     unittest.main()

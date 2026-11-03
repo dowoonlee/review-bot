@@ -664,8 +664,11 @@ CI_LABEL = {
 }
 
 
-def judge(meta, payload, findings, allowed_events, model="sonnet", timeout=180):
+def judge(meta, payload, findings, allowed_events, model="sonnet", timeout=180, intent=None):
     """리뷰 결과를 놓고 event 와 지적별 게시 형태를 정한다.
+
+    `intent` 는 사람이 이전 초안에서 고른 게시 방식이다. 주어지면 event 는 그것으로
+    고정하고, 판정은 그 방향을 작성자에게 설명하는 사유와 지적 배치만 정한다.
 
     코드를 다시 읽지 않는다. 리뷰어들이 남긴 근거의 질을 보고 판단하는 메타
     단계라, 툴 없이 한 턴으로 끝나며 리뷰 본체에 비해 비용이 미미하다.
@@ -710,6 +713,8 @@ def judge(meta, payload, findings, allowed_events, model="sonnet", timeout=180):
         ci=CI_LABEL.get(ci, ci),
         execution_evidence=evidence_block(meta, for_judge=True),
         allowed_events=", ".join(allowed_events))
+    if intent:
+        prompt += INTENT_NOTE.format(event=intent, label=INTENT_LABEL.get(intent, intent))
 
     retry_cost = 0
     for attempt in range(3):
@@ -733,13 +738,25 @@ def judge(meta, payload, findings, allowed_events, model="sonnet", timeout=180):
             if p.get('disposition') in policy.DISPOSITIONS and p.get('why'):
                 dispositions[p['id']] = {'disposition': p['disposition'],
                                          'dispositionReason': str(p['why'])}
-    return {"event": str(out.get("event") or "COMMENT").upper(),
+    return {"event": intent or str(out.get("event") or "COMMENT").upper(),
             "reason": (out.get("reason") or "").strip(),
             "placements": places,
             "dispositions": dispositions,
             "dropReasons": drop_reasons,
             "coverageExceptions": out.get('coverageExceptions') if isinstance(out.get('coverageExceptions'), dict) else {},
             "cost_usd": (out.get("_meta") or {}).get("cost_usd")}
+
+
+INTENT_LABEL = {"APPROVE": "승인", "REQUEST_CHANGES": "변경 요청", "COMMENT": "코멘트"}
+INTENT_NOTE = """
+
+# 사람이 정한 게시 방식
+이전 초안을 읽은 사람이 이 PR 을 **{label}({event})**(으)로 게시하기로 정했습니다.
+event 는 반드시 "{event}" 로 두세요. reason 은 왜 {label} 인지 PR 작성자에게 설명하는
+문장으로, 위 지적과 실행 근거에서 그 방향을 뒷받침하는 내용을 짚어 쓰세요.
+방향에 맞추려고 지적을 부풀리거나 지우지 마세요 — placement·disposition 은 근거대로
+정합니다. 근거가 그 방향과 어긋나면 reason 에 그 사실을 숨기지 말고 적으세요.
+"""
 
 
 VERIFY_PROMPT = os.path.join(ROOT, "prompts", "verify.md")

@@ -546,14 +546,16 @@ final class BotStore {
     }
 
     /// 봇 커맨드 하나를 돌리고 끝나면 상태를 다시 읽는다. 금방 끝나는 것만 여기로.
-    func run(_ args: [String], label: String) async {
-        guard busy == nil else { return }
+    @discardableResult
+    func run(_ args: [String], label: String) async -> Shell.Result? {
+        guard busy == nil else { return nil }
         busy = label
         defer { busy = nil }
         let result = await Shell.run([BotPaths.executable.path] + args, cwd: BotPaths.root.path)
         lastCommandOutput = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
         refreshLocal()
         await refreshStatus()
+        return result
     }
 
     // MARK: 집계
@@ -670,9 +672,17 @@ final class BotStore {
         await run(["account", "clear"], label: "계정 지정 해제")
     }
 
+    /// `review-bot` 의 PUBLISH_STALE — 초안 이후 새 커밋이 올라와 게시를 거절했다.
+    static let publishStaleExit: Int32 = 3
+
+    /// 새 커밋 때문에 게시가 실패한 초안. 화면이 이것을 보고 다시 리뷰할지 묻는다.
+    var stalePublish: DraftPayload?
+
     func publish(_ draft: DraftPayload) async {
-        await run(["publish", "\(draft.repo)#\(draft.number)"], label: "초안 게시")
+        let result = await run(["publish", "\(draft.repo)#\(draft.number)"], label: "초안 게시")
+        if result?.code == Self.publishStaleExit { stalePublish = draft }
     }
+
 
     /// 초안의 이벤트만 바꾼다. 파일만 고치므로 GitHub 에는 아무것도 나가지 않는다.
     func setDraftEvent(_ draft: DraftPayload, _ event: String) async {

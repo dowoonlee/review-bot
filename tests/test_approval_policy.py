@@ -77,6 +77,37 @@ class DecisionTests(unittest.TestCase):
             result = reviewer.judge(META, {}, [self.finding('optional')], ['APPROVE'])
         self.assertEqual(result['dispositions'][0]['disposition'], 'optional')
 
+    def test_judge_keeps_the_event_a_person_chose_and_tells_the_model(self):
+        out = {'event': 'COMMENT', 'reason': 'r', 'findings': []}
+        with mock.patch.object(reviewer, '_run', return_value=out) as run:
+            result = reviewer.judge(META, {}, [self.finding('optional')], ['APPROVE', 'COMMENT', 'REQUEST_CHANGES'],
+                                    intent='REQUEST_CHANGES')
+        self.assertEqual(result['event'], 'REQUEST_CHANGES')
+        self.assertIn('변경 요청(REQUEST_CHANGES)', run.call_args[0][0])
+        with mock.patch.object(reviewer, '_run', return_value=out) as run:
+            self.assertEqual(reviewer.judge(META, {}, [], ['COMMENT'])['event'], 'COMMENT')
+        self.assertNotIn('사람이 정한 게시 방식', run.call_args[0][0])
+
+    def test_intent_survives_a_guard_and_leaves_the_bot_verdict_to_revert_to(self):
+        quiet = mock.patch.dict(self.bot['_carry_intent'].__globals__, {'_log': lambda *a: None})
+        quiet.start(); self.addCleanup(quiet.stop)
+        verdict = {'event': 'REQUEST_CHANGES', 'reason': '코멘트로 내는 이유', 'guard': 'P2 2건이 있어 변경을 요청합니다.'}
+        result = {'reason': 'x', 'decision': {'judgeEvent': 'COMMENT', 'finalEvent': 'REQUEST_CHANGES', 'reasons': []}}
+        override = self.bot['_carry_intent']('COMMENT', verdict, result)
+        self.assertEqual((verdict['event'], verdict['guard'], result['event']), ('COMMENT', '', 'COMMENT'))
+        self.assertEqual(override['from'], 'REQUEST_CHANGES')
+        self.assertEqual(override['reason'], 'P2 2건이 있어 변경을 요청합니다.')
+        self.assertEqual(result['decision']['finalEvent'], 'COMMENT')
+        self.assertEqual(result['decision']['reasons'][-1]['code'], 'HUMAN_OVERRIDE')
+
+    def test_intent_the_judge_already_followed_needs_no_override(self):
+        quiet = mock.patch.dict(self.bot['_carry_intent'].__globals__, {'_log': lambda *a: None})
+        quiet.start(); self.addCleanup(quiet.stop)
+        verdict = {'event': 'REQUEST_CHANGES', 'reason': 'r', 'guard': ''}
+        result = {'reason': 'r', 'decision': {'finalEvent': 'REQUEST_CHANGES', 'reasons': []}}
+        self.assertIsNone(self.bot['_carry_intent']('REQUEST_CHANGES', verdict, result))
+        self.assertEqual(result['decision']['reasons'][-1]['code'], 'HUMAN_INTENT')
+
     def test_judge_reports_why_a_finding_was_dropped(self):
         out = {'event': 'APPROVE', 'findings': [
             {'id': 0, 'placement': 'drop', 'dropReason': 'Duplicate'},

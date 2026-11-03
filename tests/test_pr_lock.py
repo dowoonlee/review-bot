@@ -95,6 +95,27 @@ class PublishLockTests(PRLockTests):
         self.assertEqual(json.loads(Path(store.draft_payload_path('o/r', 1)).read_text())['event'], 'COMMENT')
         self.assertEqual(json.loads(Path(store.draft_payload_path('o/r', 2)).read_text())['event'], 'APPROVE')
 
+    def test_publish_on_a_moved_head_fails_loudly_and_keeps_the_draft(self):
+        Path(store.draft_payload_path('o/r', 9102)).write_text(json.dumps(
+            {'repo': 'o/r', 'number': 9102, 'title': 't', 'sha': 'old', 'baseSha': 'base',
+             'event': 'REQUEST_CHANGES', 'comments': [{'path': 'a.py', 'line': 1, 'body': 'x'}]}))
+        cfg = {'repos': {'o/r': {'account': 'me'}}, 'post': {}}
+        post = mock.Mock()
+        with mock.patch.object(github, 'whoami', return_value='me'), \
+                mock.patch.object(github, 'pr_meta', return_value={
+                    'state': 'OPEN', 'headRefOid': 'new', 'baseRefOid': 'base'}), \
+                mock.patch.object(github, 'post_review', post), \
+                mock.patch.object(store, 'LOG', str(self.root / 'runs.jsonl')):
+            code = self.bot['_publish']('o/r', 9102, cfg)
+        self.assertEqual(code, self.bot['PUBLISH_STALE'])
+        self.assertNotEqual(code, 2, 'argparse 사용 오류와 같은 코드면 앱이 둘을 구분하지 못한다')
+        post.assert_not_called()
+        self.assertEqual(len(store.pending_drafts()), 1, '다시 리뷰하기 전까지 초안은 남아야 한다')
+        run = json.loads((self.root / 'runs.jsonl').read_text().splitlines()[-1])
+        self.assertTrue(run['publishStale'])
+        self.assertIn('게시 실패', run['error'])
+        self.assertEqual((run['sha'], run['headNow']), ('old', 'new'))
+
     def test_reconcile_leaves_a_draft_someone_is_publishing(self):
         data = {'repo': 'o/r', 'number': 1, 'sha': 'abc', 'event': 'COMMENT'}
         Path(store.draft_payload_path('o/r', 1)).write_text(json.dumps(data))

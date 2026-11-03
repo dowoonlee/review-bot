@@ -70,6 +70,8 @@ def set_event(repo, number, event):
     if override and override.get('from') == event:
         draft.update(event=event, reason=override.get('reason'), decision=override.get('decision'))
         draft.pop('override', None)
+        if draft.get('intent') != event:
+            draft.pop('intent', None)   # 봇의 결론으로 돌아갔다 — 다음 재리뷰에 넘길 방향이 없다
     else:
         if not override:
             override = {'from': current, 'reason': draft.get('reason'),
@@ -90,6 +92,23 @@ def set_event(repo, number, event):
     os.replace(tmp, path)
     _rewrite_report_header(store.draft_path(repo, number), event)
     return draft
+
+
+def user_intent(repo, number):
+    """대기 중인 초안에 사람이 고른 게시 방식이 있으면 그 이벤트, 없으면 None.
+
+    봇의 판정을 그대로 둔 초안이면 따를 사람의 방향이 없다. 재리뷰가 이어받은
+    방향(`intent`)도 사람이 고른 것이므로 다음 재리뷰에 다시 넘긴다.
+    """
+    try:
+        with open(store.draft_payload_path(repo, number), encoding='utf-8') as source:
+            draft = json.load(source)
+    except (OSError, ValueError):
+        return None
+    if not (draft.get('override') or draft.get('intent')):
+        return None
+    event = draft.get('event')
+    return event if event in EVENTS else None
 
 
 def _rewrite_report_header(path, event):

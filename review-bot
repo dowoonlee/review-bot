@@ -420,6 +420,33 @@ def _apply_placements(candidates, inline, placements):
     return fin, fbody, dropped
 
 
+def _carry_intent(intent, verdict, result):
+    """재리뷰 전에 사람이 고른 게시 방식을 새 판정에 그대로 이어 붙인다.
+
+    판정은 이미 그 방향으로 사유를 썼다. 안전장치가 다른 방식으로 바꿨으면 초안에서
+    손으로 바꿀 때(drafts.set_event)와 같은 꼴로 사람의 선택을 다시 얹고, 봇의 결론은
+    `override` 에 남겨 앱에서 "사용자가 바꿈" 과 되돌리기 항목이 그대로 보이게 한다.
+    """
+    label = drafts_mod.LABEL.get(intent, intent)
+    message = "사용자가 재리뷰 전에 정한 대로 %s(으)로 게시합니다." % label
+    if verdict["event"] == intent:
+        result["decision"] = policy.revise_decision(
+            result["decision"], intent, "HUMAN_INTENT", message, "user")
+        _log("  사용자 방향 유지 — %s" % label)
+        return None
+    override = {"from": verdict["event"], "reason": verdict.get("guard") or result.get("reason"),
+                "decision": result["decision"], "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    _log("  사용자 방향 유지 — 안전장치는 %s 였지만 %s(으)로 둡니다: %s"
+         % (drafts_mod.LABEL.get(verdict["event"], verdict["event"]), label, (verdict.get("guard") or "")[:80]))
+    result["decision"] = policy.revise_decision(
+        result["decision"], intent, "HUMAN_OVERRIDE",
+        "사용자가 판정(%s) 대신 %s(으)로 게시하기로 했습니다." % (
+            drafts_mod.LABEL.get(verdict["event"], verdict["event"]), label), "user")
+    verdict.update(event=intent, guard="")
+    result.update(event=intent, reason=verdict.get("reason") or message)
+    return override
+
+
 def _guard_event(event, findings, payload, pcfg, ci=None):
     """조치 필요성, 핵심 검토 범위, 실행 근거를 확인한 뒤 이벤트를 제한한다."""
     allowed = pcfg.get("allowedEvents") or ["COMMENT"]
@@ -830,7 +857,9 @@ def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge
     candidates = inline + demoted          # 이 순서가 판정에 넘기는 id 다
     verdict = {"event": "COMMENT", "reason": "", "guard": "", "placements": {}}
     judgment_key = checkpoints.judgment_key(identity, payload, candidates, meta['_ci_evidence'])
-    saved_verdict = checkpoints.saved_judgment(cached, judgment_key)
+    intent = pr.get("_intent")
+    # 사람이 정한 방향이 있으면 그 방향을 모른 채 내린 예전 판정은 다시 쓰지 않는다.
+    saved_verdict = None if intent else checkpoints.saved_judgment(cached, judgment_key)
     if saved_verdict and pcfg.get('autonomous', True):
         verdict.update(saved_verdict)
         result['cache']['decision'] = True
@@ -840,14 +869,14 @@ def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge
             verdict.update(reviewer.judge(
                 meta, payload, candidates,
                 pcfg.get("allowedEvents") or ["COMMENT"],
-                model=pcfg.get("judgeModel") or "sonnet"))
+                model=pcfg.get("judgeModel") or "sonnet", intent=intent))
             _log("  판정 %s — %s" % (verdict["event"], verdict["reason"][:80]))
         except reviewer.ReviewError as e:
             _log("  판정 실패 → COMMENT: %s" % str(e)[:120])
             verdict["guard"] = "판정 단계가 실패해 COMMENT 로 게시합니다."
             verdict["failed"] = True
             result["cost_usd"] = (result.get("cost_usd") or 0) + (e.cost or 0)
-    if pcfg.get('autonomous', True) and not verdict.get('failed'):
+    if pcfg.get('autonomous', True) and not verdict.get('failed') and not intent:
         snapshot['judgment'] = {'key': judgment_key, 'verdict': json.loads(json.dumps(verdict))}
     judge_event = verdict["event"] if pcfg.get("autonomous", True) and not verdict.get("failed") else None
     for index, finding in enumerate(candidates):
@@ -892,7 +921,9 @@ def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge
             guard=verdict.get('guard', ''), ci=ci, judge_failed=verdict.get('failed', False))
         result.update(event=event, reason=result['decision']['summary'])
 
-    waiting = (meta.get('_ci') == 'pending' and verdict['event'] == 'COMMENT'
+    # 사람이 방향을 정한 재리뷰는 CI 를 기다리지 않는다 — 기다렸다 틱이 재판정하면
+    # 그 방향을 모른 채 판정한다. 초안으로 남으니 게시는 어차피 사람이 누른다.
+    waiting = (not intent and meta.get('_ci') == 'pending' and verdict['event'] == 'COMMENT'
                and not any(policy.disposition(f) == 'required' for f in inline + demoted)
                and time.time() - snapshot['waitingSince'] < 86400)
     snapshot.update(waiting=waiting, watchCI=meta.get('_ci') in ('pending', 'failure'))
@@ -930,12 +961,17 @@ def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge
                 " · %d건은 내용이 바뀌어 원문 유지" % reverted if reverted else ""))
 
     record_decision(verdict["event"], meta.get("_ci"))
+    override = None
+    if intent:
+        override = _carry_intent(intent, verdict, result)
     body = _summary_body(payload, inline, demoted, verdict, note=pcfg.get("note"))
     comments = [{"path": f["path"], "line": f["line"], "side": "RIGHT",
                  "body": _comment_body(f)} for f in inline]
     patches = {f.get("filename"): f.get("patch") for f in files}
 
-    if pcfg.get("dryRun", True):
+    # 사람이 방향을 정한 재리뷰는 자동 게시 모드여도 초안으로 남긴다 — 그 방향으로
+    # 나간다는 것을 게시 확인 창에서 한 번 더 보게 한다.
+    if pcfg.get("dryRun", True) or intent:
         path = store.draft_path(repo, number)
         with open(path, "w", encoding="utf-8") as fp:
             fp.write("<!-- event: %s -->\n" % verdict["event"])
@@ -965,6 +1001,8 @@ def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge
                 "author": (meta.get("author") or {}).get("login"),
                 "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "botVersion": paths.version(),
+                **({"override": override} if override else {}),
+                **({"intent": intent} if intent else {}),
             }, fp, ensure_ascii=False, indent=2)
         result["draft"] = path
         result["draftPayload"] = payload_path
@@ -1042,6 +1080,11 @@ def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge
     return result
 
 
+# 초안 이후 head/base 가 바뀌어 게시를 거절했다. argparse 사용 오류(2)와 겹치지
+# 않게 따로 둔다 — 앱(Store.swift 의 publishStaleExit)이 이 값을 보고 재리뷰를 묻는다.
+PUBLISH_STALE = 3
+
+
 def _publish(repo, number, cfg, preview=False):
     """저장된 초안을 리뷰 없이 그대로 게시한다.
 
@@ -1081,7 +1124,14 @@ def _publish(repo, number, cfg, preview=False):
              % (str(d.get("sha"))[:12], str(head)[:12]))
         _log("  인라인 좌표가 어긋나므로 게시하지 않습니다 — `review-bot review %s#%s` 로 다시 리뷰하세요."
              % (repo, number))
-        return 2
+        if not preview:
+            # 사람이 게시를 눌렀는데 나가지 않았다 — 조용히 물러나지 않고 실패로 남긴다.
+            # 앱은 종료 코드로 이 경우를 알아보고 다시 리뷰할지 묻는다.
+            store.log_run({"repo": repo, "number": number, "title": d.get("title") or "",
+                           "sha": d.get("sha"), "headNow": head, "publishStale": True,
+                           "error": "게시 실패 — 초안(%s) 이후 새 커밋(%s)이 올라와 다시 리뷰해야 합니다."
+                                    % (str(d.get("sha"))[:12], str(head)[:12])})
+        return PUBLISH_STALE
 
     comments = d.get("comments") or []
     event = d.get("event") or "COMMENT"
@@ -1718,6 +1768,11 @@ def cmd_review(args, cfg):
             _recover_resources(cfg)
             state = store.load()
             pr = {"repo": repo, "number": number, "title": ""}
+            intent = drafts_mod.user_intent(repo, number)
+            if intent:
+                _log("사용자가 초안을 %s(으)로 바꿔 두었습니다 — 그 방향으로 다시 리뷰합니다"
+                     % drafts_mod.LABEL.get(intent, intent))
+                pr["_intent"] = intent
             mcp, blocked = _connect_repomind(cfg)
             if blocked:
                 return 1
