@@ -15,8 +15,16 @@ databaseSetup은 네트워크 차단·DB 준비 후 실행합니다. 실제 저�
 스키마를 준비하세요. 필요한 패키지는 setup에서 설치합니다. create_all로 마이그레이션을
 대체하거나 테스트를 skip하지 마세요. DB가 필요 없으면 services=[]와 databaseSetup=""입니다.
 컨테이너에는 **docker CLI·Docker 소켓·.git 디렉터리가 없습니다.** docker 를 띄우거나
-`git rev-parse` 같은 git 명령을 부르거나 외부에 접속하는 테스트는 PR 과 무관하게
-실패합니다. 그런 테스트는 -m/-k/경로로 제외하고 무엇을 뺐는지 notes 에 적으세요.
+/work 는 head 소스를 커밋 하나로 담은 git 저장소입니다(원격·이력·다른 브랜치 없음).
+`git ls-files`·`git worktree`·`git rev-parse HEAD` 를 부르는 테스트는 그대로 실행하세요.
+원격이나 base 브랜치·과거 커밋이 있어야 하는 테스트와 외부에 접속하는 테스트는 PR 과 무관하게
+실패합니다. 그런 테스트만 -m/-k/경로로 제외하고 무엇을 뺐는지 notes 에 적으세요.
+저장소에 Makefile 이 있으면 make 를, CI workflow 가 azure/setup-kubectl 로 고정한 버전이 있으면
+그 kubectl 을 봇이 setup 전에 설치합니다. 테스트가 부르는 그 밖의 실행 파일은 setup 에서
+`review-apt-install <패키지...>` 로(apt-get 을 직접 부르면 권한 문제로 실패합니다), CI 가 버전을
+고정한 도구는 그 버전의 공식 바이너리로 설치하세요. 테스트가 import 하는 모듈은 대상 파일의
+import 뿐 아니라 conftest 와 테스트가 파일 경로로 적재하는 다른 서비스 모듈의 import 까지 읽어
+설치하세요. 도구·모듈이 없다는 것은 테스트를 제외하거나 limitations 에 적을 사유가 아닙니다.
 파일 mtime 을 재는 테스트도 컨테이너 파일시스템에서는 어긋날 수 있습니다.
 전체 스위트를 넣을 때는 변경 대상 테스트와 **별도 항목**으로 두어, 환경 실패가
 대상 테스트의 증거를 가리지 않게 하세요. head 에서 실패한 명령은 봇이 base 에서

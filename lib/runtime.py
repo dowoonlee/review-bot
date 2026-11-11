@@ -53,6 +53,37 @@ PYTHON_BOOTSTRAP = (
     'uv venv --seed /opt/review-python\n'
     'python --version && python -m pip --version && uv --version'
 )
+# CI checks out a repository; an extracted archive is not one. A single snapshot commit
+# lets tests that ask git about the tree (ls-files, worktree, rev-parse) run. -f keeps
+# tracked files that the repository's own ignore rules would otherwise leave out.
+REPOSITORY_BOOTSTRAP = (
+    'git init -q /work\n'
+    'git -C /work add -A -f\n'
+    'git -C /work -c user.name=review-bot -c user.email=review-bot@localhost '
+    'commit -q --no-verify -m "review-bot source snapshot"\n'
+    # Root without capabilities cannot write apt's _apt-owned cache or drop to _apt, so
+    # archives go to /tmp and apt stays root. The planner installs OS packages with this.
+    "cat > /usr/local/bin/review-apt-install <<'SCRIPT'\n"
+    '#!/bin/bash\n'
+    'set -e\n'
+    'mkdir -p /tmp/apt-archives/partial\n'
+    'apt-get -qq -o APT::Sandbox::User=root update\n'
+    'DEBIAN_FRONTEND=noninteractive apt-get -qq -o APT::Sandbox::User=root '
+    '-o Dir::Cache::Archives=/tmp/apt-archives install -y --no-install-recommends "$@" >/dev/null\n'
+    'SCRIPT\n'
+    'chmod 0755 /usr/local/bin/review-apt-install'
+)
+MAKE_BOOTSTRAP = 'review-apt-install make\nmake --version'
+# The release CI pins, checked against the checksum published beside it.
+KUBECTL_BOOTSTRAP = (
+    'arch=$(dpkg --print-architecture)\n'
+    'url=https://dl.k8s.io/release/$REVIEW_KUBECTL_VERSION/bin/linux/$arch/kubectl\n'
+    'curl -fsSL "$url" -o /tmp/kubectl\n'
+    'echo "$(curl -fsSL "$url.sha256")  /tmp/kubectl" | sha256sum -c - >/dev/null\n'
+    'install -m 0755 /tmp/kubectl /usr/local/bin/kubectl && rm /tmp/kubectl\n'
+    'kubectl version --client'
+)
+KUBECTL_PIN = re.compile(r"azure/setup-kubectl@[^\n]*\n(?:[^\n]*\n){0,4}?\s*version:\s*['\"]?(v\d+\.\d+\.\d+)\b")
 # Only a plan that runs cargo gets Rust: the image has neither a toolchain nor the C
 # linker that build scripts (ring, libsqlite3-sys) need. The plan installs the toolchain
 # CI pins, as it does pnpm. Root without capabilities cannot write apt's _apt-owned
@@ -166,8 +197,10 @@ def approval_block(evidence):
     # 그것만 있고 통과한 테스트가 하나도 없으면 PR 을 뒷받침하는 근거도 없는 것이다.
     # An optional command that selected nothing or could not run (plan error) verified
     # nothing and signals nothing about the product; it is reported, not blocking.
+    # Neither is an optional formatter check that found unformatted files.
     if any(t.get('status') not in ('passed', 'baseline') and
-           not (not t.get('required', True) and t.get('failureKind') == 'plan') for t in tests):
+           not (not t.get('required', True) and
+                (t.get('failureKind') == 'plan' or validation.format_only_failure(t))) for t in tests):
         return '관련 로컬 테스트가 실패하거나 완료되지 않아 승인하지 않습니다.'
     missing_checks = []
     # A rewrite of a check keeps the check's name (lib/validation.preserve runs it beside
@@ -345,8 +378,19 @@ def compare_cases(head, base):
         return
     previous = {case['id']: case for case in base['cases']}
     failed = [c for c in head['cases'] if c['status'] == 'failed']
+    if not failed:
+        # Every case passed and the command still failed (#9854: pytest ended the session
+        # on a network guard tripped by a background thread). No case carries the cause,
+        # so the command's own error lines are compared with base instead.
+        if head.get('status') == 'failed':
+            _compare_outputs(head, base)
+        return
     for case in failed:
         old = previous.get(case['id']) or {}
+        # A tool or module the sandbox lacks fails on base too, but that is the bot's
+        # environment, not a broken base: it stays a failure so the setup gets repaired.
+        if validation.missing_tool(case):
+            continue
         if not case.get('ambiguousId') and not old.get('ambiguousId') and old.get('status') == 'failed':
             case['status'] = 'baseline'
             if old.get('failure') != case.get('failure'):
@@ -359,6 +403,12 @@ def _failure_signature(output):
     """The lines of a command's output that name an error, with incidental noise removed."""
     lines = set()
     for line in (output or '').splitlines():
+        # pytest reports a session it stopped as "!!!! reason !!!!", appended to the
+        # progress line; the reason is the error whatever words it uses.
+        banner = re.search(r'!{5,} (.+?) !{5,}', line)
+        if banner:
+            lines.add(re.sub(r'\s+', ' ', validation.without_incidentals(banner.group(1))))
+            continue
         line = validation.without_incidentals(line.strip())
         if line and re.search(r'error|fail|exception|panic', line, re.I):
             lines.add(re.sub(r'\s+', ' ', line))
@@ -848,6 +898,33 @@ def repository_playwright(cwd, sha):
     return max(versions, key=lambda v: tuple(int(n) for n in v.split('.')), default=None)
 
 
+def repository_tools(cwd, sha):
+    """Command-line tools the repository's tests expect from CI, read from its tree at sha.
+
+    make when it has a Makefile; kubectl at the release its workflows pin with
+    azure/setup-kubectl (the most used one, the newest among equals).
+    """
+    def git(*args):
+        try:
+            proc = subprocess.run(['git', '-C', cwd] + list(args), capture_output=True,
+                                  text=True, errors='replace', timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return proc.stdout if proc.returncode == 0 else None
+    paths = (git('ls-tree', '-r', '-z', '--name-only', sha) or '').split('\0')
+    tools = {}
+    if any(p.rsplit('/', 1)[-1] in ('Makefile', 'makefile', 'GNUmakefile') for p in paths):
+        tools['make'] = True
+    pins = {}
+    for path in paths:
+        if re.fullmatch(r'\.github/workflows/[^/]+\.ya?ml', path):
+            for version in KUBECTL_PIN.findall(git('show', sha + ':' + path) or ''):
+                pins[version] = pins.get(version, 0) + 1
+    if pins:
+        tools['kubectl'] = max(pins, key=lambda v: (pins[v], tuple(int(n) for n in v[1:].split('.'))))
+    return tools
+
+
 def _retrying(cfg):
     return max(1, int(cfg.get('installAttempts', 3))), max(0, int(cfg.get('installRetryDelaySec', 30)))
 
@@ -928,6 +1005,15 @@ def _provision(container, sha, cwd, cfg, plan, browser):
     evidence['toolchain'] = container.shell(PYTHON_BOOTSTRAP, setup_timeout, stage='Python 도구 설치' + BOT_STAGE)
     if _uses_rust(plan):
         evidence['rust'] = container.shell(RUST_BOOTSTRAP, setup_timeout, stage='Rust 도구 설치' + BOT_STAGE)
+    container.shell(REPOSITORY_BOOTSTRAP, setup_timeout, stage='git 저장소 준비' + BOT_STAGE)
+    tools = repository_tools(cwd, sha)
+    if tools:
+        evidence['tools'] = dict(tools)
+    if tools.get('make'):
+        container.shell(MAKE_BOOTSTRAP, setup_timeout, stage='make 설치' + BOT_STAGE)
+    if tools.get('kubectl'):
+        container.shell(KUBECTL_BOOTSTRAP, setup_timeout, environment={'REVIEW_KUBECTL_VERSION': tools['kubectl']},
+                        stage='kubectl %s 설치' % tools['kubectl'] + BOT_STAGE)
     if browser:
         # The driver matches the image so it finds the browsers the image ships.
         container.shell('cd /opt/review-browser && npm install --no-audit --no-fund playwright@' +
@@ -1362,6 +1448,13 @@ def collect(meta, files, cwd, cfg, progress=None, env=None, previous=None):
         attempts.append({'directory': evidence.get('directory'), 'status': evidence['status']})
         for test in evidence.get('tests', []):
             hint = test['status'] == 'failed' and uv_tool_hint(test, cwd)
+            missing = test['status'] == 'failed' and validation.missing_tools(test)
+            if missing:
+                hint = ((hint + ' ' if hint else '') +
+                        '실행 환경에 %s 이(가) 없어 해당 케이스가 코드를 검증하지 못했습니다. 테스트를 제외하지 말고 '
+                        'setup 에서 설치하세요: Python 모듈은 테스트를 실행하는 환경에 pip/uv 로, 실행 파일은 '
+                        '`review-apt-install <패키지>` 또는 CI workflow 가 고정한 버전의 공식 바이너리로.'
+                        % ', '.join(missing))
             if hint:
                 test['diagnosis'] = hint
         diagnostic = '\n'.join(evidence.get('limitations', [])) + '\n' + '\n'.join(

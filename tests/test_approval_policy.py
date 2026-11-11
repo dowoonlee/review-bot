@@ -257,6 +257,29 @@ class TestEvidenceTests(unittest.TestCase):
         runtime.compare_cases(head, {'status': 'failed', 'exitCode': 1, 'output': 'done\n'})
         self.assertEqual(head['status'], 'failed')
 
+    def test_session_failure_with_every_case_passing_is_compared_by_output(self):
+        # #9854: all five cases passed, but a background thread tripped the repository's
+        # network guard and pytest exited 1 — on base as well.
+        def run(seconds, banner='External network blocked outside test execution'):
+            return {'name': 'adjacent', 'status': 'failed', 'required': False, 'exitCode': 1,
+                    'cases': [{'id': 'chat::a', 'status': 'passed'}, {'id': 'chat::b', 'status': 'passed'}],
+                    'output': '..      [100%%]!!!!!!!!!! %s !!!!!!!!!!\n'
+                              "External network blocked: socket.getaddrinfo host=b'llm-proxy.test'.\n\n"
+                              '2 passed, 17400 deselected in %s\n' % (banner, seconds)}
+        head = run('29.98s')
+        runtime.compare_cases(head, run('31.44s'))
+        self.assertEqual(head['status'], 'baseline')
+        self.assertEqual(runtime.approval_block(dict(GOOD, tests=[{'status': 'passed'}, head])), '')
+        # A session that stops for another reason on head is this PR's.
+        head = run('29.98s', 'Interrupted: 1 error during collection')
+        runtime.compare_cases(head, run('31.44s'))
+        self.assertEqual(head['status'], 'failed')
+        # Base passing keeps the failure.
+        head = run('29.98s')
+        runtime.compare_cases(head, dict(run('31.44s'), status='passed', exitCode=0))
+        self.assertEqual(head['status'], 'failed')
+        self.assertIn('실패하거나', runtime.approval_block(dict(GOOD, tests=[{'status': 'passed'}, head])))
+
     def test_per_run_temporary_directory_names_do_not_make_a_base_failure_differ(self):
         # #8535: pytest numbers its tmp_path per run, so the same render failure carried
         # pytest-1 on base and pytest-2 on head and looked like a different cause.

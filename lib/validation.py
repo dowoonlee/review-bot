@@ -22,6 +22,27 @@ def docker_unavailable_case(case):
     return bool(DOCKER_UNAVAILABLE.search(case.get('message') or ''))
 
 
+# A test that could not find an executable or a module never reached the code under
+# review. Docker is excluded: the sandbox has none by design and it has its own handling.
+MISSING_TOOL = re.compile(
+    r"FileNotFoundError: \[Errno 2\] No such file or directory: '([\w.+-]+)'"
+    r"|ModuleNotFoundError: No module named '([\w.]+)'"
+    r"|\b([\w.+-]+): command not found")
+
+
+def missing_tool(case):
+    """The executable or module a failed case could not find, if that is why it failed."""
+    if case.get('status') != 'failed':
+        return None
+    match = MISSING_TOOL.search(case.get('message') or '')
+    name = match and next(group for group in match.groups() if group)
+    return name if name and name != 'docker' else None
+
+
+def missing_tools(test):
+    return sorted({name for name in map(missing_tool, test.get('cases') or []) if name})
+
+
 def docker_unavailable(result):
     """Every failure is the missing Docker daemon, not an assertion about the code."""
     if result.get('reportError'):
@@ -109,6 +130,9 @@ def failure_kind(result, browser=False):
     failed = [c for c in result.get('cases') or [] if c.get('status') == 'failed']
     if failed and all(re.search(BROWSER_MISSING, c.get('message') or '') for c in failed):
         return 'infrastructure'
+    # The sandbox lacked something the test needs; the bot's setup is what has to change.
+    if missing_tools(result):
+        return 'plan'
     # A failure inside a test is not an infrastructure failure just because its
     # assertion/traceback mentions TimeoutError or ConnectionError.
     if any(c.get('status') == 'failed' for c in result.get('cases', [])):
@@ -166,8 +190,33 @@ def command_core(command):
     return ' && '.join(segments)
 
 
+_RUNNER = r'(?:(?:pnpm|yarn|npm|bun)\s+(?:exec|dlx|run)\s+(?:--\s+)?|(?:npx|bunx|uvx|yarn)\s+|(?:uv|poetry)\s+run\s+|python3?\s+-m\s+)?'
+_FORMAT_CHECKS = [r'prettier\b.*\s(--check|-c|--list-different|-l)\b',
+                  r'ruff\s+format\b.*\s--(check|diff)\b',
+                  r'black\b.*\s--(check|diff)\b',
+                  r'isort\b.*\s(--check(-only)?|-c|--diff)\b',
+                  r'biome\s+format\b(?!.*\s--write\b)',
+                  r'cargo\s+fmt\b.*\s--check\b',
+                  r'dprint\s+check\b']
+
+
+def format_only_failure(test):
+    """A failed command that only asks a formatter whether files are formatted, and was
+    answered "no" (exit 1; a formatter that crashed or could not parse a file exits
+    otherwise). Layout says nothing about behaviour, so an optional one is reported
+    without blocking approval."""
+    command = test.get('command') or ''
+    if test.get('status') != 'failed' or test.get('exitCode') != 1 or re.search(r'[;|`]|\$\(', command):
+        return False
+    segments = [s for s in command_core(command).split(' && ') if s and not re.match(r'cd\s', s)]
+    return bool(segments) and all(
+        any(re.match(_RUNNER + check, segment) for check in _FORMAT_CHECKS) for segment in segments)
+
+
 def repeated_plan_failures(plan, previous=None):
     """Planned commands that already failed as the bot's own command mistake, unchanged."""
+    if plan.get('setup') != ((previous or {}).get('plan') or {}).get('setup'):
+        return []  # The environment was repaired; the same command now runs somewhere else.
     failed = {check_id(t): t for t in (previous or {}).get('tests', [])
               if t.get('status') == 'failed' and failure_kind(t) == 'plan'}
     return [test for test in plan.get('tests', [])

@@ -222,6 +222,33 @@ class OptionalPlanErrorTests(unittest.TestCase):
                 self.assertTrue(runtime.approval_block(blocked))
 
 
+class OptionalFormatFailureTests(unittest.TestCase):
+    FORMAT = {'name': 'prettier', 'status': 'failed', 'required': False, 'failureKind': 'test', 'exitCode': 1,
+              'command': 'cd /work/services/frontend && pnpm exec prettier --check src/utils/chatCommands.ts'}
+
+    def evidence(self, **change):
+        return {'status': 'complete', 'limitations': [], 'testsApplicable': True, 'visualApplicable': False,
+                'tests': [{'name': 'unit', 'status': 'passed', 'command': 'pytest'}, dict(self.FORMAT, **change)]}
+
+    def test_an_optional_formatter_check_that_found_unformatted_files_does_not_block_approval(self):
+        self.assertEqual(runtime.approval_block(self.evidence()), '')
+        for command in ('uv run ruff format --check app', 'black --check .', 'NODE_OPTIONS=x npx prettier -c src',
+                        'cd a && pnpm exec prettier --check a.ts && uv run isort --check-only b.py'):
+            with self.subTest(command=command):
+                self.assertEqual(runtime.approval_block(self.evidence(command=command)), '')
+
+    def test_anything_more_than_a_formatting_answer_still_blocks(self):
+        for change in ({'required': True},
+                       {'exitCode': 2},  # the formatter crashed or could not parse a file
+                       {'command': 'pnpm exec prettier --check a.ts && pnpm exec eslint a.ts'},
+                       {'command': 'pnpm exec prettier --check a.ts; pnpm test'},
+                       {'command': 'pnpm exec prettier --write a.ts'},
+                       {'command': 'pnpm run lint'},
+                       {'command': 'pnpm exec vitest run prettier --check'}):
+            with self.subTest(change=change):
+                self.assertTrue(runtime.approval_block(self.evidence(**change)))
+
+
 class ApprovalTests(unittest.TestCase):
     def evidence(self, **test):
         return {'status': 'complete', 'limitations': [], 'testsApplicable': True, 'visualApplicable': False,
