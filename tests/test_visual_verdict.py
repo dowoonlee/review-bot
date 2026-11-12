@@ -291,6 +291,37 @@ class TriageTests(unittest.TestCase):
             # Without the changed-file list the bot cannot tell, so the product keeps the blame.
             self.assertEqual(triage(fixture, self.EVIDENCE)['cause'], 'defect')
 
+    def test_a_harness_file_the_setup_wrote_is_rebuilt_by_a_replan_not_blamed_on_the_product(self):
+        # #10094: a stubbed hook returned a new object per render and the viewer's effect looped.
+        plan = {'setup': "cat > review-harness/useFileContentStub.ts <<'EOF'\nexport ...\nEOF", 'browser': 'x'}
+        harness = {'cause': 'harness', 'summary': 'stub returns a new object per render',
+                   'harnessFile': 'services/frontend/review-harness/useFileContentStub.ts',
+                   'repair': 'return a module constant', 'inspected': ['/tmp/02.png']}
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, 'Viewer.tsx').touch()
+            evidence = dict(self.EVIDENCE, changedFiles=['Viewer.tsx'])
+
+            def triage(answer):
+                with mock.patch.object(reviewer, '_run', return_value=answer) as run:
+                    return runtime._triage(META, plan, evidence, tmp, {}), run.call_args.args[0]
+            result, prompt = triage(harness)
+            self.assertIn('useFileContentStub.ts <<', prompt)  # The classifier sees what setup wrote.
+            self.assertEqual((result['cause'], result['kind'], result['repair']),
+                             ('script', 'harness', 'return a module constant'))
+            for change in ({'harnessFile': 'Viewer.tsx'}, {'harnessFile': 'src/other.ts'}, {'harnessFile': ''},
+                           {'repair': ''}, {'inspected': ['/tmp/01.png']}, {'_meta': {'salvaged': True}}):
+                with self.subTest(change=change):
+                    self.assertEqual(triage(dict(harness, **change))[0]['cause'], 'defect')
+        failed = {'status': 'complete', 'tests': [], 'limitations': [], 'screenshots': ['01.png'],
+                  'visual': {'status': 'incomplete'},
+                  'browser': {'status': 'failed', 'output': 'AssertionError', 'failureKind': 'plan', 'triage': result}}
+        fixed = dict(failed, browser={'status': 'passed'}, visual={'status': 'passed', 'complete': True})
+        with mock.patch.object(runtime, '_collect_once', side_effect=[failed, fixed]) as collect:
+            runtime.collect(META, [], '/tmp', {})
+        self.assertEqual(collect.call_count, 2)
+        self.assertIn('return a module constant', collect.call_args.args[0]['_runtime_retry']['failures'])
+        self.assertIn('setup 의 하네스', collect.call_args.args[0]['_runtime_retry']['failures'])
+
     def test_failed_assertion_is_replanned_only_when_cleared(self):
         failed = {'status': 'complete', 'tests': [], 'limitations': [], 'screenshots': ['01.png'],
                   'browser': {'status': 'failed', 'output': 'AssertionError', 'failureKind': 'plan',
@@ -393,6 +424,23 @@ class BrowserBaselineTests(unittest.TestCase):
         replanned = self.evidence(browser='failed')
         replanned['browser']['failureKind'] = 'plan'
         self.assertFalse(runtime._needs_browser_baseline(replanned))
+
+    def test_the_same_failure_on_base_before_any_screen_is_replanned_as_a_harness_suspect(self):
+        seen = self.HEAD[:1] + self.BASE
+        answer = {'verdict': 'same', 'summary': 'both show only a spinner', 'inspected': seen}
+        stuck = self.evidence(browser='failed', visual={'status': 'failed', 'complete': False, 'summary': 'defect'})
+        stuck['screenshots'] = self.HEAD[:1]  # Only the failure capture: no scenario was seen.
+        result = self.run_baseline(stuck, answer)
+        self.assertEqual((result['visual']['status'], result['browser']['failureKind']), ('incomplete', 'plan'))
+        self.assertIn('하네스', result['visual']['summary'])
+        # A head that showed screens before failing keeps its verdict.
+        later = self.evidence(browser='failed', visual={'status': 'failed', 'complete': False, 'summary': 'defect'})
+        result = self.run_baseline(later, dict(answer, inspected=self.HEAD + self.BASE))
+        self.assertEqual((result['visual']['status'], result['browser']['failureKind']), ('failed', 'test'))
+        differs = self.evidence(browser='failed', visual={'status': 'failed', 'complete': False, 'summary': 'defect'})
+        differs['screenshots'] = self.HEAD[:1]
+        result = self.run_baseline(differs, dict(answer, verdict='differs'))
+        self.assertEqual((result['visual']['status'], result['browser']['failureKind']), ('failed', 'test'))
 
     def test_behaviour_identical_on_base_clears_the_screen_verdict(self):
         seen = self.HEAD + self.BASE
