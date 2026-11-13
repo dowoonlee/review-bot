@@ -554,11 +554,12 @@ def review_requester(repo, number, login, account=None):
 ISSUE_REF_RE = re.compile(r"#(\d+)")
 
 
-def linked_issues(repo, number, title="", body="", account=None, limit=3):
+def linked_issues(repo, number, title="", body="", account=None, limit=3, body_chars=0):
     """PR 이 가리키는 이슈들 — 제목·본문의 #번호 를 따라간다.
 
     GitHub 의 자동 연결(Closes #N)만 보면 규칙대로 안 쓴 PR 을 놓치므로, 눈에 보이는
-    참조를 그대로 따라간다. PR 자신과 중복은 뺀다.
+    참조를 그대로 따라간다. PR 자신과 중복은 뺀다. `body_chars` 를 주면 이슈 본문도
+    그 길이까지 싣는다 — 리뷰어가 이 PR 이 풀려는 문제를 읽을 수 있게.
     """
     seen, out = set(), []
     for m in ISSUE_REF_RE.finditer("%s\n%s" % (title or "", body or "")):
@@ -575,9 +576,19 @@ def linked_issues(repo, number, title="", body="", account=None, limit=3):
             continue
         if not d or d.get("pull_request"):      # 다른 PR 을 가리킨 것은 이슈가 아니다
             continue
-        out.append({"number": n, "title": d.get("title") or "",
-                    "author": ((d.get("user") or {}).get("login") or ""),
-                    "state": d.get("state") or "", "url": d.get("html_url") or ""})
+        issue = {"number": n, "title": d.get("title") or "",
+                 "author": ((d.get("user") or {}).get("login") or ""),
+                 "state": d.get("state") or "", "url": d.get("html_url") or ""}
+        if body_chars:
+            # 본문에 스쳐 지나간 #번호까지 요구사항으로 읽히면 안 된다. 제목이 가리키거나
+            # 닫는다고 밝힌 이슈만 이 PR 이 푸는 문제이고, 나머지는 언급일 뿐이라 짧게 싣는다.
+            solves = (re.search(r"#%d\b" % n, title or "") or
+                      re.search(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#%d\b" % n, body or ""))
+            issue["solves"] = bool(solves)
+            keep = body_chars if solves else min(body_chars, 500)
+            text = (d.get("body") or "").strip()
+            issue["body"] = text[:keep] + ("\n… (이하 생략)" if len(text) > keep else "")
+        out.append(issue)
     return out
 
 
@@ -856,3 +867,57 @@ def issue_context(repo, number, account=None):
             'milestone': milestone.get('title'), 'milestoneDue': milestone.get('dueOn'),
             'fields': issue_fields(issue), 'createdAt': issue.get('createdAt'), 'updatedAt': issue.get('updatedAt'),
             'sources': sources, 'incomplete': incomplete}
+
+
+_REVIEW_THREADS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      state mergedAt closedAt headRefOid
+      reviewThreads(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          isResolved isOutdated path line originalLine
+          resolvedBy { login }
+          comments(first: 20) {
+            totalCount
+            nodes { author { login } body createdAt url originalCommit { oid } }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def review_threads(repo, number, account=None, timeout=60):
+    """A PR's state and every inline review thread, with whether the code under it
+    changed afterwards (`isOutdated`) and whether someone resolved it.
+
+    Read-only. Used after the fact to see what became of the bot's findings.
+    """
+    owner, _, name = (repo or "").partition("/")
+    if not owner or not name:
+        raise GhError("저장소 이름이 올바르지 않습니다: %s" % repo)
+    result, cursor = None, None
+    while True:
+        args = ["api", "graphql", "-f", "query=" + _REVIEW_THREADS_QUERY,
+                "-f", "owner=" + owner, "-f", "name=" + name, "-F", "number=%d" % int(number)]
+        if cursor:
+            args += ["-f", "after=" + cursor]
+        payload = _gh_json(args, timeout=timeout, account=account)
+        if payload.get("errors"):
+            raise GhError("리뷰 스레드 GraphQL 조회 실패 (%s#%s)" % (repo, number))
+        pr = (((payload.get("data") or {}).get("repository") or {}).get("pullRequest") or None)
+        if pr is None:
+            raise GhError("PR 을 찾지 못했습니다 (%s#%s)" % (repo, number))
+        threads = pr.get("reviewThreads") or {}
+        if result is None:
+            result = {"state": pr.get("state"), "mergedAt": pr.get("mergedAt"),
+                      "closedAt": pr.get("closedAt"), "head": pr.get("headRefOid"), "threads": []}
+        result["threads"] += threads.get("nodes") or []
+        page = threads.get("pageInfo") or {}
+        if not page.get("hasNextPage"):
+            return result
+        cursor = page.get("endCursor")

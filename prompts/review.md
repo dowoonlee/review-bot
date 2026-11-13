@@ -102,6 +102,8 @@ PR 설명이나 주석이 "동작 변화 없음", "단순 리팩터링", "안전
 ## PR 설명
 {body}
 
+{issues_block}
+
 ## 변경된 파일
 {files_block}
 

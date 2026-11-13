@@ -164,6 +164,9 @@ DEFAULTS = {
         # 알림을 울린다 — 사내망 밖에서도 돌려야 하면 이 값을 false 로 내린다.
         "required": True,
     },
+    # 머지된 PR 에서 봇의 인라인 지적이 어떻게 됐는지(고쳐짐·거절·미룸·무응답)를 모은다.
+    # 답글을 읽고 분류하는 데 작은 모델을 PR 당 한 번 부른다.
+    "outcomes": {"enabled": True, "model": "haiku"},
     "insights": {"enabled": False, "model": "claude-sonnet-5-5",
                  "maxPerTick": 3, "timeoutSec": 90, "maxTokens": 8192, "workspaceID": ""},
     "limits": {

@@ -4,6 +4,7 @@
   tick     한 번 훑는다. launchd 가 이걸 주기적으로 부른다.
   review   PR 하나를 리뷰한다 (감시와 무관하게 수동으로). 봇이 바쁘면 대기열에 넣는다.
   queue    대기열 조회·취소·순서 변경.
+  outcomes 해결률 — 남긴 지적이 머지 전에 고쳐졌는가.
   status   지금 상태 — 대기 중인 리뷰 요청, 처리 이력, 일시정지 여부.
   runs     최근 실행 이력.
   gc       부산물 정리 — 워크트리·claude 세션·초안·이력·로그.
@@ -45,6 +46,7 @@ from lib import github as gh
 from lib import janitor
 from lib import drafts as drafts_mod
 from lib import notify
+from lib import outcomes as outcomes_mod
 from lib import queue as queue_mod
 from lib import repomind as repomind_mod
 from lib import secrets
@@ -816,8 +818,13 @@ def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge
             ctx = {"history": worktree.file_history(base, wsha, list(files_by_path)),
                    "comments": gh.file_review_comments(repo, list(files_by_path),
                                                        account=acct)}
-            _log("  맥락: 커밋이력 %d파일 · 과거 코멘트 %d파일 · 정찰 %s"
+            # 이 PR 이 풀려는 문제. 리뷰어가 "하려던 일을 했는가" 를 보려면 이슈가 있어야 한다.
+            meta["_issues"] = gh.linked_issues(repo, number, meta.get("title") or "", meta.get("body") or "",
+                                               account=acct, body_chars=2500)
+            result["linkedIssues"] = [i["number"] for i in meta["_issues"]]
+            _log("  맥락: 커밋이력 %d파일 · 과거 코멘트 %d파일 · 연결 이슈 %s · 정찰 %s"
                  % (len(ctx["history"]), len(ctx["comments"]),
+                    ", ".join("#%s" % i["number"] for i in meta["_issues"]) or "없음",
                     "RepoMind" if mcp else "없음"))
             def runtime_progress(message):
                 _log("  " + message)
@@ -1822,6 +1829,13 @@ def _tick(cfg):
                 r.get("inline") or 0, r.get("demoted") or 0))
 
     queued_done += _drain_queue(cfg, state, shared)
+    # 리뷰한 PR 이 그 사이 머지됐으면 지적이 어떻게 됐는지 적어 둔다. 조회 몇 건이라 틱을 늘리지 않는다.
+    try:
+        collected = outcomes_mod.refresh(cfg, _log, limit=5)
+        if collected.get("collected"):
+            _log("리뷰 결과 수집 — 끝난 PR %d건" % collected["collected"])
+    except Exception as e:      # 측정이 리뷰를 막아서는 안 된다
+        _log("리뷰 결과 수집 실패 — 다음 틱에 다시 봅니다: %s" % str(e)[:120])
     done = [r for r in done + queued_done if not r.get("pending")]
     if done and cfg["notify"].get("enabled", True):
         head = done[0]
@@ -2011,6 +2025,62 @@ def cmd_review(args, cfg):
         store.release_lock()
     _drain_released(cfg)
     return 1 if outcome in ("busy", "blocked", "failed") else 0
+
+
+def _percent(fixed, total):
+    return "%3d%% (%d/%d)" % (round(100 * fixed / total), fixed, total) if total else "  -  (0/0)"
+
+
+def cmd_outcomes(args, cfg):
+    """해결률 — 봇이 남긴 인라인 지적이 머지 전에 실제로 고쳐졌는가.
+
+    프롬프트나 단계를 바꾼 것이 나아진 것인지는 이 숫자로만 알 수 있다. 머지되거나
+    닫힌 PR 의 스레드 기록(코드 변경·해결 표시·답글)으로 지적마다 결과를 분류한다.
+    """
+    if getattr(args, "refresh", False):
+        result = outcomes_mod.refresh(cfg, _log, limit=None, recheck_hours=0)
+        if result.get("busy"):
+            _log("다른 명령이 리뷰 결과를 모으는 중입니다 — 지금 있는 기록으로 보여 줍니다")
+        else:
+            _log("리뷰 결과 수집 — 끝난 PR %d건 · 아직 열린 PR %d건 · 판정 비용 $%.2f"
+                 % (result["collected"], result["open"], result["cost_usd"]))
+    saved = outcomes_mod.load()
+    summary = outcomes_mod.summarize(saved, since_days=getattr(args, "since", None))
+    if getattr(args, "json", False):
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0
+    if not saved:
+        print("모은 기록이 없습니다 — `review-bot outcomes --refresh` 로 지금까지 게시한 리뷰를 모으세요.")
+        return 0
+    print("머지된 PR %d건 · 인라인 지적 %d건%s" % (
+        summary["mergedPRs"], summary["findings"],
+        " (최근 %g일)" % args.since if getattr(args, "since", None) else ""))
+    print("해결률 %s — 머지 전에 고쳐진 지적의 비율" % _percent(summary["fixed"], summary["findings"]).strip())
+    print("  " + " · ".join("%s %d" % (outcomes_mod.LABEL[name], count)
+                           for name, count in summary["outcomes"].items() if count))
+    print("  지적 위치의 코드가 바뀐 것 %d건 (기계 신호만 본 값)" % summary["codeChanged"])
+    for title, key in (("등급별", "byPriority"), ("조치 표시별", "byAction"), ("리뷰어별", "byAgent"),
+                       ("반증 점수 구간별", "byConfidence"), ("게시 월별", "byMonth")):
+        rows = [g for g in summary[key] if g["name"] is not None]
+        if not rows:
+            continue
+        print("\n%s" % title)
+        for group in rows:
+            print("  %-22s %s" % (group["name"], _percent(group["fixed"], group["total"])))
+    print("\n아직 열린 PR %d건 · 머지 없이 닫힌 PR %d건은 해결률에서 뺍니다. 본문에만 실린 지적은 추적하지 못합니다."
+          % (summary["open"], summary["closedUnmerged"]))
+    if getattr(args, "list", False):
+        print("\n고쳐지지 않은 지적")
+        for record in sorted(saved.values(), key=lambda r: r.get("closedAt") or "", reverse=True):
+            if record.get("state") != "MERGED":
+                continue
+            for row in record.get("findings") or []:
+                if row.get("outcome") != "fixed":
+                    print("  %s#%s [%s] %s — %s%s" % (
+                        record["repo"].split("/")[-1], record["number"], row.get("priority"),
+                        (row.get("title") or "")[:60], outcomes_mod.LABEL.get(row.get("outcome"), row.get("outcome")),
+                        " · " + row["why"][:90] if row.get("why") else ""))
+    return 0
 
 
 def cmd_queue(args, cfg):
@@ -3055,6 +3125,12 @@ def main():
                         "못하면 일부 파일은 리뷰어가 워크트리에서 직접 읽습니다")
     r.add_argument("--front", action="store_true", help="봇이 바빠 대기열에 들어갈 때 맨 앞에 세운다")
     r.set_defaults(fn=cmd_review)
+    oc = sub.add_parser("outcomes")
+    oc.add_argument("--refresh", action="store_true", help="게시한 리뷰 전부를 지금 다시 확인해 모은다")
+    oc.add_argument("--since", type=float, metavar="일", help="최근 N일 안에 머지된 PR 만")
+    oc.add_argument("--list", action="store_true", help="고쳐지지 않은 지적 목록")
+    oc.add_argument("--json", action="store_true")
+    oc.set_defaults(fn=cmd_outcomes)
     qu = sub.add_parser("queue")
     qu.add_argument("action", nargs="?", choices=["list", "remove", "front", "clear"], default="list")
     qu.add_argument("target", nargs="?", help="owner/repo#123")

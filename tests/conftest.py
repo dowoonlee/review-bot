@@ -6,7 +6,7 @@ the app lost track of what the bot was looking at.
 """
 import pytest
 
-from lib import store
+from lib import outcomes, store
 
 
 @pytest.fixture(autouse=True)
@@ -15,3 +15,5 @@ def _isolated_state(tmp_path, monkeypatch):
     # appended rows for made-up PRs to the real runs.jsonl, and the app listed them.
     for name, file in (('CURRENT', 'current.json'), ('LOG', 'runs.jsonl'), ('VERIFY_LOG', 'verify.jsonl')):
         monkeypatch.setattr(store, name, str(tmp_path / file))
+    # A tick driven by a test would otherwise collect outcomes into the live state.
+    monkeypatch.setattr(outcomes, 'path', lambda: str(tmp_path / 'outcomes.json'))
