@@ -158,6 +158,17 @@ CI (테스트 이름이 관련 검증을 포함하는지 확인):
   이전 오류가 지워질 수 있습니다. 중간 상태(갱신 중 비활성 등)를 확인하려면 모의 응답을 지연시켜 그 상태가
   유지되는 동안 단언하세요. 이 규칙은 시나리오의 모든 단계에 똑같이 적용하세요. 앞 단계에서 기다렸다고
   뒤 단계를 빼먹지 마세요.
+  사용자 입력으로 시작되는 동작(키 입력·단축키·클릭·드래그·복사·붙여넣기·드롭·포커스 이동)은
+  **실제 입력**으로 일으키세요: page.keyboard.press/type, page.mouse, locator.click/fill/dragTo.
+  `new Event(...)`·`dispatchEvent`·핸들러 직접 호출로 대신하지 마세요. 그렇게 하면 "핸들러가 불리면
+  옳게 동작한다" 만 확인되고, 이 변경이 실제로 약속한 "사용자가 그 입력을 하면 핸들러에 도달한다"
+  (포커스 위치·이벤트 전파·기본 동작 차단)는 확인되지 않습니다. 권한이 필요해 보여도 먼저 실제 입력을
+  쓰세요. 예를 들어 복사는 클립보드 읽기 권한 없이 확인할 수 있습니다: 실제 Ctrl+C 를 누르기 전에
+  `page.evaluate` 로 document 에 copy 리스너를 걸어 `event.clipboardData.getData('text/plain')` 과
+  `event.defaultPrevented` 를 window 변수에 적어 두고(setTimeout 0 으로 핸들러 뒤에 읽기),
+  `await page.keyboard.press('Control+C')` 뒤에 그 값을 단언합니다. 실제 입력으로 일으킬 방법이 정말
+  없을 때만 합성 이벤트를 쓰고, 그 시나리오는 notes 와 limitations 에 "합성 이벤트로만 확인 — 실제
+  입력 경로 미검증" 이라고 적으세요.
   Playwright API를 사용하세요. Testing Library의 getByDisplayValue/findByDisplayValue는
   Playwright에 없습니다. 입력값은 getByLabel(...).inputValue()나 input/textarea locator로 확인합니다.
   문자열 이름 선택자는 getByRole(..., {{name: '이름', exact: true}})처럼 정확하게 지정하고

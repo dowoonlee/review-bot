@@ -494,3 +494,25 @@ class RecoveryTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SyntheticInputTests(unittest.TestCase):
+    """#10118: Ctrl+C 를 new Event('copy') 로 대신한 화면 검증이 통과로 처리됐다."""
+
+    def test_planner_and_inspector_are_told_real_input_is_what_proves_the_path(self):
+        from pathlib import Path
+        from unittest import mock
+        from lib import reviewer, runtime
+        plan_prompt = (Path(runtime.__file__).resolve().parents[1] / 'prompts' / 'runtime.md').read_text()
+        self.assertIn("page.keyboard.press('Control+C')", plan_prompt)
+        self.assertIn('dispatchEvent', plan_prompt)
+        plan_prompt.format(changes='', ci='')        # 추가한 문단이 템플릿의 중괄호를 깨지 않는다
+        answer = {'passed': True, 'complete': False, 'missing': ['실제 Ctrl+C 로 복사 재검증'], 'inspected': ['/a.png'],
+                  'summary': 's', '_meta': {}}
+        with mock.patch.object(reviewer, '_run', return_value=answer) as run:
+            verdict = runtime._inspect({}, {'scenarios': ['복사'], 'browser': "new Event('copy')"},
+                                       {'screenshots': ['/a.png'], 'browser': {}}, '/tmp', {})
+        self.assertIn('합성 이벤트', run.call_args.args[0])
+        self.assertIn('complete=false', run.call_args.args[0])
+        # 미완료는 결함이 아니라 스크립트 보정으로 이어진다.
+        self.assertEqual((verdict['status'], verdict['missing']), ('incomplete', ['실제 Ctrl+C 로 복사 재검증']))
