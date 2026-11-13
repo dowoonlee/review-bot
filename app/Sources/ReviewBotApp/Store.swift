@@ -225,10 +225,10 @@ final class BotStore {
         readLog()
         readReviewed()
         readFlags()
+        readCurrent()          // 라이브 세션이 지금 실행의 시작 시각으로 지난 것을 거른다
         readLiveSessions()
         readMode()
         readDrafts()
-        readCurrent()
         readQueue()
         readSchedule()
     }
@@ -460,12 +460,17 @@ final class BotStore {
             let wtPath = BotPaths.worktrees.appending(path: wt).path
             let dir = BotPaths.sessionDir(forWorktree: wtPath)
             guard let files = try? fm.contentsOfDirectory(atPath: dir.path) else { continue }
+            let cutoff = LiveSession.cutoff(worktree: wt, current: current)
             for file in files where file.hasSuffix(".jsonl") {
                 let url = dir.appending(path: file)
+                // 지난 실행의 transcript 는 읽지도 않는다 — PR 한 건에 수십 MB 가 남아 있다.
+                if let cutoff,
+                   let modified = try? fm.attributesOfItem(atPath: url.path)[.modificationDate] as? Date,
+                   modified < cutoff { continue }
                 if let s = readSession(url, pr: wt) { found.append(s) }
             }
         }
-        live = found.sorted { $0.updatedAt > $1.updatedAt }
+        live = LiveSession.latestPerTask(found)
     }
 
     private func readSession(_ url: URL, pr: String) -> LiveSession? {

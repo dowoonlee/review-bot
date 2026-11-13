@@ -343,6 +343,26 @@ struct LiveSession: Identifiable, Sendable {
         tools.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: " · ")
     }
     var idleSeconds: Int { max(0, Int(Date().timeIntervalSince(updatedAt))) }
+
+    /// 이 워크트리에서 이 시각보다 먼저 멈춘 transcript 는 지난 실행의 것이다.
+    ///
+    /// 실패한 리뷰는 transcript 를 남기고, 같은 PR 을 다시 리뷰하면 같은 디렉터리에 쌓인다.
+    /// 지금 도는 실행의 워크트리가 아니면 기준이 없으므로 거르지 않는다.
+    static func cutoff(worktree: String, current: CurrentRun?) -> Date? {
+        guard let c = current,
+              worktree == "\(c.repo.replacingOccurrences(of: "/", with: "__"))-\(c.number)"
+        else { return nil }
+        return c.started
+    }
+
+    /// 같은 작업을 다시 시도하면 세션 파일이 새로 생긴다 — 작업마다 가장 최근 것만 남긴다.
+    /// 아직 이름을 못 읽은 세션은 서로 다른 작업일 수 있어 묶지 않는다.
+    static func latestPerTask(_ sessions: [LiveSession]) -> [LiveSession] {
+        var seen = Set<String>()
+        return sessions.sorted { $0.updatedAt > $1.updatedAt }.filter {
+            $0.agent == SessionLabel.pending || seen.insert("\($0.pr)|\($0.agent)").inserted
+        }
+    }
 }
 
 // MARK: - 게시를 기다리는 초안
