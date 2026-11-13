@@ -87,9 +87,11 @@ def kill_children(sig=signal.SIGKILL):
 class ReviewError(Exception):
     """cost 는 실패하기까지 쓴 돈이다. 실패해도 쓴 돈은 집계에 들어가야 한다."""
 
-    def __init__(self, msg, cost=0.0):
+    def __init__(self, msg, cost=0.0, refused=False):
         super().__init__(msg)
         self.cost = cost or 0.0
+        # 안전 분류기가 요청을 막았다. 같은 요청을 다시 보내도 결과가 같으므로 재시도하지 않는다.
+        self.refused = refused
 
 
 class HeadMovedError(ReviewError):
@@ -377,8 +379,9 @@ def review(meta, files, agent_names, cwd, model=None, max_turns=60, timeout=900,
                         return payload
                     except (ReviewError, agents_mod.AgentError, OSError) as exc:
                         retry_cost += getattr(exc, 'cost', 0) or 0
-                        if attempt >= max(0, min(2, options.get('recoveryAttempts', 2))):
-                            raise ReviewError(str(exc), cost=retry_cost) from exc
+                        refused = getattr(exc, 'refused', False)
+                        if refused or attempt >= max(0, min(2, options.get('recoveryAttempts', 2))):
+                            raise ReviewError(str(exc), cost=retry_cost, refused=refused) from exc
             finally:
                 durations[tag] = round(time.monotonic() - task_started, 3)
 
@@ -416,6 +419,8 @@ def review(meta, files, agent_names, cwd, model=None, max_turns=60, timeout=900,
                                          "cost_usd": meta_out.get("cost_usd"),
                                          "retries": meta_out.get("retries", 0),
                                          "salvaged": bool(meta_out.get("salvaged"))}
+                        if meta_out.get("refusedModel"):
+                            per_task[tag]["refusedModel"] = meta_out["refusedModel"]
                         if meta_out.get("salvaged"):
                             errors.append("%s: 턴 예산 소진 후 부분 결과" % tag)
                         coverage["integrationCompleted" if integration else "completed"] += 1
@@ -534,8 +539,31 @@ def _invoke(cmd, prompt, cwd, timeout, env_extra=None):
     return out or "", err or "", proc.returncode
 
 
+# 안전 분류기가 요청을 막았을 때 한 번 바꿔 돌릴 모델. 분류기는 모델마다 달라서, sonnet 이
+# 30번 내리 막힌 묶음(c2#10124 의 제품 안내 문서 diff)을 opus 는 매번 통과했다.
+REFUSAL_MODEL = "opus"
+
+
 def _run(prompt, cwd, model, max_turns, timeout, tag, tools=ALLOWED_TOOLS,
          key="findings", mcp=None):
+    """한 작업을 돌린다. 분류기가 막으면 같은 모델로 되풀이하지 않고 모델을 한 번 바꾼다."""
+    try:
+        return _run_model(prompt, cwd, model, max_turns, timeout, tag, tools, key, mcp)
+    except ReviewError as exc:
+        if not exc.refused or REFUSAL_MODEL in (model or ""):
+            raise
+        try:
+            payload = _run_model(prompt, cwd, REFUSAL_MODEL, max_turns, timeout, tag, tools, key, mcp)
+        except ReviewError as again:
+            again.cost += exc.cost
+            raise
+        meta = payload.setdefault("_meta", {})
+        meta["cost_usd"] = (meta.get("cost_usd") or 0) + exc.cost
+        meta["refusedModel"] = model
+        return payload
+
+
+def _run_model(prompt, cwd, model, max_turns, timeout, tag, tools, key, mcp):
     # Stable machine-readable task identity for the menu-bar session list.
     prompt = "<!-- review-bot-task: %s -->\n%s" % (tag, prompt)
     cmd = ["claude", "-p", "--output-format", "json", "--model", model] + HARDENING
@@ -558,10 +586,14 @@ def _run(prompt, cwd, model, max_turns, timeout, tag, tools=ALLOWED_TOOLS,
         cmd += ["--allowedTools", ",".join(allow)]
     out, err, rc = _invoke(cmd, prompt, cwd, timeout, env_extra)
     envelope = _envelope(out)
+    spent = float((envelope or {}).get("total_cost_usd") or 0.0)
+    if (envelope or {}).get("stop_reason") == "refusal":
+        raise ReviewError("안전 분류기가 요청을 막음 (%s): %s"
+                          % (model, str(envelope.get("result") or "").strip()[:200]),
+                          cost=spent, refused=True)
     if rc == 0 and envelope:
         return _finish(envelope, tag, key)
 
-    spent = float((envelope or {}).get("total_cost_usd") or 0.0)
     sid = (envelope or {}).get("session_id")
     # 턴 예산을 다 쓰면 claude 는 결과 없이 비정상 종료한다 (stop_reason=tool_use).
     # 세션은 남아 있으므로 툴 없이 한 턴만 이어 붙여 지금까지 본 것으로 답하게 한다.
@@ -756,8 +788,8 @@ def judge(meta, payload, findings, allowed_events, model="sonnet", timeout=180, 
             break
         except ReviewError as exc:
             retry_cost += exc.cost or 0
-            if attempt == 2:
-                raise ReviewError(str(exc), cost=retry_cost) from exc
+            if exc.refused or attempt == 2:
+                raise ReviewError(str(exc), cost=retry_cost, refused=exc.refused) from exc
     places, dispositions, drop_reasons = {}, {}, {}
     for p in out.get("findings") or []:
         if isinstance(p, dict) and isinstance(p.get("id"), int):
