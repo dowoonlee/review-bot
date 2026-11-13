@@ -97,6 +97,15 @@ struct MenuBarView: View {
                     }
                 }
             }
+            if !store.queue.isEmpty {
+                // 다음에 볼 것 — 직접 요청해 줄 세운 리뷰.
+                HStack(spacing: 6) {
+                    Image(systemName: "list.number").f(.caption2).foregroundStyle(.secondary)
+                    Text("다음 " + store.queue.prefix(3).map { "#\($0.number)" }.joined(separator: " → ")
+                         + (store.queue.count > 3 ? " 외 \(store.queue.count - 3)건" : ""))
+                        .f(.caption2, digits: true).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
             if store.live.isEmpty && store.current == nil {
                 Text("리뷰 중 — 세션 준비하는 중").f(.caption).foregroundStyle(.secondary)
             }

@@ -308,6 +308,9 @@ class TestEvidenceTests(unittest.TestCase):
         rewrite = {'id': 'test-2', 'name': '마이그레이션 왕복', 'status': 'passed', 'required': True}
         self.assertEqual(runtime.approval_block(dict(GOOD, tests=[original, rewrite])), '')
         self.assertIn('통과 근거 없음', runtime.approval_block(dict(GOOD, tests=[original])))
+        # #9864: a baseline was executed on head and base; the message must not read as "not run".
+        self.assertIn('실행했으나 base 에서도 같은 명령이 실패', runtime.approval_block(dict(GOOD, tests=[original])))
+        self.assertNotIn('실행 검증이 필요', runtime.approval_block(dict(GOOD, tests=[original])))
         self.assertIn('통과 근거 없음', runtime.approval_block(dict(GOOD, tests=[original, dict(rewrite, name='다른 검사')])))
 
     def test_reports_reject_entities_and_unrepresented_collection_error(self):
@@ -625,3 +628,139 @@ class ReviewerRecoveryTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class FollowUpTests(unittest.TestCase):
+    """#9864: what is still missing is acted on while the worktree and a container can
+    still be had, not written into the draft after both are gone."""
+
+    E2E = 'cd web && pnpm exec playwright test --config mock.config.ts menu.spec.ts'
+    PLAN = {'testsApplicable': True, 'visualApplicable': False, 'setup': '',
+            'tests': [{'name': 'unit', 'command': 'cd api && uv run pytest tests'},
+                      {'name': 'e2e', 'command': E2E, 'scopeReason': '메뉴 순서'}],
+            'start': '', 'browser': '', 'scenarios': [], 'limitations': []}
+
+    def collect(self, report_readable=True):
+        def run(container, spec, cfg):
+            if 'pytest' in spec['command']:
+                return dict(spec, status='passed', exitCode=0)
+            if not spec.get('report'):
+                return dict(spec, status='failed', exitCode=1, output='Error: feedback bar not found')
+            if not report_readable:
+                return dict(spec, status='failed', exitCode=1, reportError='no such file')
+            return dict(spec, status='failed', exitCode=1, cases=[
+                {'id': 'menu.spec.ts::new chat', 'status': 'passed'},
+                {'id': 'menu.spec.ts::pro mode', 'status': 'failed', 'failure': 'x', 'message': 'feedback bar'}])
+
+        def baseline(meta, plan, evidence, cwd, cfg, env, status):
+            for test in evidence['tests']:
+                if test['status'] == 'failed' and not test.get('baselineAttempted') and not test.get('reportError'):
+                    test['baselineAttempted'] = True
+                    for case in test.get('cases', []):
+                        if case['status'] == 'failed':
+                            case['status'] = 'baseline'
+                    test['status'] = 'baseline'
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(reviewer, 'STATE_DIR', tmp), \
+                mock.patch.object(runtime, '_plan', return_value=copy.deepcopy(self.PLAN)) as plan, \
+                mock.patch.object(runtime, '_provision', return_value={}), \
+                mock.patch.object(runtime.Container, 'close'), \
+                mock.patch.object(runtime, '_baseline', side_effect=baseline), \
+                mock.patch.object(runtime, '_test', side_effect=run) as test:
+            result = runtime.collect(META, [], tmp, {})
+        runtime._LIVE_CONTAINERS.clear()
+        return result, plan, test
+
+    def test_required_baseline_without_report_is_rerun_per_case_and_no_longer_blocks(self):
+        result, plan, test = self.collect()
+        self.assertEqual(plan.call_count, 1)  # The follow-up reruns the accepted plan; it does not replan.
+        commands = [call.args[1]['command'] for call in test.call_args_list]
+        self.assertEqual(len(commands), 3)  # unit, e2e, e2e with a report: unit is reused.
+        self.assertIn('--reporter=list,junit', commands[2])
+        self.assertIn('PLAYWRIGHT_JUNIT_OUTPUT_NAME=/work/results/followup-', commands[2])
+        self.assertTrue(commands[2].endswith(self.E2E + ' --reporter=list,junit'))
+        self.assertEqual(result['followUps'][0]['adopted'], True)
+        self.assertEqual([a.get('followUp') for a in result['attempts']], [None, 'junit-report'])
+        e2e = next(t for t in result['tests'] if t['name'] == 'e2e')
+        self.assertEqual((e2e['status'], e2e['required'], e2e['scopeReason']), ('baseline', True, '메뉴 순서'))
+        self.assertEqual(runtime.approval_block(result), '')
+
+    def test_follow_up_that_cannot_read_its_report_keeps_the_first_evidence(self):
+        result, _, test = self.collect(report_readable=False)
+        self.assertEqual(test.call_count, 3)
+        self.assertEqual(result['followUps'][0]['adopted'], False)
+        self.assertIn('no such file', result['followUps'][0]['reason'])
+        e2e = next(t for t in result['tests'] if t['name'] == 'e2e')
+        self.assertEqual((e2e['status'], e2e['command']), ('baseline', self.E2E))
+        self.assertIn('실행했으나 base 에서도 같은 명령이 실패', runtime.approval_block(result))
+
+    def test_report_is_added_only_where_the_runner_takes_the_flags(self):
+        added = runtime.with_report({'id': 'test-1', 'command': 'cd a && NODE_OPTIONS=x pnpm exec vitest run src/a.test.ts'})
+        self.assertEqual(added['report'], 'results/followup-test-1.xml')
+        self.assertTrue(added['command'].endswith('--reporter=default --reporter=junit --outputFile.junit=/work/results/followup-test-1.xml'))
+        self.assertTrue(runtime.with_report({'id': 't', 'command': 'python -m pytest tests'})['command'].endswith(
+            ' --junitxml=/work/results/followup-t.xml'))
+        for command in ('pnpm type-check', 'pnpm test', 'pytest tests | tee log', 'pytest tests; true',
+                        'pytest tests --junitxml=/work/results/a.xml', 'pytest tests && echo done',
+                        'pnpm exec playwright test --reporter=line'):
+            with self.subTest(command=command):
+                self.assertIsNone(runtime.with_report({'id': 't', 'command': command}))
+        self.assertIsNone(runtime.with_report({'id': 't', 'command': 'pytest tests', 'report': 'results/a.xml'}))
+
+    def test_no_follow_up_when_something_else_blocks_or_the_command_is_optional(self):
+        e2e = {'id': 'test-1', 'name': 'e2e', 'command': self.E2E, 'status': 'baseline', 'required': True}
+        evidence = dict(GOOD, plan=self.PLAN, tests=GOOD['tests'] + [e2e])
+        self.assertEqual(runtime.report_gaps(evidence), [e2e])
+        self.assertEqual(runtime.report_gaps(dict(evidence, tests=evidence['tests'] + [
+            {'id': 'test-2', 'name': 'broken', 'command': 'pytest x', 'status': 'failed', 'required': True}])), [])
+        self.assertEqual(runtime.report_gaps(dict(evidence, tests=GOOD['tests'] + [dict(e2e, required=False)])), [])
+        self.assertEqual(runtime.report_gaps(dict(evidence, limitations=['setup failed'])), [])
+        with mock.patch.object(runtime, '_collect_once', return_value=evidence) as once:
+            runtime.collect(META, [], '/tmp', {'reportFollowUp': False})
+        self.assertEqual(once.call_count, 1)
+
+    def test_failed_reviews_are_rerun_once_and_successful_ones_reused(self):
+        retry = runpy.run_path(str(BOT))['_retry_failed_reviews']
+        first = {'_tasks': {'batch-001-a': {'findings': []}}, 'errors': ['batch-001-b: JSON 없음'],
+                 '_meta': {'cost_usd': 2, 'agents': {'batch-001-a': {'findings': 0, 'cost_usd': 1.5},
+                                                      'batch-001-b': {'error': 'JSON 없음', 'cost_usd': 0.5}}}}
+        again = {'_tasks': {'batch-001-a': {'findings': [], '_meta': {'reused': True}}, 'batch-001-b': {'findings': []}},
+                 'errors': [], '_meta': {'cost_usd': 0.7, 'agents': {'batch-001-a': {'findings': 0, 'cost_usd': 0},
+                                                                     'batch-001-b': {'findings': 1, 'cost_usd': 0.7}}}}
+        run = mock.Mock(return_value=again)
+        payload, record = retry(first, run)
+        run.assert_called_once_with(first['_tasks'])
+        self.assertEqual((record['tasks'], record['recovered']), (['batch-001-b'], ['batch-001-b']))
+        self.assertEqual(payload['_meta']['cost_usd'], 2.7)
+        self.assertEqual(payload['_meta']['agents']['batch-001-a']['cost_usd'], 1.5)
+        # Nothing failed: nothing is rerun.
+        run = mock.Mock()
+        self.assertEqual(retry(again, run), (None, None))
+        run.assert_not_called()
+        # Still failing, or the rerun itself failing, keeps the first result and its cost is counted.
+        still = dict(again, _meta={'cost_usd': 0.4, 'agents': {'batch-001-b': {'error': 'JSON 없음'}}})
+        payload, record = retry(first, mock.Mock(return_value=still))
+        self.assertEqual((payload, record['recovered'], record['cost_usd']), (None, [], 0.4))
+        payload, record = retry(first, mock.Mock(side_effect=reviewer.ReviewError('boom', cost=0.2)))
+        self.assertEqual((payload, record['recovered'], record['cost_usd']), (None, [], 0.2))
+
+    def test_only_findings_whose_verification_failed_are_verified_again(self):
+        retry = runpy.run_path(str(BOT))['_retry_failed_verifications']
+        ok = {'title': 'ok', '_verify': {'verdict': 'TRUE_POSITIVE'}}
+        lost = {'title': 'lost', '_verify': {'error': '시간 초과'}}
+        gone = {'title': 'gone', '_verify': {'error': '시간 초과'}}
+        stuck = {'title': 'stuck', '_verify': {'error': '시간 초과'}}
+
+        def run(pending):
+            self.assertEqual([f['title'] for f in pending], ['lost', 'gone', 'stuck'])
+            return ([dict(pending[0], _verify={'verdict': 'TRUE_POSITIVE'}), dict(pending[2], _verify={'error': '또 실패'})],
+                    [dict(pending[1], _verify={'verdict': 'FALSE_POSITIVE'})], 0.3)
+        kept, rejected, record = retry([lost, ok, gone, stuck], run)
+        self.assertEqual([(f['title'], f['_verify'].get('verdict')) for f in kept],
+                         [('lost', 'TRUE_POSITIVE'), ('ok', 'TRUE_POSITIVE'), ('stuck', None)])
+        self.assertEqual([f['title'] for f in rejected], ['gone'])
+        self.assertNotIn('_retry', kept[0])
+        self.assertEqual((record['findings'], record['resolved'], record['refuted'], record['cost_usd']), (3, 2, 1, 0.3))
+        self.assertEqual(retry([ok], mock.Mock()), ([ok], [], None))
+        kept, rejected, record = retry([lost], mock.Mock(side_effect=reviewer.ReviewError('boom')))
+        self.assertEqual((kept, rejected, record['resolved']), ([lost], [], 0))

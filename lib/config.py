@@ -50,6 +50,8 @@ DEFAULTS = {
         # 에이전트를 동시에 띄운다. 메모리가 빠듯하면 false 로 내린다.
         "parallel": True,
         "recoveryAttempts": 2,  # 실패한 리뷰만 최대 두 번 보완
+        # 워크트리를 치우기 전에, 실패한 검토와 반증 호출이 실패한 지적을 한 번 더 돌린다.
+        "followUp": True,
 
         # 이 확장자만 리뷰 대상으로 본다. 비우면 전부.
         "includeExts": [],
@@ -62,6 +64,9 @@ DEFAULTS = {
         "runtime": {
             "enabled": True,
             "recoveryAttempts": 2,  # 실행 환경/계획 실패 복구; 성공한 명령 재사용
+            # base 에서도 실패한 필수 명령이 케이스별 보고서 없이 끝나면, 보고서를 붙여
+            # 새 컨테이너에서 그 명령만 한 번 더 돌린다(pytest·vitest·playwright).
+            "reportFollowUp": True,
             "model": "sonnet",
             "maxTurns": 40,
             "planTimeoutSec": 600,

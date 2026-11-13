@@ -317,8 +317,10 @@ struct PendingDetailView: View {
                     } label: { Label("GitHub 에서 열기", systemImage: "arrow.up.forward.square") }
                     Button {
                         confirming = true
-                    } label: { Label("지금 재리뷰", systemImage: "sparkle.magnifyingglass") }
-                        .disabled(store.busy != nil || store.health == .running || !pr.watched)
+                    } label: { Label(store.health == .running ? "재리뷰 예약" : "지금 재리뷰", systemImage: "sparkle.magnifyingglass") }
+                        // 봇이 다른 PR 을 보는 중이어도 요청할 수 있다 — 대기열에 들어간다.
+                        .disabled(store.draftLocked(pr.repo, pr.number) || !pr.watched)
+                    QueueBadge(repo: pr.repo, number: pr.number)
                 }
                 .buttonStyle(.bordered)
 
@@ -349,7 +351,8 @@ struct PendingDetailView: View {
             }
             Button("취소", role: .cancel) {}
         } message: {
-            Text("리뷰어 두 개가 처음부터 다시 돌고, 게시 모드면 결과가 실제로 GitHub 에 올라갑니다.")
+            Text("리뷰어가 처음부터 다시 돌고, 게시 모드면 결과가 실제로 GitHub 에 올라갑니다."
+                 + (store.health == .running ? "\n\n봇이 다른 PR 을 보는 중이라 대기열에 들어가고, 하던 리뷰가 끝나면 이어서 시작합니다." : ""))
         }
     }
 
@@ -402,6 +405,28 @@ struct PendingDetailView: View {
         case "draft": "초안만 있음 — 다음 틱에 재리뷰"
         case "new": "아직 리뷰 안 함"
         default: "감시 대상 아님"
+        }
+    }
+}
+
+/// 이 PR 이 대기열에 있으면 순번과 취소 버튼을 보인다.
+struct QueueBadge: View {
+    @Environment(BotStore.self) private var store
+    let repo: String
+    let number: Int
+
+    var body: some View {
+        if let position = store.queuePosition(repo, number) {
+            HStack(spacing: 4) {
+                Label("대기열 \(position)번째", systemImage: "list.number")
+                    .f(.caption).foregroundStyle(.secondary)
+                Button {
+                    Task { await store.cancelQueued(repo, number) }
+                } label: { Image(systemName: "xmark.circle") }
+                    .buttonStyle(.borderless)
+                    .help("대기열에서 뺍니다")
+                    .disabled(store.busy != nil)
+            }
         }
     }
 }
@@ -671,11 +696,13 @@ struct DraftDetailView: View {
 
             Button {
                 Task { await store.review(draft.repo, draft.number) }
-            } label: { Label("다시 리뷰", systemImage: "arrow.clockwise") }
-                .disabled(store.busy != nil || store.health == .running)
+            } label: { Label(store.health == .running ? "다시 리뷰 예약" : "다시 리뷰", systemImage: "arrow.clockwise") }
+                // 봇이 다른 PR 을 보는 중이어도 요청할 수 있다 — 대기열에 들어간다.
+                .disabled(store.draftLocked(draft.repo, draft.number))
                 .help(draft.overridden != nil
                       ? "바꿔 둔 게시 방식(\(eventLabel(draft.event ?? "COMMENT")))으로 방향을 정한 채 다시 리뷰합니다"
-                      : "")
+                      : (store.health == .running ? "봇이 다른 PR 을 보는 중입니다 — 대기열에 넣고, 하던 리뷰가 끝나면 이어서 봅니다" : ""))
+            QueueBadge(repo: draft.repo, number: draft.number)
 
             // 읽어 보니 봇의 판정과 다르게 올리고 싶을 때 — 승인·코멘트·변경 요청 중
             // 지금 것을 뺀 나머지를 고른다. 파일만 바뀌고 올라가는 건 여전히 위의

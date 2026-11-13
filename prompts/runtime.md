@@ -28,7 +28,11 @@ import 뿐 아니라 conftest 와 테스트가 파일 경로로 적재하는 다
 파일 mtime 을 재는 테스트도 컨테이너 파일시스템에서는 어긋날 수 있습니다.
 전체 스위트를 넣을 때는 변경 대상 테스트와 **별도 항목**으로 두어, 환경 실패가
 대상 테스트의 증거를 가리지 않게 하세요. head 에서 실패한 명령은 봇이 base 에서
-한 번 더 돌려 같은 테스트가 base 에서도 실패하는지 비교합니다(실패 원인이 달라도 기존 실패로 봅니다). 테스트별 JUnit 보고서 없이 명령 전체 실패만으로 baseline으로 간주하지 않습니다.
+한 번 더 돌려 같은 테스트가 base 에서도 실패하는지 비교합니다(실패 원인이 달라도 기존 실패로 봅니다).
+JUnit 보고서가 없는 명령은 케이스가 아니라 명령 전체의 출력으로 비교합니다. 실패 출력이
+base 와 같으면 명령 전체가 baseline 이 되고, 새 오류 줄이 있거나 비교할 오류 줄이 없으면
+실패로 남습니다. 이때는 같은 명령에서 통과한 케이스가 근거로 잡히지 않으므로, 필수 명령이
+baseline 이 되면 통과 근거가 없어 승인이 막힙니다. JUnit 을 지원하는 도구에는 report 를 붙이세요.
 작업 디렉터리는 /work이고 모든 shell은 bash -e -o pipefail입니다.
 Node/npm, Python, pip, uv, Chromium과 /opt/review-browser/node_modules/playwright가 제공됩니다.
 Python/pip는 /opt/review-python의 독립 환경이고 uv도 PATH에 있습니다.
@@ -102,6 +106,11 @@ CI (테스트 이름이 관련 검증을 포함하는지 확인):
   report는 /work 기준 상대 경로입니다. 보고서 디렉터리는 setup에서 만드세요.
   예: command="cd service && uv run pytest tests/test_contract.py --junitxml=/work/results/contract.xml",
   report="results/contract.xml". lint/빌드처럼 JUnit을 지원하지 않으면 report를 생략합니다.
+  playwright test(mock-e2e 포함)도 JUnit을 지원하므로 report를 생략하지 마세요. 저장소 설정의
+  reporter를 고치지 말고 명령에서 지정합니다.
+  예: command="cd services/frontend && PLAYWRIGHT_JUNIT_OUTPUT_NAME=/work/results/e2e.xml pnpm exec playwright test --config playwright.mock.config.ts some.spec.ts --reporter=list,junit",
+  report="results/e2e.xml". 보고서가 없으면 한 케이스의 기존 실패가 명령 전체의 실패가 되어,
+  같은 명령에서 통과한 나머지 케이스가 근거로 잡히지 않습니다.
 - 동일 head의 CI가 필요한 동작을 검증하면 중복 실행하지 않아도 됩니다. tests의 ciChecks에
   제공된 체크의 정확한 이름 배열, ciReason에 워크플로/테스트를 읽고 확인한 검증 범위를 적으세요.
   진행 중 체크도 매핑해 두면 완료 후 재판정에 사용됩니다. 매핑이 없으면 CI green만으로 대체하지 않습니다.

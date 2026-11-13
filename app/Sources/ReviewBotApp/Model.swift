@@ -20,6 +20,7 @@ enum BotPaths {
     static var state: URL { root.appending(path: "state") }
     static var current: URL { state.appending(path: "current.json") }
     static var schedule: URL { state.appending(path: "schedule.json") }
+    static var queue: URL { state.appending(path: "queue.json") }
     static var runsLog: URL { state.appending(path: "runs.jsonl") }
     static var botLog: URL { state.appending(path: "bot.log") }
     /// 날짜별 틱 로그가 사는 곳. 사람이 읽는 것은 이쪽이다.
@@ -504,6 +505,18 @@ struct ReviewCoverage: Decodable, Sendable {
     var integrationCompleted: Int
 }
 
+/// 봇이 바쁠 때 요청해 줄을 서 있는 리뷰 (state/queue.json 의 한 줄).
+struct QueuedReview: Decodable, Sendable, Equatable {
+    var repo: String
+    var number: Int
+    var enqueuedAt: String?
+
+    /// 1부터 세는 순번. 줄에 없으면 nil.
+    static func position(in queue: [QueuedReview], repo: String, number: Int) -> Int? {
+        queue.firstIndex { $0.repo == repo && $0.number == number }.map { $0 + 1 }
+    }
+}
+
 struct CurrentRun: Decodable, Sendable {
     var repo: String
     var number: Int
@@ -518,6 +531,8 @@ struct CurrentRun: Decodable, Sendable {
     var agents: [String]?
     var startedAt: String?
     var url: String?
+    /// 지금 어느 단계인지 — 봇이 진행 로그 한 줄을 그대로 적어 둔다.
+    var phase: String?
 
     var label: String { "\(repo.split(separator: "/").last.map(String.init) ?? repo)#\(number)" }
     var started: Date? { RunRecord.stamp.date(from: startedAt ?? "") }

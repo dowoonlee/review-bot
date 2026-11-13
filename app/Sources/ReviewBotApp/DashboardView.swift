@@ -109,6 +109,10 @@ struct DashboardView: View {
                     if let by = c.requestedBy {
                         Text("· \(by) 요청").f(.caption).foregroundStyle(.secondary)
                     }
+                    if !store.queue.isEmpty {
+                        Text("· 대기열 \(store.queue.count)건").f(.caption).foregroundStyle(.secondary)
+                            .help(store.queue.map { "\($0.repo)#\($0.number)" }.joined(separator: "\n"))
+                    }
                 }
             } else if let p = store.paused {
                 Text(p.reason.isEmpty ? "일시정지" : p.reason)
@@ -224,6 +228,7 @@ struct DashboardView: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
+                    ReviewQueueSection(selection: $selection)
                     if !store.live.isEmpty {
                         sidebarSection("라이브 세션") {
                             ForEach(store.live) { session in

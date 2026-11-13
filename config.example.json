@@ -52,10 +52,12 @@
       "cpus": 4,
       "baseline": true,
       "recoveryAttempts": 2,
+      "reportFollowUp": true,
       "browserLocale": "ko-KR",
       "minFreeDiskGiB": 3
     },
-    "recoveryAttempts": 2
+    "recoveryAttempts": 2,
+    "followUp": true
   },
   "post": {
     "dryRun": true,

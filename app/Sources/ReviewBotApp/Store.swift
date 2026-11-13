@@ -26,6 +26,8 @@ final class BotStore {
     var drafts: [DraftPayload] = []
     var dryRunLocal: Bool?
     var current: CurrentRun?
+    /// 봇이 바쁠 때 요청해 대기 중인 리뷰. 하던 PR 이 끝나면 앞에서부터 처리된다.
+    var queue: [QueuedReview] = []
     var schedule: Schedule?
 
     var paused: PausedInfo?
@@ -227,7 +229,28 @@ final class BotStore {
         readMode()
         readDrafts()
         readCurrent()
+        readQueue()
         readSchedule()
+    }
+
+    private func readQueue() {
+        guard let data = try? Data(contentsOf: BotPaths.queue),
+              let q = try? JSONDecoder().decode([QueuedReview].self, from: data) else {
+            queue = []; return
+        }
+        queue = q
+    }
+
+    func queuePosition(_ repo: String, _ number: Int) -> Int? {
+        QueuedReview.position(in: queue, repo: repo, number: number)
+    }
+
+    func prioritizeQueued(_ repo: String, _ number: Int) async {
+        await run(["queue", "front", "\(repo)#\(number)"], label: "맨 앞으로")
+    }
+
+    func cancelQueued(_ repo: String, _ number: Int) async {
+        await run(["queue", "remove", "\(repo)#\(number)"], label: "대기열에서 빼기")
     }
 
     private func readSchedule() {
@@ -711,6 +734,7 @@ final class BotStore {
         await run(["forget", "--all"], label: "이력 전체 삭제")
     }
 
+    /// 봇이 쉬고 있으면 바로 돌고, 다른 PR 을 보는 중이면 대기열에 들어간다.
     func review(_ repo: String, _ number: Int) async {
         await runDetached(["review", "\(repo)#\(number)"], label: "재리뷰")
     }

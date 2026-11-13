@@ -1,6 +1,8 @@
+from pathlib import Path
+import runpy
 import unittest
 
-from lib import policy
+from lib import github, policy
 
 
 class DecisionTests(unittest.TestCase):
@@ -53,6 +55,33 @@ class RevivedNitTests(unittest.TestCase):
                 placements = {0: 'drop'}
                 self.assertEqual(policy.revive_verified_nits([finding], placements, reasons), [])
                 self.assertEqual(placements, {0: 'drop'})
+
+    def test_a_verified_design_alternative_survives_the_threshold_and_a_taste_drop(self):
+        # #10151: minSeverity=suggestion cut a verified security design note before the
+        # judge saw it, and the review said "지적 없음".
+        bot = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'review-bot'))
+        patch = '@@ -1,1 +1,2 @@\n ctx\n+new\n'
+        files = {'a.py': {'postable': github.postable_lines(patch), 'added': github.added_lines(patch), 'patch': patch}}
+        make = lambda severity, **verify: {'path': 'a.py', 'line': 2, 'severity': severity, 'title': severity + str(verify),
+                                           'body': 'b', '_verify': verify}
+        design = make('altitude', verdict='TRUE_POSITIVE', impact='concrete')
+        findings = [design, make('nit', verdict='TRUE_POSITIVE'), make('altitude', verdict='TRUE_POSITIVE', error='x'),
+                    make('altitude'), make('suggestion', verdict='TRUE_POSITIVE')]
+        inline, demoted = bot['_validate'](findings, files, {'minSeverity': 'suggestion'})
+        self.assertEqual([f['severity'] for f in inline + demoted], ['suggestion', 'altitude'])
+        # A design alternative is never an inline comment, and never blocks an approval.
+        kept, body, dropped = bot['_apply_placements'](inline + demoted, inline, {})
+        self.assertEqual(([f['severity'] for f in kept], [f['severity'] for f in body]), (['suggestion'], ['altitude']))
+        self.assertEqual(bot['_guard_event']('APPROVE', body, {}, {'allowedEvents': ['APPROVE', 'COMMENT']}), ('APPROVE', ''))
+        text = bot['_summary_body']({}, [], body)
+        self.assertIn('### 설계 대안 — 승인을 막지 않지만 검토를 권합니다', text)
+        self.assertNotIn('지적 없음', text)
+        self.assertNotIn('선택적 개선', text)
+        # The judge dropping it as taste brings it back; a stated reason does not.
+        placements = {0: 'drop'}
+        self.assertEqual(policy.revive_verified_nits([design], placements, {}), [0])
+        self.assertIn('설계 대안', design['dispositionReason'])
+        self.assertEqual(policy.revive_verified_nits([dict(design)], {0: 'drop'}, {0: 'speculation'}), [])
 
     def test_findings_the_judge_kept_are_left_alone(self):
         placements = {0: 'inline'}

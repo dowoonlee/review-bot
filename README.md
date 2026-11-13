@@ -585,12 +585,21 @@ Apple Development. 그 뒤 `./build.sh` 를 다시 돌리면 그 신원을 알�
 | 명령 | 하는 일 |
 |---|---|
 | `review-bot tick` | 한 번 훑는다 — 감지 → 리뷰 → 게시. launchd 가 부르는 것 |
-| `review-bot review owner/repo#123` | PR 하나를 지금 리뷰 (이미 리뷰했어도 다시). PR URL 도 됩니다 |
+| `review-bot review owner/repo#123` | PR 하나를 리뷰 (이미 리뷰했어도 다시). PR URL 도 됩니다. 봇이 다른 PR 을 보는 중이면 거절하지 않고 대기열에 넣습니다 |
+| `review-bot review … --front` | 대기열에 들어갈 때 맨 앞에 세웁니다 |
+| `review-bot queue` | 대기열 조회. `remove <PR>` (취소) · `front <PR>` (맨 앞으로) · `clear` (비우기) · `--json` |
 | `review-bot review … --agents <이름,이름>` | 이번만 그 리뷰어들로. 빠진 관점만 보완할 때 |
 | `review-bot review … --note "…"` | 요약 본문 맨 위에 안내를 답니다 — 왜 또 리뷰가 올라왔는지 |
 | `review-bot review … --rejudge` | 동일 base/head 의 검토를 재사용하고 누락 검증 · 최종 판정만 갱신 |
 | `review-bot review … --force-size` | 크기 상한을 무시하고 리뷰. 승인 제한은 그대로 |
 | `review-bot pause [사유]` / `resume` | 자동 리뷰 정지 / 재개 |
+
+**대기열** — 리뷰는 한 번에 한 건만 돕니다(워크트리·컨테이너를 같이 쓰기 때문). 그래서 봇이
+바쁠 때 사람이 요청한 리뷰는 `state/queue.json` 에 줄을 서고, 일하던 쪽이 PR 하나를 끝낼
+때마다 대기열부터 봅니다. 사람이 요청한 것이 틱이 찾아낸 리뷰 요청보다 먼저입니다.
+틱이 찾는 목록은 매번 GitHub 에서 새로 받으므로 대기열에 넣지 않습니다. PR 하나에 한 자리이고,
+다시 요청하면 자리를 지킨 채 옵션만 바뀝니다. 실패한 요청은 대기열로 돌아가지 않습니다 —
+원인을 보고 다시 요청하세요. 앱에서는 리뷰 중에도 "재리뷰 예약" 을 누를 수 있고, 순번과 취소 버튼이 보입니다.
 
 **게시**
 
@@ -635,7 +644,7 @@ Apple Development. 그 뒤 `./build.sh` 를 다시 돌리면 그 신원을 알�
 |---|---|---|
 | `repos` | `{}` | 감시할 저장소. `localPath` 를 주면 그 클론에서 worktree 를 뜹니다 (빠름). 없으면 봇이 캐시에 blobless clone 을 만듭니다. |
 | `post.dryRun` | `true` | `false` 로 바꿔야 실제로 게시합니다. |
-| `post.minSeverity` | `nit` | `suggestion` 으로 올리면 사소한 지적은 아예 버립니다. |
+| `post.minSeverity` | `nit` | `suggestion` 으로 올리면 사소한 지적은 아예 버립니다. 반증을 통과한 설계 대안(altitude)은 예외로, 문턱과 무관하게 본문의 "설계 대안" 에 실립니다. |
 | `review.agents` | code-reviewer, security-reviewer, silent-failure-hunter | `~/.claude/agents/` 의 서브에이전트 이름. 하나 늘릴 때마다 리뷰 비용도 그만큼 늘어납니다. |
 | `review.model` | `{default: sonnet, security-reviewer: opus}` | 문자열이면 리뷰어 전부 그 모델, dict 면 에이전트별로 갈라 줍니다 (`default` 로 떨어짐). 에이전트 `.md` 의 `model` 은 어느 쪽이든 무시합니다 — 역할 본문만 가져옵니다. |
 | `post.judgeModel` | `opus` | 판정 단계 모델. PR 당 1회뿐이고 `APPROVE`·`REQUEST_CHANGES` 를 내 계정으로 내보내는 자리라 내리지 않았습니다. |
@@ -989,6 +998,20 @@ head 의 오류 줄이 모두 base 출력에도 있으면 `baseline`, 새 오류
 준비합니다. 패키지 매니저는 저장소의 CI/Dockerfile 버전을 따르고, 테스트 경로는
 실제 파일을 확인해 선택합니다. 기본적으로 관련 테스트를 실행하고 전체 스위트는
 구체적인 위험 근거가 있을 때 추가합니다. 확정적인 결함을 통과할 때까지 반복하지 않습니다.
+
+복구와 별개로, 리뷰가 끝나갈 때 남은 공백을 한 번씩 메우는 **후속 지점**이 있습니다. 판정
+단계는 코드를 볼 수 없고 그때는 워크트리도 정리된 뒤라, 부족한 것을 알아도 손쓸 수 없기
+때문입니다. 무엇을 더 할지는 모델에게 묻지 않고 남은 사유에서 기계적으로 정하며, 각각 한 번만 합니다.
+
+| 남은 공백 | 후속 조치 | 설정 |
+|---|---|---|
+| 필수 명령이 케이스별 보고서 없이 base 에서도 실패(baseline) | 같은 명령에 JUnit 보고서를 붙여 새 컨테이너에서 그 명령만 재실행 (pytest·vitest·playwright) | `review.runtime.reportFollowUp` |
+| 리뷰어 검토 실패·부분 결과 | 성공한 검토는 재사용하고 실패한 것만 재실행 | `review.followUp` |
+| 반증 호출이 실패해 확인 없이 남은 지적 | 그 지적만 다시 반증 | `review.followUp` |
+
+후속 조치는 근거를 더할 뿐입니다. 필수 범위·필수 여부·등급을 바꾸지 않고, 재실행한 보고서를
+읽지 못하면 처음 결과를 그대로 둡니다. 보고서 재실행은 그 공백이 승인을 막는 유일한 이유일
+때만 합니다. 한 일은 초안의 "검증 범위"에 "후속 검증/후속 검토/후속 반증"으로 적힙니다.
 
 브라우저 언어는 `review.runtime.browserLocale`(기본 `ko-KR`)로 지정합니다. 브라우저
 실패 시에도 화면·콘솔 오류·본문을 수집하며, 시간 초과 복구 때 계획자가 이를 읽어

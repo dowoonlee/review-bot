@@ -14,10 +14,23 @@ def disposition(finding):
 DROP_REASONS = ('duplicate', 'out-of-scope', 'speculation')
 
 
-def revive_verified_nits(findings, placements, drop_reasons):
-    """A verified P3 improvement is posted as optional, not dropped as a matter of taste.
+def verified_design_note(finding):
+    """A design alternative (altitude) that survived adversarial verification.
 
-    Only nits that survived adversarial verification come back, and only when the
+    It ranks with nits, so a severity threshold meant to cut small talk also cut a
+    verified security design concern before the judge saw it (#10151). It goes to the
+    review body only, never inline, and never blocks an approval by itself.
+    """
+    verify = finding.get('_verify') or {}
+    return (finding.get('severity') == 'altitude' and
+            verify.get('verdict') == 'TRUE_POSITIVE' and not verify.get('error'))
+
+
+def revive_verified_nits(findings, placements, drop_reasons):
+    """A verified P3 improvement or design alternative is posted as optional, not
+    dropped as a matter of taste.
+
+    Only findings that survived adversarial verification come back, and only when the
     judge dropped them for a reason other than duplication, scope or speculation.
     They become optional body notes, so they never block an approval.
     """
@@ -25,11 +38,14 @@ def revive_verified_nits(findings, placements, drop_reasons):
     for index, finding in enumerate(findings):
         verify = finding.get('_verify') or {}
         if (placements.get(index) != 'drop' or drop_reasons.get(index) in DROP_REASONS or
-                verify.get('verdict') != 'TRUE_POSITIVE' or verify.get('error') or finding.get('severity') != 'nit'):
+                verify.get('verdict') != 'TRUE_POSITIVE' or verify.get('error') or
+                finding.get('severity') not in ('nit', 'altitude')):
             continue
         placements[index] = 'body'
-        finding.update(disposition='optional',
-                       dispositionReason='반증을 통과한 선택적 개선입니다. 현재 동작을 깨뜨리지 않아 머지를 막지 않습니다.')
+        finding.update(disposition='optional', dispositionReason=(
+            '반증을 통과한 설계 대안입니다. 머지를 막지 않지만 검토를 권합니다.'
+            if finding.get('severity') == 'altitude' else
+            '반증을 통과한 선택적 개선입니다. 현재 동작을 깨뜨리지 않아 머지를 막지 않습니다.'))
         revived.append(index)
     return revived
 

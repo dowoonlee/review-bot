@@ -5,6 +5,7 @@ credentials, shared dependency directories, published ports or Docker socket.
 Dependency installation has network access; execution is disconnected afterwards.
 An optional disposable Postgres shares only that disconnected network namespace.
 """
+import copy
 import json
 import hashlib
 from pathlib import Path
@@ -232,10 +233,14 @@ def approval_block(evidence):
                 if len(missing) > 8:
                     details += ' 외 %d건' % (len(missing) - 8)
                 missing_checks.append('%s: %s' % (context, details))
+        elif test.get('status') == 'baseline':
+            # Ran on head and on base and failed the same way: say so, or the reader
+            # takes "검증 필요" to mean the bot never ran it (#9864).
+            missing_checks.append('%s: 실행했으나 base 에서도 같은 명령이 실패(baseline) — 통과 근거 없음' % context)
         elif test.get('status') != 'passed':
             missing_checks.append('%s: %s — 통과 근거 없음' % (context, test.get('status', '미실행')))
     if missing_checks:
-        return '변경 핵심 테스트의 실행 검증이 필요합니다. ' + '; '.join(missing_checks)
+        return '변경 핵심 테스트의 통과 근거가 부족합니다. ' + '; '.join(missing_checks)
     gaps = obligations.approval_gaps(evidence, validation.satisfied)
     if gaps:
         return '변경 유형별 필수 검증이 통과하지 않았습니다. ' + '; '.join(gaps)
@@ -1361,7 +1366,7 @@ def uv_tool_hint(test, cwd):
     return None
 
 
-def _collect_once(meta, files, cwd, cfg, progress=None, env=None, previous=None):
+def _collect_once(meta, files, cwd, cfg, progress=None, env=None, previous=None, fixed_plan=None):
     if not cfg.get('enabled', True):
         return {'status': 'disabled'}
     directory = Path(reviewer.STATE_DIR, 'evidence',
@@ -1381,9 +1386,14 @@ def _collect_once(meta, files, cwd, cfg, progress=None, env=None, previous=None)
         if progress:
             progress(message)
     try:
-        status('실행 검증 계획')
-        plan, evidence['requirements'], evidence['cost_usd'] = _checked_plan(
-            meta, files, cwd, cfg, evidence['requirements'], previous, status, directory=directory)
+        if fixed_plan is not None:
+            # A follow-up reruns an accepted plan with one command adjusted; asking the
+            # planner again would let everything else drift.
+            plan, evidence['requirements'] = validation.preserve(fixed_plan, previous)
+        else:
+            status('실행 검증 계획')
+            plan, evidence['requirements'], evidence['cost_usd'] = _checked_plan(
+                meta, files, cwd, cfg, evidence['requirements'], previous, status, directory=directory)
         evidence['plan'] = plan
         evidence.update({k: plan[k] for k in ('testsApplicable', 'visualApplicable', 'limitations', 'scenarios')})
         evidence['notes'] = plan.get('notes') or []
@@ -1432,6 +1442,11 @@ def _collect_once(meta, files, cwd, cfg, progress=None, env=None, previous=None)
             if old and same_environment and validation.satisfied(old) and old.get('source') != 'ci' and old.get('report') == test.get('report'):
                 evidence['tests'].append(dict(old, **test, reused=True))
                 continue
+            if (fixed_plan is not None and old and old.get('status') == 'baseline' and
+                    old.get('command') == test.get('command') and old.get('report') == test.get('report')):
+                # Untouched by the follow-up: the same command on the same head and base.
+                evidence['tests'].append(dict(old, **test, reused=True))
+                continue
             if ci_covers(meta, test.get('ciChecks'), test.get('ciReason')):
                 evidence['tests'].append(dict(test, status='passed', source='ci'))
                 continue
@@ -1469,8 +1484,110 @@ def _collect_once(meta, files, cwd, cfg, progress=None, env=None, previous=None)
     return evidence
 
 
+def _carried(previous, evidence):
+    """This run's outcomes on top of the earlier ones, so a later run reuses what passed."""
+    if not previous:
+        return evidence
+    successful = {validation.check_id(t): t for t in previous.get('tests', [])}
+    successful.update({validation.check_id(t): t for t in evidence.get('tests', [])})
+    return dict(evidence, tests=list(successful.values()))
+
+
+# (runner of the last command segment, shell prefix, flags appended to the command)
+_REPORT_RUNNERS = (
+    (r'playwright\s+test\b', 'export PLAYWRIGHT_JUNIT_OUTPUT_NAME={path} && ', ' --reporter=list,junit'),
+    (r'vitest\b', '', ' --reporter=default --reporter=junit --outputFile.junit={path}'),
+    (r'pytest\b', '', ' --junitxml={path}'),
+)
+
+
+def with_report(test):
+    """The same command with a JUnit report attached, or None when it cannot be added blindly.
+
+    Only a runner that ends the command takes the flags, and nothing that already
+    chooses a reporter or pipes its output is touched.
+    """
+    command = (test.get('command') or '').strip()
+    if (test.get('report') or not command or
+            re.search(r'[;|`]|\$\(|--reporter|--junitxml|--outputFile', command)):
+        return None
+    last = validation.command_core(re.split(r'\s*&&\s*', command)[-1])
+    for runner, prefix, flags in _REPORT_RUNNERS:
+        if re.match(validation._RUNNER + runner, last):
+            name = 'followup-%s.xml' % re.sub(r'[^A-Za-z0-9_-]', '_', str(test.get('id') or uuid.uuid4().hex[:8]))
+            path = '/work/results/' + name
+            return {'command': 'mkdir -p /work/results && ' + prefix.format(path=path) + command + flags.format(path=path),
+                    'report': 'results/' + name}
+    return None
+
+
+def report_gaps(evidence):
+    """Required commands that fail on base too and left no per-case report (#9864).
+
+    Such a command is judged as one unit: its passing cases prove nothing and approval
+    stays blocked. Rerunning it with a report is worth a container only when that is
+    the one thing in the way.
+    """
+    if not evidence or evidence.get('status') != 'complete' or evidence.get('limitations') or not evidence.get('plan'):
+        return []
+    gaps = [t for t in evidence.get('tests') or []
+            if t.get('required', True) and t.get('status') == 'baseline' and not t.get('cases')
+            and t.get('id') and with_report(t)]
+    if not gaps:
+        return []
+    ids = {t['id'] for t in gaps}
+    assumed = dict(evidence, tests=[dict(t, status='passed') if t.get('id') in ids else t
+                                    for t in evidence['tests']])
+    return [] if approval_block(assumed) else gaps
+
+
+def _report_follow_up(meta, files, cwd, cfg, progress, env, evidence, previous, gaps, attempts):
+    """Rerun the gap commands once with a JUnit report, in a fresh container.
+
+    The plan is otherwise unchanged, so every other command, the screens and the
+    required scope are reused as they were. The result replaces the evidence only when
+    the report was actually read; a flag the runner rejected must not turn a
+    pre-existing failure into a new one.
+    """
+    plan = copy.deepcopy(evidence['plan'])
+    targets = {}
+    for test in plan.get('tests', []):
+        if any(g['id'] == test.get('id') for g in gaps):
+            change = with_report(test)
+            if change:
+                test.update(change, repairReason='base 에서도 실패한 필수 명령에 케이스별 JUnit 보고서를 붙여 다시 실행한다. 대상 테스트는 같다.')
+                targets[test['id']] = test.get('name') or test['id']
+    if not targets:
+        return evidence, 0
+    if progress:
+        progress('후속 검증 — 케이스별 보고서를 붙여 재실행: ' + ', '.join(targets.values()))
+    retry_meta = {k: v for k, v in meta.items() if k != '_runtime_retry'}
+    follow = _collect_once(retry_meta, files, cwd, cfg, progress, env,
+                           _carried(previous, evidence), fixed_plan=plan)
+    attempts.append({'directory': follow.get('directory'), 'status': follow['status'], 'followUp': 'junit-report'})
+    results = {t.get('id'): t for t in follow.get('tests', [])}
+    adopted = (follow['status'] == 'complete' and not follow.get('limitations') and
+               all(results.get(i, {}).get('cases') and not results[i].get('reportError') for i in targets))
+    record = {'kind': 'junit-report', 'tests': list(targets.values()), 'adopted': adopted,
+              'directory': follow.get('directory')}
+    if not adopted:
+        problems = list(follow.get('limitations') or []) + [
+            results[i].get('reportError') or '보고서에 케이스가 없음' for i in targets
+            if i in results and (results[i].get('reportError') or not results[i].get('cases'))]
+        record['reason'] = (problems[0] if problems else '후속 실행이 완료되지 않음')[:300]
+    chosen = follow if adopted else evidence
+    chosen['followUps'] = list(evidence.get('followUps') or []) + [record]
+    if progress:
+        progress('후속 검증 반영 — 케이스 단위 결과로 대체' if adopted else
+                 '후속 검증 미반영 — 기존 결과 유지: ' + record['reason'][:120])
+    return chosen, follow.get('cost_usd', 0)
+
+
 def collect(meta, files, cwd, cfg, progress=None, env=None, previous=None):
-    """Recover infrastructure/parse failures twice; successful commands survive retries."""
+    """Recover infrastructure/parse failures twice; successful commands survive retries.
+
+    Then, once, rerun a required command that could not be judged per case.
+    """
     attempts, cost = [], 0.0
     current_meta = dict(meta)
     last = max(0, min(2, cfg.get('recoveryAttempts', 2)))
@@ -1517,17 +1634,17 @@ def collect(meta, files, cwd, cfg, progress=None, env=None, previous=None):
                        bool((evidence.get('visual') or {}).get('missing')))
         if not recoverable:
             break
-        if previous:
-            successful = {validation.check_id(t): t for t in previous.get('tests', [])}
-            successful.update({validation.check_id(t): t for t in evidence.get('tests', [])})
-            previous = dict(evidence, tests=list(successful.values()))
-        else:
-            previous = evidence
+        previous = _carried(previous, evidence)
         current_meta['_runtime_retry'] = {'limitations': evidence.get('limitations'),
                                          'failures': diagnostic[-6000:],
                                          'screenshots': evidence.get('screenshots') or [],
                                          'requirements': evidence.get('requirements') or [],
                                          'plan': evidence.get('plan')}
+    gaps = report_gaps(evidence) if cfg.get('reportFollowUp', True) else []
+    if gaps:
+        evidence, spent = _report_follow_up(current_meta, files, cwd, cfg, progress, env,
+                                            evidence, previous, gaps, attempts)
+        cost += spent
     evidence['attempts'] = attempts
     evidence['cost_usd'] = round(cost, 4)
     if evidence.get('directory'):
