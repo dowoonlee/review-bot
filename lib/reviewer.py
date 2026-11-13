@@ -542,25 +542,32 @@ def _invoke(cmd, prompt, cwd, timeout, env_extra=None):
 # 안전 분류기가 요청을 막았을 때 한 번 바꿔 돌릴 모델. 분류기는 모델마다 달라서, sonnet 이
 # 30번 내리 막힌 묶음(c2#10124 의 제품 안내 문서 diff)을 opus 는 매번 통과했다.
 REFUSAL_MODEL = "opus"
+# 이 프로세스에서 이미 막힌 (워크트리, 작업, 모델). 계획을 다시 세우거나 후속 검토로 같은
+# 작업을 또 부를 때 막힐 모델을 다시 거치지 않는다 — runtime-plan 은 세 번 불려 세 번 막혔다.
+_REFUSED = set()
 
 
 def _run(prompt, cwd, model, max_turns, timeout, tag, tools=ALLOWED_TOOLS,
          key="findings", mcp=None):
     """한 작업을 돌린다. 분류기가 막으면 같은 모델로 되풀이하지 않고 모델을 한 번 바꾼다."""
-    try:
-        return _run_model(prompt, cwd, model, max_turns, timeout, tag, tools, key, mcp)
-    except ReviewError as exc:
-        if not exc.refused or REFUSAL_MODEL in (model or ""):
-            raise
+    spent = 0.0
+    if (cwd, tag, model) not in _REFUSED:
         try:
-            payload = _run_model(prompt, cwd, REFUSAL_MODEL, max_turns, timeout, tag, tools, key, mcp)
-        except ReviewError as again:
-            again.cost += exc.cost
-            raise
-        meta = payload.setdefault("_meta", {})
-        meta["cost_usd"] = (meta.get("cost_usd") or 0) + exc.cost
-        meta["refusedModel"] = model
-        return payload
+            return _run_model(prompt, cwd, model, max_turns, timeout, tag, tools, key, mcp)
+        except ReviewError as exc:
+            if not exc.refused or REFUSAL_MODEL in (model or ""):
+                raise
+            _REFUSED.add((cwd, tag, model))
+            spent = exc.cost
+    try:
+        payload = _run_model(prompt, cwd, REFUSAL_MODEL, max_turns, timeout, tag, tools, key, mcp)
+    except ReviewError as again:
+        again.cost += spent
+        raise
+    meta = payload.setdefault("_meta", {})
+    meta["cost_usd"] = (meta.get("cost_usd") or 0) + spent
+    meta["refusedModel"] = model
+    return payload
 
 
 def _run_model(prompt, cwd, model, max_turns, timeout, tag, tools, key, mcp):

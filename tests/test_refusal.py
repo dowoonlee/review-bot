@@ -15,6 +15,25 @@ REFUSED = (envelope('refusal', 0.25, "API Error: Sonnet 5.5's safeguards flagged
 
 
 class RefusalTest(unittest.TestCase):
+    def setUp(self):
+        reviewer._REFUSED.clear()
+        self.addCleanup(reviewer._REFUSED.clear)
+
+    def test_a_task_refused_once_skips_that_model_when_called_again(self):
+        self.run_with([REFUSED, (envelope(), '', 0)])
+        payload, models = self.run_with([(envelope(cost=0.4), '', 0)])
+        self.assertEqual(models, ['opus'])
+        self.assertEqual(payload['_meta']['refusedModel'], 'sonnet')
+        self.assertEqual(payload['_meta']['cost_usd'], 0.4)
+
+    def test_the_memory_is_per_worktree_and_task(self):
+        self.run_with([REFUSED, (envelope(), '', 0)])
+        with mock.patch.object(reviewer, '_invoke', return_value=(envelope(), '', 0)) as invoke:
+            reviewer._run('p', '/other', 'sonnet', 0, 60, 'batch-003-code-reviewer', tools='')
+            reviewer._run('p', '/tmp', 'sonnet', 0, 60, 'batch-004-code-reviewer', tools='')
+        self.assertEqual([c.args[0][c.args[0].index('--model') + 1] for c in invoke.call_args_list],
+                         ['sonnet', 'sonnet'])
+
     def run_with(self, outputs, model='sonnet'):
         models = []
 
