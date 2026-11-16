@@ -881,10 +881,10 @@ def _triage(meta, plan, evidence, cwd, cfg):
               'mock 하지 않은 요청(route.fallback 으로 넘어가 404 등)이나 준비하지 않은 상태다. crashFile 에 '
               '오류가 난 파일의 저장소 상대 경로를, repair 에 mock 할 요청과 코드에서 확인한 응답 형태를 적으세요. '
               '크래시 파일이 changedFiles 에 있거나 변경 코드가 그 원인이면 defect 입니다.\n'
-              '- harness: 봇이 setup 에서 직접 써 넣은 하네스 파일(스텁·mock 모듈·하네스 설정 등, 저장소에 없는 파일)이 '
-              '실제 구현과 다르게 동작해서 실패했다. plan.setup 에서 그 파일 내용을 읽고, 대체한 실제 구현을 Read 로 '
+              '- harness: 봇이 setup 이나 start 에서 직접 써 넣은 하네스 파일(스텁·mock 모듈·하네스 설정 등, 저장소에 없는 파일)이 '
+              '실제 구현과 다르게 동작해서 실패했다. plan.setup·plan.start 에서 그 파일 내용을 읽고, 대체한 실제 구현을 Read 로 '
               '확인해 차이를 summary 에 적으세요(예: 실제 훅은 상태를 유지해 같은 참조를 돌려주는데 스텁은 렌더마다 '
-              '새 객체를 돌려줘 effect 가 반복 실행됨). harnessFile 에 setup 이 만든 그 파일 경로를, repair 에 setup 에서 '
+              '새 객체를 돌려줘 effect 가 반복 실행됨). harnessFile 에 setup·start 가 만든 그 파일 경로를, repair 에 그 단계에서 '
               '고칠 내용을 적으세요. 실제 구현으로도 같은 실패가 날 수 있으면 defect 입니다.\n'
               '판단이 서지 않으면 defect 입니다. 결함을 script·fixture 로 돌려 승인을 쉽게 만들지 마세요.\n'
               'JSON만 출력: {"cause":"defect|script|fixture|harness","summary":"원인과 근거","screenEvidence":"",'
@@ -903,7 +903,7 @@ def _triage(meta, plan, evidence, cwd, cfg):
     if out.get('cause') == 'fixture' and crash and str(out.get('repair') or '').strip():
         screen = '화면이 뜨기 전 변경되지 않은 %s 에서 크래시 — 스크립트가 준비하지 않은 요청·상태' % crash
     elif out.get('cause') == 'harness' and harness and str(out.get('repair') or '').strip():
-        screen = '봇이 setup 에서 만든 하네스 파일 %s 이(가) 실제 구현과 다르게 동작' % harness
+        screen = '봇이 직접 만든 하네스 파일 %s 이(가) 실제 구현과 다르게 동작' % harness
     elif out.get('cause') != 'script':
         screen = ''
     cleared = (screen and set(failure_shots).issubset(set(out.get('inspected') or [])) and
@@ -925,10 +925,13 @@ def _unchanged_crash_file(path, changed, cwd):
 
 
 def _harness_file(path, plan, changed, cwd):
-    """A file the plan's own setup wrote, as named by the classifier; never a repository file."""
+    """A file the plan's own setup or start wrote, as named by the classifier; never a
+    repository file. A harness written in start (#10238: a page that mounts the screens)
+    was not recognised, so its fault was recorded as a product defect and never repaired."""
     path = str(path or '').strip().removeprefix('./')
     name = Path(path).name
-    if not name or '..' in Path(path).parts or name not in str(plan.get('setup') or ''):
+    written = str(plan.get('setup') or '') + '\n' + str(plan.get('start') or '')
+    if not name or '..' in Path(path).parts or name not in written:
         return ''
     if path in set(changed or []) or Path(cwd, path).is_file():
         return ''
@@ -1178,7 +1181,7 @@ def _browser_baseline(meta, plan, evidence, cwd, cfg, env, status):
                 # suspect and the plan is rebuilt instead of ending here (#10094).
                 visual.update(status='incomplete', complete=False)
                 visual['summary'] += ('\n\nhead 와 base 가 첫 화면을 캡처하기 전에 같은 증상으로 멈췄습니다. 이 PR 이 만든 '
-                                      '차이가 아니므로 봇이 setup 에서 만든 하네스(스텁·mock·설정)가 실제 구현과 다르게 '
+                                      '차이가 아니므로 봇이 setup·start 에서 만든 하네스(스텁·mock·설정)가 실제 구현과 다르게 '
                                       '동작하는지 확인해 고치고, 같은 시나리오를 다시 검증해야 합니다.')
                 evidence['browser']['failureKind'] = 'plan'
         evidence['visual'] = visual
@@ -1715,8 +1718,8 @@ def collect(meta, files, cwd, cfg, progress=None, env=None, previous=None):
             diagnostic += '\n시각 검증 근거 부족: ' + visual.get('summary', '')
         triage = (evidence.get('browser') or {}).get('triage') or {}
         if triage.get('kind') == 'harness':
-            diagnostic += ('\n브라우저 단언 실패는 봇이 setup 에서 만든 하네스 문제로 분류됐습니다(%s). 고칠 점: %s. '
-                           'setup 의 하네스를 실제 구현과 같게 고친 뒤 같은 시나리오를 다시 검증하세요.'
+            diagnostic += ('\n브라우저 단언 실패는 봇이 setup·start 에서 만든 하네스 문제로 분류됐습니다(%s). 고칠 점: %s. '
+                           '그 하네스를 실제 구현과 같게 고친 뒤 같은 시나리오를 다시 검증하세요.'
                            % (triage['screenEvidence'], triage['repair']))
         elif triage.get('cause') == 'script':
             diagnostic += ('\n브라우저 단언 실패는 스크립트 문제로 분류됐습니다(화면 근거: %s). 고칠 점: %s. '

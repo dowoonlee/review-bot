@@ -308,6 +308,11 @@ class TriageTests(unittest.TestCase):
             self.assertIn('useFileContentStub.ts <<', prompt)  # The classifier sees what setup wrote.
             self.assertEqual((result['cause'], result['kind'], result['repair']),
                              ('script', 'harness', 'return a module constant'))
+            # #10238: the harness page was written in start, not setup.
+            started = dict(plan, setup='pnpm install', start=plan['setup'] + '\nexec vite')
+            with mock.patch.object(reviewer, '_run', return_value=harness) as run:
+                self.assertEqual(runtime._triage(META, started, evidence, tmp, {})['kind'], 'harness')
+                self.assertIn('useFileContentStub.ts <<', run.call_args.args[0])
             for change in ({'harnessFile': 'Viewer.tsx'}, {'harnessFile': 'src/other.ts'}, {'harnessFile': ''},
                            {'repair': ''}, {'inspected': ['/tmp/01.png']}, {'_meta': {'salvaged': True}}):
                 with self.subTest(change=change):
@@ -320,7 +325,7 @@ class TriageTests(unittest.TestCase):
             runtime.collect(META, [], '/tmp', {})
         self.assertEqual(collect.call_count, 2)
         self.assertIn('return a module constant', collect.call_args.args[0]['_runtime_retry']['failures'])
-        self.assertIn('setup 의 하네스', collect.call_args.args[0]['_runtime_retry']['failures'])
+        self.assertIn('그 하네스를 실제 구현과 같게', collect.call_args.args[0]['_runtime_retry']['failures'])
 
     def test_failed_assertion_is_replanned_only_when_cleared(self):
         failed = {'status': 'complete', 'tests': [], 'limitations': [], 'screenshots': ['01.png'],
