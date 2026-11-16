@@ -172,6 +172,19 @@ class BaselineTests(unittest.TestCase):
         regression = dict(GOOD, tests=[{'status': 'passed'}, {'status': 'failed', 'baseline': {'exitCode': 0}}])
         self.assertIn('실패', runtime.approval_block(regression))
 
+    def test_base_runs_without_the_test_files_this_pr_adds(self):
+        """base 에 없는 새 테스트 파일 때문에 명령이 시작도 못 하면 기존 파일의 실패를 못 가린다 (#10127)."""
+        command = ('cd /work/svc && uv run python -m pytest -q tests/a/test_new.py '
+                   'tests/b/test_old.py::test_x tests/test_other.py --junitxml=/work/results/r.xml')
+        rewritten, dropped = runtime.base_command(command, ['svc/tests/a/test_new.py', 'svc/app/new.py'])
+        self.assertEqual(rewritten, 'cd /work/svc && uv run python -m pytest -q '
+                         'tests/b/test_old.py::test_x tests/test_other.py --junitxml=/work/results/r.xml')
+        self.assertEqual(dropped, ['tests/a/test_new.py'])
+        # 새 파일이 없으면 그대로, 새 파일만 고른 명령은 줄이면 다른 범위가 되므로 그대로
+        self.assertEqual(runtime.base_command(command, ['svc/app/new.py']), (None, []))
+        self.assertEqual(runtime.base_command('pytest -q tests/a/test_new.py --junitxml=/work/results/r.xml',
+                                              ['svc/tests/a/test_new.py']), (None, []))
+
     def _collect(self, base_fails, merge_base='base0'):
         plan = dict(copy.deepcopy(PLAN), visualApplicable=False,
                     tests=[{'name': 'unit', 'command': 'npm test'},

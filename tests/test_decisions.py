@@ -72,6 +72,16 @@ class RevivedNitTests(unittest.TestCase):
         # A design alternative is never an inline comment, and never blocks an approval.
         kept, body, dropped = bot['_apply_placements'](inline + demoted, inline, {})
         self.assertEqual(([f['severity'] for f in kept], [f['severity'] for f in body]), (['suggestion'], ['altitude']))
+        # #10127: the verifier ranked a confirmed P2 down to P3 and the threshold then
+        # removed it without a trace. It reaches the judge; an ordinary P3 still does not.
+        lowered = make('nit', verdict='TRUE_POSITIVE', severity_was='suggestion')
+        inline, demoted = bot['_validate']([lowered, make('nit', verdict='TRUE_POSITIVE'),
+                                           make('nit', verdict='FALSE_POSITIVE', severity_was='suggestion')],
+                                          files, {'minSeverity': 'suggestion'})
+        self.assertEqual([f['title'] for f in inline + demoted], [lowered['title']])
+        placements = {0: 'drop'}
+        self.assertEqual(policy.revive_verified_nits(inline, placements, {}), [0])
+        self.assertEqual((placements[0], policy.disposition(inline[0])), ('body', 'optional'))
         self.assertEqual(bot['_guard_event']('APPROVE', body, {}, {'allowedEvents': ['APPROVE', 'COMMENT']}), ('APPROVE', ''))
         text = bot['_summary_body']({}, [], body)
         self.assertIn('### 설계 대안 — 승인을 막지 않지만 검토를 권합니다', text)

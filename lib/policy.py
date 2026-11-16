@@ -5,6 +5,11 @@ DISPOSITIONS = ('required', 'optional', 'uncertain')
 
 def disposition(finding):
     value = finding.get('disposition')
+    major = finding.get('severity') in ('blocking', 'suggestion')
+    # A P1/P2 survives only with a present failure, which "optional" denies; calling it
+    # optional let a P2 out as a comment (#10127). The author fixes it or says it is intended.
+    if value == 'optional' and major:
+        return 'uncertain'
     if value in DISPOSITIONS and str(finding.get('dispositionReason') or '').strip():
         return value
     # Old or incomplete findings never acquire permission to approve by omission.
@@ -24,6 +29,19 @@ def verified_design_note(finding):
     verify = finding.get('_verify') or {}
     return (finding.get('severity') == 'altitude' and
             verify.get('verdict') == 'TRUE_POSITIVE' and not verify.get('error'))
+
+
+def downgraded_by_verification(finding):
+    """A P1/P2 the verifier confirmed as real but ranked down to P3.
+
+    Two verifiers read the same facts about one finding and one kept it P2, the other
+    made it P3; the P3 then fell under the severity threshold and vanished without a
+    trace (#10127). The rank may differ between runs, the finding must not disappear:
+    it goes to the judge and is posted as an optional note.
+    """
+    verify = finding.get('_verify') or {}
+    return (finding.get('severity') == 'nit' and verify.get('verdict') == 'TRUE_POSITIVE' and
+            not verify.get('error') and verify.get('severity_was') in ('blocking', 'suggestion'))
 
 
 def revive_verified_nits(findings, placements, drop_reasons):

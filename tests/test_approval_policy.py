@@ -29,13 +29,17 @@ class DecisionTests(unittest.TestCase):
                 'dispositionReason': 'observed impact or optional improvement',
                 'path': 'a.py', 'line': 1, 'title': 'finding', 'body': 'details'}
 
-    def test_optional_p2_approves_without_telling_author_to_fix_before_merge(self):
+    def test_optional_p2_is_posted_as_awaiting_intent_and_requests_changes(self):
+        """판정이 P2 를 optional 로 붙여도 승인·코멘트로 빠져나가지 못한다 (#10127)."""
         f = self.finding('optional')
-        self.assertEqual(self.bot['_guard_event']('APPROVE', [f], {'runtime': GOOD}, self.cfg, 'none'), ('APPROVE', ''))
-        body = self.bot['_summary_body']({}, [f], [], {'event': 'APPROVE'})
-        self.assertIn('선택적 개선', body)
-        self.assertNotIn('머지 전', body)
-        self.assertIn('선택적 개선', self.bot['_comment_body'](f))
+        self.assertEqual(self.bot['_guard_event']('APPROVE', [f], {'runtime': GOOD}, self.cfg, 'none')[0], 'REQUEST_CHANGES')
+        body = self.bot['_summary_body']({}, [f], [], {'event': 'REQUEST_CHANGES'})
+        self.assertNotIn('선택적 개선', body)
+        self.assertIn('확인 필요', self.bot['_comment_body'](f))
+        # P3 는 그대로 선택적 개선으로 승인과 함께 나간다.
+        nit = dict(f, severity='nit')
+        self.assertEqual(self.bot['_guard_event']('APPROVE', [nit], {'runtime': GOOD}, self.cfg, 'none'), ('APPROVE', ''))
+        self.assertIn('선택적 개선', self.bot['_comment_body'](nit))
 
     def test_guarded_summary_leads_with_final_decision(self):
         body = self.bot['_summary_body']({}, [], [], {
@@ -47,11 +51,9 @@ class DecisionTests(unittest.TestCase):
         self.assertNotIn('> **판정** — 승인을', body)
 
     def test_an_unresolved_p2_requests_changes_whether_confirmed_or_awaiting_intent(self):
-        for action, expected in [('required', 'REQUEST_CHANGES'), ('optional', 'COMMENT'), ('uncertain', 'REQUEST_CHANGES')]:
-            self.assertEqual(self.bot['_guard_event']('REQUEST_CHANGES', [self.finding(action)], {}, self.cfg)[0], expected)
-        # A judge that approves or comments over an open P2 does not leave the merge open.
-        for event in ('APPROVE', 'COMMENT'):
-            for action in ('required', 'uncertain'):
+        # "optional" on a P2 is not a way out either (#10127).
+        for event in ('APPROVE', 'COMMENT', 'REQUEST_CHANGES'):
+            for action in ('required', 'optional', 'uncertain'):
                 self.assertEqual(self.bot['_guard_event'](event, [self.finding(action)], {}, self.cfg)[0], 'REQUEST_CHANGES')
         p3 = dict(self.finding('uncertain'), severity='nit')
         self.assertEqual(self.bot['_guard_event']('COMMENT', [p3], {}, self.cfg)[0], 'COMMENT')
@@ -135,6 +137,30 @@ class TestEvidenceTests(unittest.TestCase):
     def cases(self, message='network unavailable'):
         return runtime.parse_junit(('''<testsuite tests="2" failures="1"><testcase classname="contract" name="new_contract"/>
             <testcase classname="contract" name="budget"><failure type="ConnectionError" message="%s">trace</failure></testcase></testsuite>''' % message).encode())
+
+    def test_head_failure_that_passes_on_rerun_is_flaky_not_a_regression(self):
+        """같은 head 가 실행마다 다른 케이스에서 떨어져 매번 회귀 가능성으로 적혔다 (#10127)."""
+        def run(*failed):
+            return runtime.parse_junit(('<testsuite>' + ''.join(
+                '<testcase classname="routes" name="%s">%s</testcase>'
+                % (name, '<failure type="E" message="closed database">t</failure>' if name in failed else '')
+                for name in ('a', 'b', 'c')) + '</testsuite>').encode())
+        head = {'name': 'unit', 'command': 'pytest', 'status': 'failed', 'failureKind': 'test', 'cases': run('a', 'b')}
+        base = {'status': 'failed', 'cases': run('a')}
+        runtime.compare_cases(head, base)
+        self.assertEqual([c['id'] for c in runtime.flaky_suspects(head, base)], ['routes::b'])
+        again = copy.deepcopy(head)
+        runtime.mark_flaky(again, base, {'cases': run('a', 'b')})      # 다시 실패 — 그대로 회귀 후보
+        self.assertEqual((again['status'], [c['status'] for c in again['cases']]), ('failed', ['baseline', 'failed', 'passed']))
+        runtime.mark_flaky(head, base, {'cases': run('a')})            # 다시 통과 — 불안정
+        self.assertEqual((head['status'], [c['status'] for c in head['cases']]), ('baseline', ['baseline', 'flaky', 'passed']))
+        evidence = dict(GOOD, tests=[head])
+        self.assertEqual(runtime.approval_block(evidence), '')
+        # 통과로 세지는 않는다 — 계획이 꼭 집은 케이스면 여전히 미검증이다.
+        self.assertIn('flaky', runtime.approval_block(dict(GOOD, tests=[dict(head, requiredCases=['routes::b'])])))
+        body = runpy.run_path(str(BOT))['_summary_body']({'runtime': evidence}, [], [], {'event': 'APPROVE'})
+        self.assertIn('실행마다 결과가 달라진 테스트', body)
+        self.assertIn('routes::b', body)
 
     def test_partial_passes_survive_same_failure_on_base(self):
         head = {'status': 'failed', 'cases': self.cases(), 'requiredCases': ['contract::new_contract']}

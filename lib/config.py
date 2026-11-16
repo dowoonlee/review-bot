@@ -129,7 +129,7 @@ DEFAULTS = {
         "allowedEvents": ["COMMENT", "APPROVE", "REQUEST_CHANGES"],
         "judgeModel": "opus",
         # 우선순위와 조치를 분리한다. required/uncertain은 승인 차단,
-        # optional은 P2라도 승인과 함께 게시 가능. approveMaxSeverity는 더 이상 사용하지 않는다.
+        # optional은 P3·설계 대안만. P1/P2는 optional이어도 변경 요청. approveMaxSeverity는 더 이상 사용하지 않는다.
         # head 커밋의 CI가 실패하거나 진행 중이면 승인하지 않는다. 체크가 없는 저장소에는
         # 영향이 없다 — 대신 "CI 없음" 이 판정 자료에 실린다.
         "approveNeedsGreenCi": True,

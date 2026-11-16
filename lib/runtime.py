@@ -154,7 +154,10 @@ def evidence_block(meta, for_judge=False):
             '무관한 기존 실패와 테스트가 설계상 skip 한 케이스(skipReason)는 승인을 막지 않지만, '
             '계획이 requiredCases 로 지정한 케이스의 baseline/skip 은 미검증입니다. '
             'failed 에 baseline.exitCode 가 0 이면 '
-            'base 에서는 통과했던 것, 즉 이 PR 이 깨뜨린 것입니다.\n'
+            'base 에서는 통과했던 것, 즉 이 PR 이 깨뜨린 것입니다. '
+            'cases의 flaky 는 head 에서 실패했다가 같은 head 를 다시 돌리자 통과한 케이스입니다. '
+            '회귀의 근거로 쓰지 말고, 통과 근거로도 세지 마세요. rerun 이 있는데도 failed 로 남은 케이스는 '
+            '두 번 실패하고 base 에서는 통과한 것입니다.\n'
             'failureKind 가 plan 이면 봇이 만든 명령·설정이 틀려 테스트가 시작되지 못한 것입니다(diagnosis 가 있으면 그 원인). '
             '"환경에 X 가 없다"로 쓰거나 PR 작성자에게 환경 준비를 요구하지 말고, 봇의 실행 명령 오류로 '
             '그 테스트가 아직 실행되지 않았다고 쓰세요. 같은 명령이 base 에서 실패한 것도 PR 과 무관한 같은 명령 오류입니다.\n'
@@ -402,6 +405,48 @@ def compare_cases(head, base):
                 case.update(baselineDiffers=True, baselineMessage=old.get('message', ''))
     if failed and all(c['status'] == 'baseline' for c in failed):
         head['status'] = 'baseline'
+
+
+def flaky_suspects(head, base):
+    """Failed head cases that the same command passed on base."""
+    passed = {c['id'] for c in base.get('cases') or [] if c['status'] == 'passed' and not c.get('ambiguousId')}
+    return [c for c in head.get('cases') or []
+            if c['status'] == 'failed' and c['id'] in passed and not c.get('ambiguousId')]
+
+
+def mark_flaky(head, base, rerun):
+    """A case that failed on head, passed on base and passes when head runs again is flaky.
+
+    One run on each side cannot tell a regression from a test that fails now and then:
+    the same head failed a different case on each run, and each was written up as a
+    possible regression (#10127). A case that fails again stays failed, now twice.
+    A flaky case is reported, never counted as passed or as executed.
+    """
+    again = {c['id'] for c in rerun.get('cases') or [] if c['status'] == 'passed' and not c.get('ambiguousId')}
+    for case in flaky_suspects(head, base):
+        if case['id'] in again:
+            case['status'] = 'flaky'
+    statuses = {c['status'] for c in head.get('cases') or []}
+    if 'flaky' in statuses and 'failed' not in statuses:
+        head['status'] = 'baseline' if 'baseline' in statuses else 'passed'
+        head.pop('failureKind', None)
+
+
+def _recheck_flaky(evidence, cfg, status, prepare):
+    """Run a head command once more when base passed what it failed."""
+    base_runs = {t.get('id') or t.get('name'): t for t in (evidence.get('baseline') or {}).get('tests') or []}
+    for test in evidence['tests']:
+        base = base_runs.get(test.get('id') or test.get('name'))
+        if test.get('status') != 'failed' or test.get('rerun') or not base or not flaky_suspects(test, base):
+            continue
+        status('재실행 — base 에서 통과한 실패가 되풀이되는지: ' + test['name'])
+        try:
+            rerun = _test(prepare(), test, cfg)
+        except (ExecutionError, OSError, subprocess.SubprocessError) as exc:
+            evidence.setdefault('notes', []).append('실패 재실행을 하지 못해 실패를 그대로 둡니다: ' + str(exc)[:200])
+            continue
+        test['rerun'] = {'exitCode': rerun.get('exitCode'), 'log': rerun.get('log')}
+        mark_flaky(test, base, rerun)
 
 
 def _failure_signature(output):
@@ -1179,6 +1224,42 @@ def _compare_screens(plan, evidence, record, cwd, cfg):
             'cost_usd': out.get('_meta', {}).get('cost_usd') or 0}
 
 
+def base_command(command, added):
+    """(the head command without the test files this PR adds, those files), or
+    (None, []) when the command stays as it is.
+
+    A command naming a file that base does not have never starts there (#10127: pytest
+    exits 4 on the missing path), so the failures in files base does have were never
+    compared. Cases of the dropped files have no base counterpart and stay failed.
+    A command left with no file of the same kind would select a different suite, so it
+    is not rewritten.
+    """
+    def path(token):
+        return token.strip('\'"').split('::')[0]
+    def is_added(token):
+        name = path(token)
+        return '.' in name.rsplit('/', 1)[-1] and any(a == name or a.endswith('/' + name) for a in added)
+    tokens = command.split()
+    dropped = [t for t in tokens if is_added(t)]
+    if not dropped:
+        return None, []
+    kinds = {path(t).rsplit('.', 1)[-1] for t in dropped}
+    kept = [t for t in tokens if t not in dropped]
+    if not any('/' in path(t) and not t.startswith(('-', '/')) and path(t).rsplit('.', 1)[-1] in kinds for t in kept):
+        return None, []
+    rewritten = command
+    for token in dropped:
+        rewritten = re.sub(r'(?<!\S)%s(?!\S)\s*' % re.escape(token), '', rewritten)
+    return rewritten, [path(t) for t in dropped]
+
+
+def _added_files(cwd, base_sha, paths, env=None):
+    """Changed files that do not exist on the merge-base."""
+    return [p for p in paths or [] if subprocess.run(
+        ['git', '-C', cwd, 'cat-file', '-e', '%s:%s' % (base_sha, p)],
+        capture_output=True, timeout=60, env=env).returncode]
+
+
 def _baseline(meta, plan, evidence, cwd, cfg, env, status):
     """Compare test identities and exact failures on the merge-base; retain unknown failures."""
     failed = [t for t in evidence['tests'] if t['status'] == 'failed' and not t.get('baselineAttempted')]
@@ -1195,12 +1276,18 @@ def _baseline(meta, plan, evidence, cwd, cfg, env, status):
         _LIVE_CONTAINERS.add(container.name)
         status('기준선 준비 — base %s 에서 실패한 명령 %d개 재실행' % (record['sha'][:10], len(failed)))
         record.update(_provision(container, record['sha'], cwd, cfg, plan, browser=False))
+        added = _added_files(cwd, record['sha'], evidence.get('changedFiles'), env)
         for test in failed:
             test['baselineAttempted'] = True
             status('기준선 테스트: ' + test['name'])
-            result = _test(container, test, cfg)
-            record['tests'].append(dict(result, name=test['name'], command=test['command']))
+            command, dropped = base_command(test['command'], added)
+            result = _test(container, dict(test, command=command) if command else test, cfg)
+            record['tests'].append(dict(result, name=test['name'], command=command or test['command']))
             test['baseline'] = {'exitCode': result['exitCode'], 'log': result['log']}
+            if result.get('failureKind'):
+                test['baseline']['failureKind'] = result['failureKind']
+            if dropped:
+                test['baseline']['droppedPaths'] = dropped
             compare_cases(test, result)
         record['status'] = 'complete'
     except (ExecutionError, OSError, subprocess.SubprocessError, ValueError, TypeError) as exc:
@@ -1439,10 +1526,15 @@ def _collect_once(meta, files, cwd, cfg, progress=None, env=None, previous=None,
                 status('격리 환경 준비·의존성 설치')
                 evidence.update(_provision(container, meta['headRefOid'], cwd, cfg, plan,
                                            browser=plan['visualApplicable'] and not visual_ci and not visual_reused))
+        unstarted = {t.get('id') for t in (previous.get('baseline') or {}).get('tests') or []
+                     if t.get('failureKind') == 'plan'}
         for test in plan['tests']:
             old = outcomes.get(test['id'])
             if old and same_environment and old.get('status') == 'failed' and validation.failure_kind(old) == 'test':
-                evidence['tests'].append(dict(old, **test, reused=True))
+                kept = dict(old, **test, reused=True)
+                if old.get('id') in unstarted or (old.get('baseline') or {}).get('failureKind') == 'plan':
+                    kept.pop('baselineAttempted', None)  # Base never ran it; that is not a comparison.
+                evidence['tests'].append(kept)
                 continue
             if old and same_environment and validation.satisfied(old) and old.get('source') != 'ci' and old.get('report') == test.get('report'):
                 evidence['tests'].append(dict(old, **test, reused=True))
@@ -1459,6 +1551,7 @@ def _collect_once(meta, files, cwd, cfg, progress=None, env=None, previous=None,
             status('로컬 테스트: ' + test['name'])
             evidence['tests'].append(_test(container, test, cfg))
         _baseline(meta, plan, evidence, cwd, cfg, env, status)
+        _recheck_flaky(evidence, cfg, status, lambda: prepare() or container)
         if plan['visualApplicable'] and not visual_ci and not visual_reused:
             prepare()
             status('앱 실행·브라우저 상호작용·화면 캡처')

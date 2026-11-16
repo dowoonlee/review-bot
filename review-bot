@@ -177,9 +177,24 @@ def _scope_findings(findings, files_by_path, strict=True):
     return kept, dropped
 
 
+def _under_threshold(f, post_cfg):
+    """등급 문턱(post.minSeverity) 아래라 판정까지 가지 않는 지적인가.
+
+    문턱은 사소한 지적을 줄이려고 둔 것이다. 설계 대안은 등급 순위가 nit 과 같아
+    함께 걸러졌고, 반증까지 통과한 보안 설계 지적이 판정 단계에 닿지도 못한 채
+    "지적 없음" 으로 승인됐다 (#10151). 반증이 P2 를 P3 로 낮춘 지적도 같은 길로
+    흔적 없이 사라졌다 (#10127). 둘은 문턱과 무관하게 판정까지 보낸다.
+    """
+    sev = (f.get("severity") or "suggestion").lower()
+    if sev not in SEV:
+        sev = "suggestion"
+    f = dict(f, severity=sev)
+    return (SEV[sev] < SEV.get(post_cfg.get("minSeverity") or "nit", 1)
+            and not policy.verified_design_note(f) and not policy.downgraded_by_verification(f))
+
+
 def _validate(findings, files_by_path, post_cfg):
     """모델이 준 findings 를 (inline 가능, 요약으로 강등) 으로 가른다."""
-    min_sev = SEV.get(post_cfg.get("minSeverity") or "nit", 1)
     inline, demoted, seen = [], [], set()
 
     for f in findings:
@@ -192,11 +207,7 @@ def _validate(findings, files_by_path, post_cfg):
         sev = (f.get("severity") or "suggestion").lower()
         if sev not in SEV:
             sev = "suggestion"
-        # 문턱은 사소한 지적을 줄이려고 둔 것이다. 설계 대안은 등급 순위가 nit 과 같아
-        # 함께 걸러졌고, 반증까지 통과한 보안 설계 지적이 판정 단계에 닿지도 못한 채
-        # "지적 없음" 으로 승인됐다 (#10151). 반증을 통과한 설계 대안은 문턱과 무관하게
-        # 판정까지 보낸다 — 인라인이 아니라 본문에만 실리므로 작성자가 닫을 것도 늘지 않는다.
-        if SEV[sev] < min_sev and not policy.verified_design_note(dict(f, severity=sev)):
+        if _under_threshold(f, post_cfg):
             continue
         f = dict(f, severity=sev, title=title, body=body)
 
@@ -291,7 +302,7 @@ def _summary_body(payload, inline, demoted, verdict=None, note=None):
     elif verdict.get("reason"):
         parts += ["", "> **판정** — %s" % verdict["reason"]]
 
-    # Priority and action are separate: optional P2 feedback can accompany approval.
+    # Priority and action are separate, but only a P3 or design note can be optional.
     must = []
     for action, heading in (("required", "머지 전 수정 필요"),
                             ("uncertain", "사람 확인 필요"),
@@ -324,6 +335,20 @@ def _summary_body(payload, inline, demoted, verdict=None, note=None):
             parts.append(line)
         if len(preexisting) > 10:
             parts.append("- 그 외 %d건" % (len(preexisting) - 10))
+
+    flaky = [(test, case) for test in (payload.get("runtime") or {}).get("tests") or []
+             for case in test.get("cases") or [] if case.get("status") == "flaky"]
+    if flaky:
+        parts += ["", "### 실행마다 결과가 달라진 테스트",
+                  "", "head 에서 한 번 실패했다가 같은 head 를 다시 돌리자 통과했습니다. base 에서는 통과합니다. "
+                  "회귀로 보지 않았지만, 이 PR 이 만든 간헐 실패일 수 있어 적어 둡니다.", ""]
+        for test, case in flaky[:10]:
+            line = "- `%s` (%s)" % (case["id"], test.get("name", ""))
+            if case.get("message"):
+                line += "\n  - 첫 실행: " + _one_line(case["message"])
+            parts.append(line)
+        if len(flaky) > 10:
+            parts.append("- 그 외 %d건" % (len(flaky) - 10))
 
     if payload.get("summary"):
         parts += ["", "### 리뷰어 요약", "", payload["summary"]]
@@ -966,6 +991,15 @@ def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge
         for e in payload["errors"]:
             _log("  에이전트 실패: %s" % e[:150])
     inline, demoted = _validate(payload.get("findings") or [], files_by_path, pcfg)
+    # 문턱에서 빠진 지적은 버려진 것도 게시된 것도 아니라 어디에도 세어지지 않았다.
+    # 초안만 보면 리뷰어가 낸 지적이 그것뿐인 것처럼 보인다 (#10127).
+    filtered = [f for f in payload.get("findings") or [] if isinstance(f, dict)
+                and (f.get("title") or "").strip() and (f.get("body") or "").strip()
+                and _under_threshold(f, pcfg)]
+    if filtered:
+        _log("  등급 문턱(%s) 아래 %d건은 판정에 넘기지 않음: %s"
+             % (pcfg.get("minSeverity"), len(filtered),
+                " / ".join((f.get("title") or "")[:40] for f in filtered[:5])))
 
     snapshot = {'identity': identity, 'payload': payload, 'files': files,
                 'title': result.get('title') or meta.get('title') or '',
@@ -1032,7 +1066,7 @@ def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge
     if verdict.get("cost_usd"):
         result["cost_usd"] = round((result.get("cost_usd") or 0) + verdict["cost_usd"], 4)
     result.update(inline=len(inline), demoted=len(demoted), dropped=len(dropped),
-                  event=verdict["event"], reason=verdict["reason"],
+                  filtered=len(filtered), event=verdict["event"], reason=verdict["reason"],
                   summary=payload.get("summary") or "")
 
     def record_decision(event, ci):
@@ -1102,6 +1136,11 @@ def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge
                 fp.write("---\n\n### 판정이 버린 지적 %d건\n" % len(dropped))
                 for f in dropped:
                     fp.write("- [%s] %s\n" % (f["severity"], f["title"]))
+            if filtered:
+                fp.write("---\n\n### 등급 문턱(%s) 아래라 싣지 않은 지적 %d건\n"
+                         % (pcfg.get("minSeverity"), len(filtered)))
+                for f in filtered:
+                    fp.write("- [%s] %s\n" % (f.get("severity"), f.get("title")))
         # 사람이 읽는 .md 옆에 게시용 사본을 남긴다. 검토 후 게시할 때 리뷰를 다시
         # 돌리지 않으려면 지금 만들어진 body 와 인라인 좌표가 그대로 있어야 한다.
         payload_path = store.draft_payload_path(repo, number)
@@ -1115,6 +1154,8 @@ def _process_pr(pr, cfg, state, force=False, mcp=None, force_size=False, rejudge
                 "inline": len(inline), "demoted": len(demoted),
                 "dropped": [{"severity": f.get("severity"), "title": f.get("title")}
                             for f in dropped],
+                "filtered": [{"severity": f.get("severity"), "title": f.get("title")}
+                             for f in filtered],
                 "cost_usd": result.get("cost_usd"),
                 "requestedAt": result.get("requestedAt"),
                 "requestedBy": requester,
