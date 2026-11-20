@@ -69,8 +69,13 @@ REPOSITORY_BOOTSTRAP = (
     'set -e\n'
     'mkdir -p /tmp/apt-archives/partial\n'
     'apt-get -qq -o APT::Sandbox::User=root update\n'
+    # Without CAP_CHOWN dpkg cannot give a file the group its package asks for (tmux's
+    # libutempter0 wants utmp); --force-not-root leaves such files root-owned instead of
+    # failing. dpkg's own output says which package broke, so a failure prints its tail.
     'DEBIAN_FRONTEND=noninteractive apt-get -qq -o APT::Sandbox::User=root '
-    '-o Dir::Cache::Archives=/tmp/apt-archives install -y --no-install-recommends "$@" >/dev/null\n'
+    '-o Dir::Cache::Archives=/tmp/apt-archives -o Dpkg::Options::=--force-not-root '
+    'install -y --no-install-recommends "$@" >/tmp/apt-install.log || '
+    '{ tail -n 40 /tmp/apt-install.log >&2; exit 1; }\n'
     'SCRIPT\n'
     'chmod 0755 /usr/local/bin/review-apt-install'
 )
