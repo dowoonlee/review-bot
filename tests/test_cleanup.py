@@ -80,3 +80,28 @@ class CleanupTests(unittest.TestCase):
                 mock.patch.dict(bot['cmd_forget'].__globals__, {'_log': lambda *_: None}):
             self.assertEqual(bot['cmd_forget'](args, {}), 1)
         self.assertTrue(self.draft.exists())
+
+
+class ForgetUnboundRunTests(unittest.TestCase):
+    """PR 없이 남은 실패 기록(`-#0`)도 앱이 부르는 그대로 지울 수 있어야 한다."""
+
+    def setUp(self):
+        self.bot = runpy.run_path(str(Path(__file__).resolve().parents[1]/'review-bot'))
+
+    def test_dash_target_is_passed_as_positional(self):
+        fix = self.bot['_positional_targets']
+        self.assertEqual(fix(['forget', '-#0', '--at', 'T']), ['forget', '--at', 'T', '--', '-#0'])
+        self.assertEqual(fix(['forget', 'o/r#1', '--at', 'T']), ['forget', 'o/r#1', '--at', 'T'])
+        self.assertEqual(fix(['forget', '--', '-#0']), ['forget', '--', '-#0'])
+
+    def test_forget_removes_only_the_chosen_unbound_run(self):
+        store.write_runs([{'repo': '-', 'number': 0, 'at': 'A', 'error': 'x'},
+                          {'repo': '-', 'number': 0, 'at': 'B', 'error': 'x'},
+                          {'repo': 'o/r', 'number': 1, 'at': 'A'}])
+        args = SimpleNamespace(target='-#0', artifacts=False, dry_run=False, all=False,
+                               at='A', older_than=None, reset=False)
+        with mock.patch.object(store, 'acquire_lock', return_value=True), \
+                mock.patch.object(store, 'release_lock'):
+            self.assertEqual(self.bot['cmd_forget'](args, {}), 0)
+        self.assertEqual([(r['repo'], r['at']) for r in store.read_runs()],
+                         [('-', 'B'), ('o/r', 'A')])

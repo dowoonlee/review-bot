@@ -17,6 +17,7 @@ import glob
 import json
 import os
 import plistlib
+import re
 import shutil
 import signal
 import subprocess
@@ -1903,6 +1904,24 @@ def _parse_target(s):
     raise SystemExit("PR 을 owner/repo#123 또는 PR URL 로 지정하세요")
 
 
+_DASH_TARGET = re.compile(r'^-#\d+$')
+
+
+def _positional_targets(argv):
+    """PR 에 묶이지 않은 기록의 대상(`-#0`)을 옵션이 아니라 대상으로 읽게 한다.
+
+    정찰 실패처럼 PR 없이 남는 기록은 저장소가 `-` 라서 앱이 `forget -#0 --at …` 을
+    부른다. argparse 는 `-` 로 시작하는 인자를 옵션으로 보고 거절하므로, 그런 대상은
+    `--` 뒤로 옮겨 위치 인자로 넘긴다.
+    """
+    if '--' in argv:
+        return argv
+    targets = [a for a in argv if _DASH_TARGET.match(a)]
+    if not targets:
+        return argv
+    return [a for a in argv if not _DASH_TARGET.match(a)] + ['--'] + targets
+
+
 def _narrow(cfg, agent_csv, note):
     """이번 실행에만 적용할 설정 — 리뷰어를 좁히고, 본문에 실을 안내를 단다."""
     out = cfg
@@ -3255,7 +3274,7 @@ def main():
     cp.set_defaults(fn=cmd_cap)
     sub.add_parser("gc").set_defaults(fn=cmd_gc)
     sub.add_parser("doctor").set_defaults(fn=cmd_doctor)
-    args = ap.parse_args()
+    args = ap.parse_args(_positional_targets(sys.argv[1:]))
     if not getattr(args, "fn", None):
         ap.print_help()
         return 0
