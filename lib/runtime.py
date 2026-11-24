@@ -499,6 +499,18 @@ def ci_covers(meta, names, reason):
                    for c in ci.get('checks', [])) for name in names)
 
 
+def ci_replaces(meta, test):
+    """Whether a green CI check may stand in for running this test here.
+
+    A test that carries a diff-derived obligation (covers) or needs a service
+    (requires) is never replaced: the planner names nearby checks such as a graph
+    validator as supporting evidence, and ciReason is prose the bot cannot verify.
+    """
+    if test.get('covers') or test.get('requires'):
+        return False
+    return ci_covers(meta, test.get('ciChecks'), test.get('ciReason'))
+
+
 class ExecutionError(Exception):
     pass
 
@@ -1552,7 +1564,7 @@ def _collect_once(meta, files, cwd, cfg, progress=None, env=None, previous=None,
                 # Untouched by the follow-up: the same command on the same head and base.
                 evidence['tests'].append(dict(old, **test, reused=True))
                 continue
-            if ci_covers(meta, test.get('ciChecks'), test.get('ciReason')):
+            if ci_replaces(meta, test):
                 evidence['tests'].append(dict(test, status='passed', source='ci'))
                 continue
             prepare()
@@ -1771,7 +1783,7 @@ def refresh_ci(evidence, meta):
         # A real local failure remains evidence even when another CI check is green.
         if test and test.get('source') != 'ci':
             tests.append(test)
-        elif ci_covers(meta, spec.get('ciChecks'), spec.get('ciReason')):
+        elif ci_replaces(meta, spec):
             tests.append(dict(spec, status='passed', source='ci'))
         else:
             tests.append(dict(spec, status='not_run'))

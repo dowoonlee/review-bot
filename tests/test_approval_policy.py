@@ -363,6 +363,17 @@ class TestEvidenceTests(unittest.TestCase):
         meta['_ci_evidence']['sha'] = 'old'
         self.assertFalse(runtime.ci_covers(meta, ['unit'], 'scope'))
 
+    def test_ci_never_replaces_obligation_or_service_tests(self):
+        meta = dict(META, _ci_evidence={'sha': 'head', 'state': 'success',
+                                        'checks': [{'name': 'validate-alembic-graph', 'conclusion': 'SUCCESS'}]})
+        spec = {'name': 'roundtrip', 'command': 'alembic downgrade x && alembic upgrade head',
+                'ciChecks': ['validate-alembic-graph'], 'ciReason': '그래프만 검증하므로 별도로 실행한다'}
+        self.assertTrue(runtime.ci_replaces(meta, spec))
+        self.assertFalse(runtime.ci_replaces(meta, dict(spec, covers=['migration-roundtrip'])))
+        self.assertFalse(runtime.ci_replaces(meta, dict(spec, requires=['postgres'])))
+        evidence = {'sha': 'head', 'tests': [], 'plan': {'tests': [dict(spec, covers=['migration-roundtrip'])]}}
+        self.assertEqual(runtime.refresh_ci(evidence, meta)['tests'][0]['status'], 'not_run')
+
     def test_successful_ci_completes_missing_setup_but_does_not_erase_local_failure(self):
         meta = dict(META, _ci_evidence={'sha': 'head', 'state': 'success', 'checks': [{'name': 'unit', 'conclusion': 'SUCCESS'}]})
         spec = {'name': 'unit', 'command': 'pytest', 'ciChecks': ['unit'], 'ciReason': 'workflow runs exact changed test'}
